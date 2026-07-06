@@ -269,3 +269,23 @@ Key outputs:
 - `actions.csv`: one row per decoded corrective action, with Delta PQ/DQ/SQ/AJI.
 - `images.csv`: per-image action counts.
 - `summary.json`: positive/harmful action rates and Delta PQ grouped by target type.
+
+Analyze simple ranking baselines after the oracle finishes:
+
+```bash
+python tools/analyze_oracle_actions.py \
+  --actions_csv ./logs/stainpqr_stage1b/coverage_oracle_stainpms_monuseg/actions.csv
+
+python tools/analyze_oracle_actions.py \
+  --actions_csv ./logs/stainpqr_stage1b/coverage_oracle_stainpms_tnbc/actions.csv
+```
+
+Combined MoNuSeg + TNBC analysis:
+
+```bash
+python tools/analyze_oracle_actions.py \
+  --actions_csv \
+    ./logs/stainpqr_stage1b/coverage_oracle_stainpms_monuseg/actions.csv \
+    ./logs/stainpqr_stage1b/coverage_oracle_stainpms_tnbc/actions.csv \
+  --out_prefix ./logs/stainpqr_stage1b/coverage_oracle_combined_action_analysis
+```
