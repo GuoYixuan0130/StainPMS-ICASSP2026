@@ -190,3 +190,82 @@ Key fields in `stage1a_candidate_audit.json`:
 
 Proceed to the GPU decoder oracle only if at least one candidate family has
 non-trivial recall on the residual error pool.
+
+## Stage 1B: Coverage-Action Decoder Oracle
+
+Goal:
+
+Measure whether residual-coverage candidates actually improve PQ after one
+frozen SAM2 mask-decoder pass. This produces action-level labels for later
+utility/risk learning.
+
+The first oracle is intentionally limited to coverage actions:
+
+```text
+residual H peak outside current predicted coverage
+  -> one positive point prompt
+  -> frozen decoder mask
+  -> insert uncovered region as a new instance
+  -> compute global Delta PQ / DQ / SQ / AJI
+```
+
+### MoNuSeg StainPMS Coverage Oracle
+
+```bash
+python main.py \
+  --stage1_coverage_oracle \
+  --dataset monuseg \
+  --data_path ./data/monuseg \
+  --sam_ckpt ../CA-SAM2-HRC/deliver_ckpts/monuseg_pms_best_pq.pth \
+  --sam_config sam2_hiera_l \
+  --texture --context \
+  --overlap 92 \
+  --test_nms_thr 12 \
+  --b 1 \
+  --oracle_split test \
+  --oracle_artifacts_dir ./logs/stainpqr_stage0/stainpms_monuseg_test \
+  --oracle_out_dir ./logs/stainpqr_stage1b/coverage_oracle_stainpms_monuseg
+```
+
+Debug on the first two images:
+
+```bash
+python main.py \
+  --stage1_coverage_oracle \
+  --dataset monuseg \
+  --data_path ./data/monuseg \
+  --sam_ckpt ../CA-SAM2-HRC/deliver_ckpts/monuseg_pms_best_pq.pth \
+  --sam_config sam2_hiera_l \
+  --texture --context \
+  --overlap 92 \
+  --test_nms_thr 12 \
+  --b 1 \
+  --oracle_split test \
+  --oracle_max_images 2 \
+  --oracle_artifacts_dir ./logs/stainpqr_stage0/stainpms_monuseg_test \
+  --oracle_out_dir ./logs/stainpqr_stage1b/debug_coverage_oracle_stainpms_monuseg
+```
+
+### TNBC StainPMS Coverage Oracle
+
+```bash
+python main.py \
+  --stage1_coverage_oracle \
+  --dataset monuseg \
+  --data_path ./data/tnbc \
+  --sam_ckpt ../CA-SAM2-HRC/deliver_ckpts/tnbc_pms_best_e156.pth \
+  --sam_config sam2_hiera_l \
+  --texture --context \
+  --overlap 32 \
+  --test_nms_thr 12 \
+  --b 1 \
+  --oracle_split test \
+  --oracle_artifacts_dir ./logs/stainpqr_stage0/stainpms_tnbc_test \
+  --oracle_out_dir ./logs/stainpqr_stage1b/coverage_oracle_stainpms_tnbc
+```
+
+Key outputs:
+
+- `actions.csv`: one row per decoded corrective action, with Delta PQ/DQ/SQ/AJI.
+- `images.csv`: per-image action counts.
+- `summary.json`: positive/harmful action rates and Delta PQ grouped by target type.

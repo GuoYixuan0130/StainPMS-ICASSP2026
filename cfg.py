@@ -93,6 +93,21 @@ def parse_args():
     parser.add_argument("--stain_merge_min_distance", default=-1, type=int)
     parser.add_argument("--stain_merge_num_peaks", default=-1, type=int)
 
+    parser.add_argument(
+        "--stage1_coverage_oracle",
+        action="store_true",
+        help="Run StainPQR Stage 1B coverage-action decoder oracle and exit.",
+    )
+    parser.add_argument("--oracle_artifacts_dir", default="", type=str)
+    parser.add_argument("--oracle_out_dir", default="", type=str)
+    parser.add_argument("--oracle_split", default="test", choices=["test", "train"])
+    parser.add_argument("--oracle_max_images", default=0, type=int)
+    parser.add_argument("--oracle_coverage_top_k", default=20, type=int)
+    parser.add_argument("--oracle_coverage_min_distance", default=12, type=int)
+    parser.add_argument("--oracle_coverage_dilate_radius", default=5, type=int)
+    parser.add_argument("--oracle_gt_match_radius", default=8, type=int)
+    parser.add_argument("--oracle_min_added_area", default=8, type=int)
+
     opt = parser.parse_args()
 
     return opt

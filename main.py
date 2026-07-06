@@ -273,6 +273,44 @@ def main():
 
     train_dataset, test_dataset, train_loader, test_loader = build_dataloaders(cfgs, args)
 
+    if cfgs.stage1_coverage_oracle:
+        ckpt = torch.load(cfgs.sam_ckpt, map_location="cpu")
+        if "model1" in ckpt:
+            model1.load_state_dict(ckpt["model1"])
+        else:
+            print(f"[checkpoint] no model1 state found in {cfgs.sam_ckpt}")
+        texture_memory_bank_list = ckpt.get("texture_memory_bank_list", []) or []
+
+        oracle_loader = test_loader
+        if cfgs.oracle_split == "train":
+            train_img_root, train_lbl_root = _train_split_paths(cfgs)
+            oracle_dataset = copy.copy(test_dataset)
+            oracle_dataset.image_root = train_img_root
+            oracle_dataset.label_root = train_lbl_root
+            oracle_dataset.paths = sorted(os.listdir(train_img_root))
+            oracle_loader = DataLoader(
+                oracle_dataset,
+                batch_size=1,
+                shuffle=False,
+                num_workers=cfgs.num_workers,
+                pin_memory=True,
+            )
+            print(f"[stage1-oracle] train split; n={len(oracle_dataset.paths)} from {train_img_root}")
+        else:
+            print(f"[stage1-oracle] test split; n={len(test_loader.dataset)}")
+
+        from stainpqr.coverage_oracle import run_coverage_oracle
+
+        run_coverage_oracle(
+            cfgs,
+            oracle_loader,
+            net,
+            model1_encoder,
+            texture_memory_bank_list,
+            device,
+        )
+        return
+
     if cfgs.eval:
         ckpt = torch.load(cfgs.sam_ckpt, map_location="cpu")
         if "model1" in ckpt:
