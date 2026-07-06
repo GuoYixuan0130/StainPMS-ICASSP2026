@@ -1,3 +1,4 @@
+import json
 import math
 import os
 
@@ -18,6 +19,20 @@ def _safe_image_name(name):
     return str(name)
 
 
+def _as_jsonable(value):
+    if torch.is_tensor(value):
+        value = value.detach().cpu().numpy()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, (list, tuple)):
+        return [_as_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _as_jsonable(item) for key, item in value.items()}
+    return value
+
+
 def _ori_hw(ori_shape):
     if torch.is_tensor(ori_shape):
         arr = ori_shape.detach().cpu().numpy()
@@ -36,9 +51,45 @@ def _refine_sam_masks(cfgs, low_res_multimasks):
     )[:, 0]
 
 
-def _assemble_instance_map(all_boxes, all_scores, all_masks, all_inds, inst_shape, iou_threshold):
+def _dump_eval_artifacts(
+    dump_dir,
+    image_name,
+    gt_inst_map,
+    pred_inst_map,
+    candidate_records,
+    selected_records,
+):
+    os.makedirs(dump_dir, exist_ok=True)
+    stem = os.path.join(dump_dir, image_name)
+    np.save(stem + "_gt.npy", np.asarray(gt_inst_map).astype(np.int32))
+    np.save(stem + "_pred.npy", np.asarray(pred_inst_map).astype(np.int32))
+    meta = {
+        "image_name": image_name,
+        "shape": list(np.asarray(pred_inst_map).shape),
+        "num_candidates": len(candidate_records),
+        "num_selected": len(selected_records),
+        "candidates": candidate_records,
+        "selected": selected_records,
+    }
+    with open(stem + "_meta.json", "w", encoding="utf-8") as f:
+        json.dump(_as_jsonable(meta), f, indent=2)
+
+
+def _assemble_instance_map(
+    all_boxes,
+    all_scores,
+    all_masks,
+    all_inds,
+    inst_shape,
+    iou_threshold,
+    all_records=None,
+    return_records=False,
+):
     if len(all_masks) == 0:
-        return np.zeros(inst_shape, dtype=int)
+        empty = np.zeros(inst_shape, dtype=int)
+        if return_records:
+            return empty, []
+        return empty
 
     all_boxes = torch.as_tensor(all_boxes)
     all_scores = torch.as_tensor(all_scores)
@@ -52,9 +103,10 @@ def _assemble_instance_map(all_boxes, all_scores, all_masks, all_inds, inst_shap
         keep_prior[inds] = False
     keep_prior_t = torch.from_numpy(keep_prior)
 
+    kept_orig_indices = np.where(keep_prior)[0]
     all_boxes = all_boxes[keep_prior_t]
     all_scores = all_scores[keep_prior_t]
-    all_masks = [all_masks[ind] for ind in np.where(keep_prior)[0]]
+    all_masks = [all_masks[ind] for ind in kept_orig_indices]
 
     if len(all_boxes.shape) == 1:
         cross_categories = torch.zeros_like(all_boxes)
@@ -68,9 +120,19 @@ def _assemble_instance_map(all_boxes, all_scores, all_masks, all_inds, inst_shap
     ).numpy()
 
     inst_map = np.zeros(inst_shape, dtype=int)
+    selected_records = []
     for iid, ind in enumerate(keep_by_nms[::-1]):
         if inst_map[all_masks[ind]].all() == 0:
             inst_map[all_masks[ind]] = iid + 1
+            if return_records and all_records is not None:
+                source_idx = int(kept_orig_indices[int(ind)])
+                record = dict(all_records[source_idx])
+                record["source_candidate_index"] = source_idx
+                record["final_id"] = int(iid + 1)
+                record["final_area"] = int(np.asarray(all_masks[ind]).sum())
+                selected_records.append(record)
+    if return_records:
+        return inst_map, selected_records
     return inst_map
 
 
@@ -644,6 +706,7 @@ def validation_on_epoch(
             all_points_scores = []
             all_points_class = []
             processed_boxes = []
+            candidate_records = []
             point_id_map = {}
             next_id = 0
             context_memory_bank_list = []
@@ -835,28 +898,58 @@ def validation_on_epoch(
                         bx1, by1, bx2, by2 = mask_data["bbox"]
                         sx1, sy1, sx2, sy2 = crop_box
                         ori_h, ori_w = _ori_hw(ori_shape)
+                        edge_penalized = False
                         if (
                             (bx1 > margin and abs(bx1 - sx1) <= margin)
                             or (abs(bx2 - ori_h) > margin and abs(bx2 - sx2) <= margin)
                             or (by1 > margin and abs(by1 - sy1) <= margin)
                             or (abs(by2 - ori_w) > margin and abs(by2 - sy2) <= margin)
                         ):
-                            all_scores.append(mask_data["predicted_iou"] * 0.3)
+                            assembly_score = mask_data["predicted_iou"] * 0.3
+                            edge_penalized = True
                         else:
-                            all_scores.append(mask_data["predicted_iou"])
+                            assembly_score = mask_data["predicted_iou"]
 
+                        all_scores.append(assembly_score)
                         all_masks.append(mask_data["segmentation"][:ori_h, :ori_w])
                         all_boxes.append(mask_data["bbox"])
                         all_inds.append(mask_data["inds"])
+                        candidate_records.append(
+                            {
+                                "candidate_index": len(candidate_records),
+                                "bbox": mask_data["bbox"],
+                                "crop_box": [int(v) for v in crop_box],
+                                "predicted_iou": float(mask_data["predicted_iou"]),
+                                "assembly_score": float(assembly_score),
+                                "stability_score": float(mask_data["stability_score"]),
+                                "point": mask_data["point"],
+                                "categories": mask_data["categories"],
+                                "inds": mask_data["inds"],
+                                "edge_penalized": bool(edge_penalized),
+                            }
+                        )
 
-            pred_inst_map = _assemble_instance_map(
-                all_boxes,
-                all_scores,
-                all_masks,
-                all_inds,
-                inst_maps[0].shape,
-                iou_threshold,
-            )
+            if getattr(cfgs, "dump_eval_artifacts_dir", ""):
+                pred_inst_map, selected_records = _assemble_instance_map(
+                    all_boxes,
+                    all_scores,
+                    all_masks,
+                    all_inds,
+                    inst_maps[0].shape,
+                    iou_threshold,
+                    all_records=candidate_records,
+                    return_records=True,
+                )
+            else:
+                pred_inst_map = _assemble_instance_map(
+                    all_boxes,
+                    all_scores,
+                    all_masks,
+                    all_inds,
+                    inst_maps[0].shape,
+                    iou_threshold,
+                )
+                selected_records = []
 
             dump_dir = getattr(cfgs, "dump_baseline_masks_dir", None)
             if dump_dir:
@@ -870,6 +963,18 @@ def validation_on_epoch(
                         new_cov,
                     )
                 np.save(out_path, new_cov)
+
+            artifact_dir = getattr(cfgs, "dump_eval_artifacts_dir", "") or ""
+            if artifact_dir:
+                image_name = _safe_image_name(name)
+                _dump_eval_artifacts(
+                    artifact_dir,
+                    image_name,
+                    inst_maps[0],
+                    pred_inst_map,
+                    candidate_records,
+                    selected_records,
+                )
 
             _append_metric_scores(inst_maps[0], pred_inst_map, score_lists)
 
@@ -1123,6 +1228,8 @@ def mask_process_eval(
                 "segmentation": mask_data["segmentations"][idx],
                 "bbox": mask_data["boxes"][idx].tolist(),
                 "predicted_iou": mask_data["iou_preds"][idx].item(),
+                "stability_score": mask_data["stability_score"][idx].item(),
+                "point": mask_data["points"][idx].tolist(),
                 "categories": mask_data["categories"][idx].tolist(),
                 "inds": mask_data["inds"][idx].tolist(),
             }

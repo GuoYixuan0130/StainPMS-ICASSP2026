@@ -71,6 +71,15 @@ def parse_args():
 
     parser.add_argument("--pms_self_bootstrap", action="store_true")
     parser.add_argument("--dump_baseline_masks_dir", default="", type=str)
+    parser.add_argument(
+        "--dump_eval_artifacts_dir",
+        default="",
+        type=str,
+        help=(
+            "Directory for rich evaluation artifacts used by StainPQR: "
+            "per-image prediction/GT maps plus mask-level assembly metadata."
+        ),
+    )
     parser.add_argument("--baseline_masks_dir", default="", type=str)
     parser.add_argument("--iterative_baseline_refresh_every", default=0, type=int)
     parser.add_argument("--coverage_accumulate", action=argparse.BooleanOptionalAction, default=None)
