@@ -38,9 +38,6 @@ class Criterion(nn.Module):
         pms_object_weight=1.0,
         pms_residual_mask_weight=1.0,
         pms_preserve_loss_coef=1.0,
-        pms_point_loss_coef=0.0,
-        pms_point_reg_weight=1.0,
-        pms_point_cls_weight=1.0,
     ):
         super().__init__()
         self.matcher = matcher
@@ -60,9 +57,6 @@ class Criterion(nn.Module):
         self.pms_object_weight = float(pms_object_weight)
         self.pms_residual_mask_weight = float(pms_residual_mask_weight)
         self.pms_preserve_loss_coef = float(pms_preserve_loss_coef)
-        self.pms_point_loss_coef = float(pms_point_loss_coef)
-        self.pms_point_reg_weight = float(pms_point_reg_weight)
-        self.pms_point_cls_weight = float(pms_point_cls_weight)
 
     def loss_reg(self, outputs, targets, indices, num_points):
         idx = self._get_src_permutation_idx(indices)
@@ -128,66 +122,6 @@ class Criterion(nn.Module):
             loss_dict[key] *= self.loss_weight[key](epoch)
         return loss_dict
 
-    def loss_pms_points(self, outputs, residual_points, epoch):
-        """Auxiliary point-head supervision from residual PMS positives.
-
-        This is intentionally separate from the original CA-SAM2 point loss:
-        it uses only residual positives mined outside coverage, not the
-        preservation prompts. A zero-valued dict is returned when no residual
-        prompts are present so logging keys stay stable.
-        """
-        zero = (outputs["pred_coords"].sum() + outputs["pred_logits"].sum()) * 0.0
-        loss_dict = {
-            "loss_pms_point_reg": zero,
-            "loss_pms_point_cls": zero,
-        }
-        if self.pms_point_loss_coef <= 0:
-            return loss_dict
-
-        device = outputs["pred_coords"].device
-        gt_points = []
-        gt_labels = []
-        gt_nums = []
-        total_points = 0
-        for points in residual_points:
-            if not torch.is_tensor(points):
-                points = torch.as_tensor(points, dtype=torch.float32)
-            points = points.to(device=device, dtype=torch.float32).reshape(-1, 2)
-            gt_points.append(points)
-            gt_labels.append(torch.zeros(points.shape[0], dtype=torch.long, device=device))
-            gt_nums.append(int(points.shape[0]))
-            total_points += int(points.shape[0])
-
-        if total_points == 0:
-            return loss_dict
-
-        targets = {
-            "gt_points": gt_points,
-            "gt_labels": gt_labels,
-            "gt_nums": gt_nums,
-        }
-        num_points = torch.as_tensor([total_points], dtype=torch.float, device=device)
-        if is_dist_avail_and_initialized():
-            torch.distributed.all_reduce(num_points)
-        num_points = torch.clamp(num_points / get_world_size(), min=1).item()
-        indices = self.matcher(outputs, targets)
-
-        base_reg = self.loss_reg(outputs, targets, indices, num_points) * 20
-        base_cls = self.loss_cls(outputs, targets, indices, num_points) * 20
-        loss_dict["loss_pms_point_reg"] = (
-            base_reg
-            * self.loss_weight["loss_reg"](epoch)
-            * self.pms_point_loss_coef
-            * self.pms_point_reg_weight
-        )
-        loss_dict["loss_pms_point_cls"] = (
-            base_cls
-            * self.loss_weight["loss_cls"](epoch)
-            * self.pms_point_loss_coef
-            * self.pms_point_cls_weight
-        )
-        return loss_dict
-
 
 def build_criterion(cfg, device):
     class_weight = torch.ones(cfg.data.num_classes + 1, dtype=torch.float).to(device)
@@ -214,8 +148,5 @@ def build_criterion(cfg, device):
         pms_object_weight=float(getattr(cfg.criterion, "pms_object_weight", 1.0)),
         pms_residual_mask_weight=float(getattr(cfg.criterion, "pms_residual_mask_weight", 1.0)),
         pms_preserve_loss_coef=float(getattr(cfg.criterion, "pms_preserve_loss_coef", 1.0)),
-        pms_point_loss_coef=float(getattr(cfg.criterion, "pms_point_loss_coef", 0.0)),
-        pms_point_reg_weight=float(getattr(cfg.criterion, "pms_point_reg_weight", 1.0)),
-        pms_point_cls_weight=float(getattr(cfg.criterion, "pms_point_cls_weight", 1.0)),
     )
     return criterion, matcher

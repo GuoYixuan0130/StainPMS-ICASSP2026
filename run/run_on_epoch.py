@@ -36,20 +36,9 @@ def _refine_sam_masks(cfgs, low_res_multimasks):
     )[:, 0]
 
 
-def _assemble_instance_map(
-    all_boxes,
-    all_scores,
-    all_masks,
-    all_inds,
-    inst_shape,
-    iou_threshold,
-    return_confidence=False,
-):
+def _assemble_instance_map(all_boxes, all_scores, all_masks, all_inds, inst_shape, iou_threshold):
     if len(all_masks) == 0:
-        inst_map = np.zeros(inst_shape, dtype=int)
-        if return_confidence:
-            return inst_map, np.zeros(inst_shape, dtype=np.float32)
-        return inst_map
+        return np.zeros(inst_shape, dtype=int)
 
     all_boxes = torch.as_tensor(all_boxes)
     all_scores = torch.as_tensor(all_scores)
@@ -79,14 +68,9 @@ def _assemble_instance_map(
     ).numpy()
 
     inst_map = np.zeros(inst_shape, dtype=int)
-    conf_map = np.zeros(inst_shape, dtype=np.float32) if return_confidence else None
     for iid, ind in enumerate(keep_by_nms[::-1]):
         if inst_map[all_masks[ind]].all() == 0:
             inst_map[all_masks[ind]] = iid + 1
-            if conf_map is not None:
-                conf_map[all_masks[ind]] = float(torch.clamp(all_scores[ind], 0.0, 1.0).item())
-    if return_confidence:
-        return inst_map, conf_map
     return inst_map
 
 
@@ -114,15 +98,6 @@ def _accumulate_coverage(prev_map, new_map, overlap_thr=0.5):
         out[add_region] = next_id
         next_id += 1
     return out
-
-
-def _accumulate_confidence(prev_conf, new_conf, decay=1.0):
-    prev = np.nan_to_num(np.asarray(prev_conf, dtype=np.float32), nan=0.0, posinf=1.0, neginf=0.0)
-    new = np.nan_to_num(np.asarray(new_conf, dtype=np.float32), nan=0.0, posinf=1.0, neginf=0.0)
-    if prev.shape != new.shape:
-        return new.clip(0.0, 1.0)
-    decay = float(np.clip(decay, 0.0, 1.0))
-    return np.maximum(prev.clip(0.0, 1.0) * decay, new.clip(0.0, 1.0)).astype(np.float32)
 
 
 def _append_metric_scores(inst_map, pred_map, score_lists):
@@ -168,23 +143,6 @@ def find_nearest_points(pred_coords, points_choose):
         nearest_indices = torch.argmin(distances, dim=0)
         nearest_points.append(pred_points[nearest_indices].unsqueeze(1))
     return nearest_points
-
-
-def _residual_pms_coords(b_coords_batch, b_preserve_counts_batch):
-    if torch.is_tensor(b_preserve_counts_batch):
-        preserve_counts = [int(v.item()) for v in b_preserve_counts_batch]
-    else:
-        preserve_counts = [int(v) for v in b_preserve_counts_batch]
-
-    residual_coords = []
-    for coords, preserve_count in zip(b_coords_batch, preserve_counts):
-        if not torch.is_tensor(coords):
-            coords = torch.as_tensor(coords, dtype=torch.float32)
-        n_pos = int(coords.shape[0])
-        n_preserve = min(max(int(preserve_count), 0), n_pos)
-        n_residual = n_pos - n_preserve
-        residual_coords.append(coords[:n_residual].float())
-    return residual_coords
 
 
 def train_on_epoch(
@@ -448,16 +406,6 @@ def train_on_epoch(
                     continue
 
                 loss_dict = criterion(outputs1, targets, pred, values, gt_inst_masks, epoch)
-
-                point_coef = getattr(criterion, "pms_point_loss_coef", 0.0)
-                if getattr(cfgs, "use_pms", False) and point_coef > 0 and len(b_coords_batch) == batch_size:
-                    residual_point_targets = _residual_pms_coords(
-                        b_coords_batch,
-                        b_preserve_counts_batch,
-                    )
-                    loss_dict.update(
-                        criterion.loss_pms_points(outputs1, residual_point_targets, epoch)
-                    )
 
                 pms_coef = getattr(criterion, "pms_loss_coef", 0.0)
                 if getattr(cfgs, "use_pms", False) and pms_coef > 0 and len(b_coords_batch) == batch_size:
@@ -901,34 +849,20 @@ def validation_on_epoch(
                         all_boxes.append(mask_data["bbox"])
                         all_inds.append(mask_data["inds"])
 
-            dump_prob = bool(getattr(cfgs, "coverage_probabilistic", False))
-            if dump_prob:
-                pred_inst_map, pred_conf_map = _assemble_instance_map(
-                    all_boxes,
-                    all_scores,
-                    all_masks,
-                    all_inds,
-                    inst_maps[0].shape,
-                    iou_threshold,
-                    return_confidence=True,
-                )
-            else:
-                pred_inst_map = _assemble_instance_map(
-                    all_boxes,
-                    all_scores,
-                    all_masks,
-                    all_inds,
-                    inst_maps[0].shape,
-                    iou_threshold,
-                )
-                pred_conf_map = None
+            pred_inst_map = _assemble_instance_map(
+                all_boxes,
+                all_scores,
+                all_masks,
+                all_inds,
+                inst_maps[0].shape,
+                iou_threshold,
+            )
 
             dump_dir = getattr(cfgs, "dump_baseline_masks_dir", None)
             if dump_dir:
                 os.makedirs(dump_dir, exist_ok=True)
                 image_name = _safe_image_name(name)
                 out_path = os.path.join(dump_dir, f"{image_name}.npy")
-                prob_out_path = os.path.join(dump_dir, f"{image_name}_prob.npy")
                 new_cov = pred_inst_map.astype(np.int32)
                 if bool(getattr(cfgs, "coverage_accumulate", False)) and os.path.exists(out_path):
                     new_cov = _accumulate_coverage(
@@ -936,15 +870,6 @@ def validation_on_epoch(
                         new_cov,
                     )
                 np.save(out_path, new_cov)
-                if dump_prob and pred_conf_map is not None:
-                    new_prob = pred_conf_map.astype(np.float32)
-                    if bool(getattr(cfgs, "coverage_accumulate", False)) and os.path.exists(prob_out_path):
-                        new_prob = _accumulate_confidence(
-                            np.load(prob_out_path).astype(np.float32),
-                            new_prob,
-                            decay=float(getattr(cfgs, "coverage_prob_decay", 1.0)),
-                        )
-                    np.save(prob_out_path, new_prob)
 
             _append_metric_scores(inst_maps[0], pred_inst_map, score_lists)
 
