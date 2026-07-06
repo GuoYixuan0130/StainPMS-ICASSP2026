@@ -60,14 +60,6 @@ def _train_split_paths(cfgs):
     raise ValueError(f"Unsupported dataset: {cfgs.dataset}")
 
 
-def sync_train_dataset_coverage_config(cfgs, train_dataset):
-    """Keep runtime self-bootstrap cache settings visible to the train dataset."""
-    train_dataset.baseline_masks_dir = getattr(cfgs, "baseline_masks_dir", "") or ""
-    train_dataset.coverage_probabilistic = bool(
-        getattr(cfgs, "coverage_probabilistic", False)
-    )
-
-
 def refresh_baseline_masks_inplace(
     cfgs,
     args,
@@ -126,7 +118,6 @@ def refresh_baseline_masks_inplace(
     finally:
         cfgs.dump_baseline_masks_dir = saved_dump_dir
 
-    sync_train_dataset_coverage_config(cfgs, train_dataset)
     n_reloaded = train_dataset.reload_baseline_masks()
     epoch_label = "init" if int(epoch) < 0 else f"epoch {epoch}"
     if seg_pq is not None:
@@ -361,7 +352,6 @@ def main():
                 f"accumulate={cfgs.coverage_accumulate}, "
                 f"probabilistic={cfgs.coverage_probabilistic}"
             )
-            sync_train_dataset_coverage_config(cfgs, train_dataset)
 
     iter_refresh_every = int(cfgs.iterative_baseline_refresh_every or 0)
     pms_self_bootstrap = bool(cfgs.pms_self_bootstrap)
