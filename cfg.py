@@ -74,6 +74,10 @@ def parse_args():
     parser.add_argument("--baseline_masks_dir", default="", type=str)
     parser.add_argument("--iterative_baseline_refresh_every", default=0, type=int)
     parser.add_argument("--coverage_accumulate", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--coverage_probabilistic", action="store_true")
+    parser.add_argument("--coverage_prob_threshold", default=-1.0, type=float)
+    parser.add_argument("--coverage_prob_min_residual", default=-1.0, type=float)
+    parser.add_argument("--coverage_prob_decay", default=1.0, type=float)
     parser.add_argument("--pms_start_epoch", default=0, type=int)
 
     parser.add_argument("--stain_baseline_dilate_radius", default=-1, type=int)
@@ -83,6 +87,10 @@ def parse_args():
     parser.add_argument("--stain_merge_aware", action="store_true")
     parser.add_argument("--stain_merge_min_distance", default=-1, type=int)
     parser.add_argument("--stain_merge_num_peaks", default=-1, type=int)
+
+    parser.add_argument("--pms_point_loss_coef", default=-1.0, type=float)
+    parser.add_argument("--pms_point_reg_weight", default=-1.0, type=float)
+    parser.add_argument("--pms_point_cls_weight", default=-1.0, type=float)
 
     opt = parser.parse_args()
 

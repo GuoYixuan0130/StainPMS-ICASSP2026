@@ -93,6 +93,17 @@ criterion = dict(
     pms_baseline_prompts=False,
     pms_preserve_max_prompts=0,
     pms_object_weight=1.0,
+
+    # ICASSP experimental branch: residual PMS prompts can also supervise the
+    # automatic point head. Disabled by default to keep StainPMS unchanged.
+    pms_point_loss_coef=0.0,
+    pms_point_reg_weight=1.0,
+    pms_point_cls_weight=1.0,
+
+    # ICASSP experimental branch: optional soft coverage confidence cache.
+    # Used only when --coverage_probabilistic is enabled.
+    coverage_prob_threshold=0.6,
+    coverage_prob_min_residual=0.05,
 )
 
 test = dict(nms_thr=12, match_dis=12, filtering=True)

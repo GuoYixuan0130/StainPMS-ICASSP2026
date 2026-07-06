@@ -48,30 +48,42 @@ class MONUSEG(Dataset):
         self.hed_alpha = float(getattr(stain_cfg, "hed_alpha", 1.0))
         self.hed_beta = float(getattr(stain_cfg, "hed_beta", 0.0))
         self.hed_gamma = float(getattr(stain_cfg, "hed_gamma", 0.0))
+        pms_mask_coef = float(getattr(stain_cfg, "pms_loss_coef", 0.0))
+        pms_point_coef = float(getattr(stain_cfg, "pms_point_loss_coef", 0.0))
         self.pms_enabled = (
             mode == "train"
             and getattr(args, "use_pms", False)
-            and float(getattr(stain_cfg, "pms_loss_coef", 0.0)) > 0.0
+            and (pms_mask_coef > 0.0 or pms_point_coef > 0.0)
         )
         self.pms_self_bootstrap = bool(getattr(args, "pms_self_bootstrap", False))
         self.pms_gt_match_radius = int(getattr(stain_cfg, "pms_gt_match_radius", 8))
         self.pms_baseline_prompts = bool(getattr(stain_cfg, "pms_baseline_prompts", False))
         self.pms_preserve_max_prompts = int(getattr(stain_cfg, "pms_preserve_max_prompts", 0))
+        self.coverage_probabilistic = bool(getattr(args, "coverage_probabilistic", False))
+        self.coverage_prob_threshold = float(getattr(stain_cfg, "coverage_prob_threshold", 0.6))
+        self.coverage_prob_min_residual = float(getattr(stain_cfg, "coverage_prob_min_residual", 0.05))
         self._need_b = self.pms_enabled
         self.baseline_masks_dir = getattr(args, "baseline_masks_dir", "") or ""
         self._baseline_cache = {}
+        self._coverage_prob_cache = {}
         if self._need_b and self.baseline_masks_dir:
             for p in self.paths:
                 name = p.split(".")[0]
                 npy_path = os.path.join(self.baseline_masks_dir, name + ".npy")
                 if os.path.exists(npy_path):
                     self._baseline_cache[name] = np.load(npy_path).astype(np.int32)
+                prob_path = os.path.join(self.baseline_masks_dir, name + "_prob.npy")
+                if self.coverage_probabilistic and os.path.exists(prob_path):
+                    self._coverage_prob_cache[name] = np.load(prob_path).astype(np.float32)
             if self.pms_enabled and self.pms_self_bootstrap:
                 print("[MONUSEG PMS] self-bootstrap coverage cache active; "
                       "the initial online cache will be populated before epoch 0.")
             else:
                 print(f"[MONUSEG PMS] loaded {len(self._baseline_cache)}/{len(self.paths)} "
                       f"precomputed baseline masks from {self.baseline_masks_dir}")
+            if self.coverage_probabilistic:
+                print(f"[MONUSEG PMS] loaded {len(self._coverage_prob_cache)}/{len(self.paths)} "
+                      "soft coverage confidence maps")
             if self.pms_enabled and self.pms_baseline_prompts:
                 max_msg = "all" if self.pms_preserve_max_prompts <= 0 else str(self.pms_preserve_max_prompts)
                 print(f"[MONUSEG PMS] coverage-preservation prompts enabled; max_per_crop={max_msg}")
@@ -86,14 +98,21 @@ class MONUSEG(Dataset):
             return 0
         n_old = len(self._baseline_cache)
         self._baseline_cache.clear()
+        self._coverage_prob_cache.clear()
         for p in self.paths:
             name = p.split(".")[0]
             npy_path = os.path.join(self.baseline_masks_dir, name + ".npy")
             if os.path.exists(npy_path):
                 self._baseline_cache[name] = np.load(npy_path).astype(np.int32)
+            prob_path = os.path.join(self.baseline_masks_dir, name + "_prob.npy")
+            if self.coverage_probabilistic and os.path.exists(prob_path):
+                self._coverage_prob_cache[name] = np.load(prob_path).astype(np.float32)
         n_new = len(self._baseline_cache)
         print(f"[MONUSEG PMS] reloaded {n_new}/{len(self.paths)} baseline masks "
               f"from {self.baseline_masks_dir} (was {n_old})")
+        if self.coverage_probabilistic:
+            print(f"[MONUSEG PMS] reloaded {len(self._coverage_prob_cache)}/{len(self.paths)} "
+                  "soft coverage confidence maps")
         return n_new
 
     def __len__(self):
@@ -113,6 +132,7 @@ class MONUSEG(Dataset):
         # PMS: stack precomputed baseline mask as 3rd mask channel so
         # albumentations augments it together with image + GT (keeps alignment).
         baseline_attached = False
+        coverage_prob_attached = False
         if self.mode == 'train' and self._need_b and self._baseline_cache:
             name_no_ext = path.split('.')[0]
             baseline = self._baseline_cache.get(name_no_ext)
@@ -121,7 +141,18 @@ class MONUSEG(Dataset):
                     raise ValueError(
                         f"baseline mask shape {baseline.shape} != GT shape {mask.shape[:2]} for {name_no_ext}"
                     )
-                mask = np.concatenate([mask, baseline.astype(mask.dtype)[..., None]], axis=-1)
+                extra_channels = [baseline.astype(mask.dtype)[..., None]]
+                if self.coverage_probabilistic:
+                    coverage_prob = self._coverage_prob_cache.get(name_no_ext)
+                    if coverage_prob is not None:
+                        if coverage_prob.shape != mask.shape[:2]:
+                            raise ValueError(
+                                f"coverage prob shape {coverage_prob.shape} != GT shape {mask.shape[:2]} "
+                                f"for {name_no_ext}"
+                            )
+                        extra_channels.append(coverage_prob.astype(mask.dtype)[..., None])
+                        coverage_prob_attached = True
+                mask = np.concatenate([mask] + extra_channels, axis=-1)
                 baseline_attached = True
 
         if self.mode == 'train':
@@ -223,6 +254,11 @@ class MONUSEG(Dataset):
                 )
                 if can_compute_b:
                     crop_baseline = mask_c[..., 2] if baseline_attached else None
+                    crop_coverage_prob = (
+                        mask_c[..., 3]
+                        if coverage_prob_attached and mask_c.shape[-1] > 3
+                        else None
+                    )
                     gt_r = self.pms_gt_match_radius
                     coords_np, weights_np, inst_ids_np = compute_b_candidates_oncrop(
                         img_c, inst_map,
@@ -241,6 +277,9 @@ class MONUSEG(Dataset):
                         hed_alpha=self.hed_alpha,
                         hed_beta=self.hed_beta,
                         hed_gamma=self.hed_gamma,
+                        coverage_prob_map=crop_coverage_prob,
+                        coverage_prob_threshold=self.coverage_prob_threshold,
+                        coverage_prob_min_residual=self.coverage_prob_min_residual,
                     )
                     pos_mask_np = inst_ids_np > 0
                     pos_coords = coords_np[pos_mask_np]

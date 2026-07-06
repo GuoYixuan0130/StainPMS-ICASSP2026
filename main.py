@@ -143,6 +143,12 @@ def apply_cli_overrides(args, cfgs):
         args.criterion.pms_baseline_prompts = True
     if cfgs.pms_preserve_max_prompts >= 0:
         args.criterion.pms_preserve_max_prompts = int(cfgs.pms_preserve_max_prompts)
+    if cfgs.pms_point_loss_coef >= 0:
+        args.criterion.pms_point_loss_coef = float(cfgs.pms_point_loss_coef)
+    if cfgs.pms_point_reg_weight >= 0:
+        args.criterion.pms_point_reg_weight = float(cfgs.pms_point_reg_weight)
+    if cfgs.pms_point_cls_weight >= 0:
+        args.criterion.pms_point_cls_weight = float(cfgs.pms_point_cls_weight)
 
     if cfgs.stain_baseline_dilate_radius >= 0:
         args.criterion.stain_baseline_dilate_radius = int(cfgs.stain_baseline_dilate_radius)
@@ -158,6 +164,10 @@ def apply_cli_overrides(args, cfgs):
         args.criterion.stain_merge_min_distance = int(cfgs.stain_merge_min_distance)
     if cfgs.stain_merge_num_peaks >= 0:
         args.criterion.stain_merge_num_peaks = int(cfgs.stain_merge_num_peaks)
+    if cfgs.coverage_prob_threshold >= 0:
+        args.criterion.coverage_prob_threshold = float(cfgs.coverage_prob_threshold)
+    if cfgs.coverage_prob_min_residual >= 0:
+        args.criterion.coverage_prob_min_residual = float(cfgs.coverage_prob_min_residual)
 
     if cfgs.test_nms_thr >= 0:
         args.test.nms_thr = int(cfgs.test_nms_thr)
@@ -339,7 +349,8 @@ def main():
                 "[pms-self-bootstrap] enabled: "
                 f"cache={cfgs.baseline_masks_dir}, "
                 f"refresh={cfgs.iterative_baseline_refresh_every}, "
-                f"accumulate={cfgs.coverage_accumulate}"
+                f"accumulate={cfgs.coverage_accumulate}, "
+                f"probabilistic={cfgs.coverage_probabilistic}"
             )
 
     iter_refresh_every = int(cfgs.iterative_baseline_refresh_every or 0)

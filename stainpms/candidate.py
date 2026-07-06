@@ -25,7 +25,7 @@ from typing import Tuple
 
 import numpy as np
 import torch
-from scipy.ndimage import binary_fill_holes
+from scipy.ndimage import binary_fill_holes, maximum_filter
 from skimage.color import rgb2hed
 from skimage.feature import peak_local_max
 from skimage.filters import gaussian, threshold_otsu
@@ -138,6 +138,23 @@ def _instance_map_to_numpy(inst_map) -> np.ndarray:
     return m.astype(np.int32)
 
 
+def _coverage_prob_to_numpy(prob_map) -> np.ndarray:
+    if isinstance(prob_map, torch.Tensor):
+        p = prob_map.detach().cpu().numpy()
+    else:
+        p = np.asarray(prob_map)
+    if p.ndim == 3:
+        if p.shape[0] == 1:
+            p = p[0]
+        elif p.shape[-1] == 1:
+            p = p[..., 0]
+        else:
+            raise ValueError(f"coverage_prob_map must be 2D or singleton 3D, got {p.shape}")
+    p = p.astype(np.float32)
+    p = np.nan_to_num(p, nan=0.0, posinf=1.0, neginf=0.0)
+    return p.clip(0.0, 1.0)
+
+
 def compute_b_candidates_oncrop(
     image,
     inst_map,
@@ -158,6 +175,9 @@ def compute_b_candidates_oncrop(
     hed_alpha: float = 1.0,
     hed_beta: float = 0.0,
     hed_gamma: float = 0.0,
+    coverage_prob_map=None,
+    coverage_prob_threshold: float = 0.6,
+    coverage_prob_min_residual: float = 0.05,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Generate baseline-subtracted, GT-filtered color candidate points B.
 
@@ -223,6 +243,17 @@ def compute_b_candidates_oncrop(
         Weights for Hematoxylin, Eosin, DAB channels in the evidence map.
         Default (1, 0, 0) = legacy H-only behaviour. Set beta and/or gamma
         > 0 to use multi-stain evidence when H-only misses chromatin-weak cells.
+    coverage_prob_map : torch.Tensor or np.ndarray or None
+        Optional soft coverage confidence map in [0, 1]. When provided, PMS
+        uses soft residual evidence evidence * (1 - coverage_prob) instead of
+        hard binary subtraction from baseline_inst_map. This is the ICASSP
+        experimental coverage branch; None preserves StainPMS behaviour.
+    coverage_prob_threshold : float
+        Pixels with dilated coverage probability >= this value are treated as
+        confidently covered and are removed from residual mining.
+    coverage_prob_min_residual : float
+        Minimum residual weight (1 - dilated coverage probability) required for
+        a pixel to remain eligible for candidate mining.
 
     Returns
     -------
@@ -279,13 +310,33 @@ def compute_b_candidates_oncrop(
             raise ValueError(
                 f"baseline_inst_map shape {baseline_bin.shape} != image ({H}, {W})"
             )
-        if baseline_dilate_radius > 0:
-            baseline_dil = binary_dilation(baseline_bin, footprint=disk(baseline_dilate_radius))
-        else:
-            baseline_dil = baseline_bin
-        binary = binary & (~baseline_dil)
 
-    masked = evidence * binary
+    if coverage_prob_map is not None:
+        coverage_prob = _coverage_prob_to_numpy(coverage_prob_map)
+        if coverage_prob.shape != (H, W):
+            raise ValueError(
+                f"coverage_prob_map shape {coverage_prob.shape} != image ({H}, {W})"
+            )
+        if baseline_dilate_radius > 0:
+            coverage_prob = maximum_filter(
+                coverage_prob,
+                footprint=disk(baseline_dilate_radius).astype(bool),
+            )
+        coverage_prob = coverage_prob.clip(0.0, 1.0)
+        residual_weight = (1.0 - coverage_prob).clip(0.0, 1.0)
+        prob_thr = float(np.clip(coverage_prob_threshold, 0.0, 1.0))
+        min_residual = float(np.clip(coverage_prob_min_residual, 0.0, 1.0))
+        binary = binary & (coverage_prob < prob_thr) & (residual_weight >= min_residual)
+        masked = evidence * binary * residual_weight
+    else:
+        if baseline_arr is not None:
+            baseline_bin = baseline_arr > 0
+            if baseline_dilate_radius > 0:
+                baseline_dil = binary_dilation(baseline_bin, footprint=disk(baseline_dilate_radius))
+            else:
+                baseline_dil = baseline_bin
+            binary = binary & (~baseline_dil)
+        masked = evidence * binary
     coords_yx = peak_local_max(
         masked,
         min_distance=min_distance,
