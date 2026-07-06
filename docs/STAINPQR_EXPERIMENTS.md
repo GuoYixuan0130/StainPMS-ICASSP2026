@@ -134,3 +134,59 @@ The error audit should show whether the remaining failures are mostly:
 - merge-like unmatched predictions.
 
 Stage 1 will use these artifacts to build the oracle corrective-action dataset.
+
+## Stage 1A: Candidate Audit Before Decoder Oracle
+
+Goal:
+
+1. Check whether residual hematoxylin peaks outside current predicted coverage
+   hit the remaining FN nuclei.
+2. Check whether internal multi-peak masks cover merge-like predictions.
+3. Check whether raw proxy scores can rank weak/FP selected instances under a
+   small per-image budget.
+
+Run this first on the StainPMS artifacts, because StainPQR is meant to refine
+the StainPMS first-pass output.
+
+### MoNuSeg StainPMS Candidate Audit
+
+```bash
+python tools/stage1_candidate_audit.py \
+  --artifacts_dir ./logs/stainpqr_stage0/stainpms_monuseg_test \
+  --data_path ./data/monuseg \
+  --split test
+```
+
+### TNBC StainPMS Candidate Audit
+
+```bash
+python tools/stage1_candidate_audit.py \
+  --artifacts_dir ./logs/stainpqr_stage0/stainpms_tnbc_test \
+  --data_path ./data/tnbc \
+  --split test
+```
+
+Optional comparison against CA-SAM2 first-pass artifacts:
+
+```bash
+python tools/stage1_candidate_audit.py \
+  --artifacts_dir ./logs/stainpqr_stage0/casam2_monuseg_test \
+  --data_path ./data/monuseg \
+  --split test
+
+python tools/stage1_candidate_audit.py \
+  --artifacts_dir ./logs/stainpqr_stage0/casam2_tnbc_test \
+  --data_path ./data/tnbc \
+  --split test
+```
+
+Key fields in `stage1a_candidate_audit.json`:
+
+- `coverage_recall_fn`: fraction of remaining FNs touched by residual H peaks.
+- `coverage_recall_near_fn`: residual-peak recall on near-threshold FNs.
+- `coverage_recall_missed_fn`: residual-peak recall on low-overlap missed FNs.
+- `merge_peak_recall`: internal multi-peak recall on merge-like predictions.
+- `proxy_topk`: precision/recall of simple proxy ranking at budgets 2/4/8/12.
+
+Proceed to the GPU decoder oracle only if at least one candidate family has
+non-trivial recall on the residual error pool.
