@@ -11,6 +11,18 @@ import scipy.io as sio
 from stainpms.candidate import compute_b_candidates_oncrop, compute_baseline_center_candidates
 
 
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
+
+
+def list_image_files(image_root):
+    return sorted(
+        name
+        for name in os.listdir(image_root)
+        if os.path.isfile(os.path.join(image_root, name))
+        and name.lower().endswith(IMAGE_EXTENSIONS)
+    )
+
+
 class MONUSEG(Dataset):
     def __init__(self, args, cfgs, data_path , load, mode = 'train'):
         self.data_path = data_path
@@ -20,7 +32,7 @@ class MONUSEG(Dataset):
         elif mode == 'test':
             self.image_root = data_path + '/test/images'
             self.label_root = data_path + '/test/labels'
-        self.paths = sorted(os.listdir(self.image_root))
+        self.paths = list_image_files(self.image_root)
         self.mode = mode
         self.crop_size = args.crop_size
         self.overlap = args.overlap

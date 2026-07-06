@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 
 import cfg
 from conf import settings
-from run.dataset.monuseg import MONUSEG
+from run.dataset.monuseg import MONUSEG, list_image_files
 from run.run_on_epoch import train_on_epoch, validation_on_epoch
 from run.utils import create_logger, get_network, set_log_dir
 from sam2_train.modeling.criterion import build_criterion
@@ -90,7 +90,7 @@ def refresh_baseline_masks_inplace(
     refresh_dataset = copy.copy(test_dataset)
     refresh_dataset.image_root = train_img_root
     refresh_dataset.label_root = train_lbl_root
-    refresh_dataset.paths = sorted(os.listdir(train_img_root))
+    refresh_dataset.paths = list_image_files(train_img_root)
     cfgs.dump_baseline_masks_dir = cfgs.baseline_masks_dir
 
     temp_loader = DataLoader(
@@ -307,7 +307,7 @@ def main():
             eval_dataset = copy.copy(test_dataset)
             eval_dataset.image_root = train_img_root
             eval_dataset.label_root = train_lbl_root
-            eval_dataset.paths = sorted(os.listdir(train_img_root))
+            eval_dataset.paths = list_image_files(train_img_root)
             eval_loader = DataLoader(
                 eval_dataset,
                 batch_size=1,
