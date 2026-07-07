@@ -571,3 +571,90 @@ Key outputs:
 - `selected_actions.csv`: selected actions, scores, decode status, and applied
   added area.
 - `<image>_pred.npy`: refined prediction maps for optional qualitative figures.
+
+Current true-replay reading:
+
+- MoNuSeg: `selector_prob_iou_area` at budget 2 improves PQ by about `+0.00068`
+  and beats `missed_like_proxy` at the same budget.
+- TNBC: budget 1 is the useful setting. `selector_prob_added_area` improves PQ
+  by about `+0.00828`, while budget 2 over-corrects and drops most of the gain.
+- In both datasets the gain mainly comes from DQ/FN recovery, while SQ can
+  decrease when inserted masks add FP or lower-quality matches.
+
+Before writing the final Stage 2C table, run these minimal checks:
+
+1. Raw residual-evidence ranking at the same budgets, to prove that selection is
+   needed.
+2. MoNuSeg budget 4 for the learned score, to locate the over-correction point.
+
+MoNuSeg raw residual baseline:
+
+```bash
+rm -rf ./logs/stainpqr_stage2c/monuseg_b2_residual_evidence
+
+python main.py \
+  --stage2_selective_refine \
+  --dataset monuseg \
+  --data_path ./data/monuseg \
+  --sam_ckpt ../CA-SAM2-HRC/deliver_ckpts/monuseg_pms_best_pq.pth \
+  --sam_config sam2_hiera_l \
+  --texture --context \
+  --overlap 92 \
+  --test_nms_thr 12 \
+  --b 1 \
+  --selective_split test \
+  --selective_artifacts_dir ./logs/stainpqr_stage0/stainpms_monuseg_test \
+  --selective_actions_csv ./logs/stainpqr_stage1b/coverage_oracle_stainpms_monuseg/actions.csv \
+  --selective_predictions_csv ./logs/stainpqr_stage2b/coverage_selector_monuseg_train_to_test/predictions.csv \
+  --selective_score residual_evidence \
+  --selective_budget 2 \
+  --selective_out_dir ./logs/stainpqr_stage2c/monuseg_b2_residual_evidence
+```
+
+MoNuSeg learned budget 4:
+
+```bash
+rm -rf ./logs/stainpqr_stage2c/monuseg_b4_selector_prob_iou_area
+
+python main.py \
+  --stage2_selective_refine \
+  --dataset monuseg \
+  --data_path ./data/monuseg \
+  --sam_ckpt ../CA-SAM2-HRC/deliver_ckpts/monuseg_pms_best_pq.pth \
+  --sam_config sam2_hiera_l \
+  --texture --context \
+  --overlap 92 \
+  --test_nms_thr 12 \
+  --b 1 \
+  --selective_split test \
+  --selective_artifacts_dir ./logs/stainpqr_stage0/stainpms_monuseg_test \
+  --selective_actions_csv ./logs/stainpqr_stage1b/coverage_oracle_stainpms_monuseg/actions.csv \
+  --selective_predictions_csv ./logs/stainpqr_stage2b/coverage_selector_monuseg_train_to_test/predictions.csv \
+  --selective_score selector_prob_iou_area \
+  --selective_budget 4 \
+  --selective_out_dir ./logs/stainpqr_stage2c/monuseg_b4_selector_prob_iou_area
+```
+
+TNBC raw residual baseline:
+
+```bash
+rm -rf ./logs/stainpqr_stage2c/tnbc_b1_residual_evidence
+
+python main.py \
+  --stage2_selective_refine \
+  --dataset monuseg \
+  --data_path ./data/tnbc \
+  --sam_ckpt ../CA-SAM2-HRC/deliver_ckpts/tnbc_pms_best_e156.pth \
+  --sam_config sam2_hiera_l \
+  --texture --context \
+  --overlap 32 \
+  --test_nms_thr 12 \
+  --b 1 \
+  --selective_split test \
+  --selective_artifacts_dir ./logs/stainpqr_stage0/stainpms_tnbc_test \
+  --selective_actions_csv ./logs/stainpqr_stage1b/coverage_oracle_stainpms_tnbc/actions.csv \
+  --selective_predictions_csv ./logs/stainpqr_stage2b/coverage_selector_tnbc_train_to_test/predictions.csv \
+  --selective_score residual_evidence \
+  --selective_budget 1 \
+  --selective_out_dir ./logs/stainpqr_stage2c/tnbc_b1_residual_evidence
+```

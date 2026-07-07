@@ -78,6 +78,21 @@ The next stage is Stage 2C selective refinement: rerun the frozen decoder only
 for selected actions, merge the resulting masks into the first-pass prediction,
 and recompute full-image Dice/AJI/DQ/SQ/PQ.
 
+Early Stage 2C true re-decoding results:
+
+| Dataset | Score | Budget | Delta AJI | Delta DQ | Delta SQ | Delta PQ | Takeaway |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| MoNuSeg | `selector_prob_iou_area` | 1 | +0.00149 | +0.00055 | +0.00001 | +0.00044 | positive but conservative |
+| MoNuSeg | `selector_prob_iou_area` | 2 | +0.00259 | +0.00093 | -0.00005 | +0.00068 | best current MoNuSeg replay |
+| MoNuSeg | `missed_like_proxy` | 2 | +0.00231 | +0.00039 | -0.00004 | +0.00027 | learned score improves over rule |
+| TNBC | `selector_prob_added_area` | 1 | +0.00963 | +0.01916 | -0.00572 | +0.00828 | strong correction of missed FNs |
+| TNBC | `missed_like_proxy` | 1 | +0.01063 | +0.01916 | -0.00584 | +0.00818 | rule is very competitive at B1 |
+| TNBC | `selector_prob_added_area` | 2 | +0.00133 | +0.00881 | -0.00669 | +0.00115 | budget 2 over-corrects |
+
+These results support a budgeted selective-correction story: coverage refinement
+mainly increases DQ by recovering missed nuclei, while too many insertions
+increase FP and reduce SQ.
+
 See [docs/STAINPQR_EXPERIMENTS.md](docs/STAINPQR_EXPERIMENTS.md) for the
 current AutoDL workflow.
 
