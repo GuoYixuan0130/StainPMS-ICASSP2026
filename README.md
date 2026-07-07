@@ -11,6 +11,44 @@ StainPMS is a training-time framework for point-prompted SAM2-style nuclei insta
 - Positive, negative, and coverage-preservation prompt supervision for the shared SAM2 mask decoder.
 - Same inference path and cost as the CA-SAM2 baseline for the paper's main setting.
 
+## ICASSP 2026 Direction: StainPQR
+
+This repository is now also being used as the starting point for **StainPQR**:
+Panoptic-Quality Risk-Calibrated Selective Refinement for prompted nuclei
+instance segmentation.
+
+The working hypothesis is that StainPMS has already reduced the broad coverage
+deficit, while the remaining PQ loss is concentrated in a smaller set of
+high-risk actions. StainPQR therefore keeps the StainPMS first-pass model
+frozen, estimates the expected PQ utility of local corrective actions, and only
+spends extra decoder calls on actions that are likely to improve PQ.
+
+Current AutoDL Stage 0/1 findings:
+
+| Dataset | Method | AJI | DQ | SQ | PQ |
+| --- | --- | ---: | ---: | ---: | ---: |
+| MoNuSeg | CA-SAM2 | 0.6436 | 0.8263 | 0.7494 | 0.6199 |
+| MoNuSeg | StainPMS | 0.6667 | 0.8525 | 0.7710 | 0.6577 |
+| TNBC | CA-SAM2 | 0.6220 | 0.8315 | 0.7971 | 0.6634 |
+| TNBC | StainPMS | 0.6471 | 0.8306 | 0.8039 | 0.6681 |
+
+Coverage-action oracle results show why selection is necessary. Executing all
+residual H-peak actions is harmful on average, but actions that truly target
+missed FNs are highly useful:
+
+| Dataset | All coverage positive rate | Missed-FN positive rate | Main takeaway |
+| --- | ---: | ---: | --- |
+| MoNuSeg | 25.7% | 86.7% | Coverage actions help only when they identify missed FNs. |
+| TNBC | 20.4% | 70.8% | Small budgets are essential; blind correction hurts PQ. |
+
+Simple ranking baselines already provide useful references: `decoded_iou_high`,
+`added_area`, and a hand-built `missed_like_proxy` are much stronger than raw
+residual evidence. The next target is a calibrated coverage utility selector
+that beats these rule baselines under budgets 1/2/4.
+
+See [docs/STAINPQR_EXPERIMENTS.md](docs/STAINPQR_EXPERIMENTS.md) for the
+current AutoDL workflow.
+
 ## Repository Layout
 
 ```text
@@ -18,10 +56,15 @@ main.py                         Training and evaluation entry point
 cfg.py                          Command-line options
 args.py                         Model, augmentation, optimizer, and loss config
 stainpms/candidate.py           Stain evidence and residual prompt mining
+stainpqr/                       StainPQR oracle and selective-refinement utilities
 run/dataset/                    Dataset loaders and PMS crop-time prompt assembly
 run/run_on_epoch.py             Training, validation, self-bootstrap refresh, PMS loss branch
 sam2_train/                     SAM2/CA-SAM2 model code
 tools/prep_tnbc.py              TNBC conversion into the MoNuSeg-style loader layout
+tools/analyze_eval_artifacts.py Stage 0 error audit from dumped predictions
+tools/stage1_candidate_audit.py Stage 1A candidate recall audit
+tools/analyze_oracle_actions.py Stage 1B oracle action ranking analysis
+tools/train_coverage_selector.py Train/evaluate the coverage utility selector
 tools/fig2_qualitative_crop.py  Qualitative crop strip used for Figure 2
 docs/REPRODUCIBILITY.md         Detailed reproduction notes
 ```

@@ -289,3 +289,62 @@ python tools/analyze_oracle_actions.py \
     ./logs/stainpqr_stage1b/coverage_oracle_stainpms_tnbc/actions.csv \
   --out_prefix ./logs/stainpqr_stage1b/coverage_oracle_combined_action_analysis
 ```
+
+## Stage 2A: Coverage Utility Selector
+
+Goal:
+
+Train a lightweight selector on Stage 1B oracle labels and compare it against
+the strongest rule baselines. The first model is intentionally small:
+
+```text
+features: residual evidence, decoded IoU, stability, decoded/added area, action rank
+heads: logistic P(Delta PQ > 0) + ridge E[Delta PQ]
+score: P(Delta PQ > 0) * max(E[Delta PQ], 0)
+```
+
+Group-CV on MoNuSeg:
+
+```bash
+python tools/train_coverage_selector.py \
+  --train_actions ./logs/stainpqr_stage1b/coverage_oracle_stainpms_monuseg/actions.csv \
+  --out_dir ./logs/stainpqr_stage2a/coverage_selector_monuseg_cv
+```
+
+Group-CV on TNBC:
+
+```bash
+python tools/train_coverage_selector.py \
+  --train_actions ./logs/stainpqr_stage1b/coverage_oracle_stainpms_tnbc/actions.csv \
+  --out_dir ./logs/stainpqr_stage2a/coverage_selector_tnbc_cv
+```
+
+Cross-dataset checks:
+
+```bash
+python tools/train_coverage_selector.py \
+  --train_actions ./logs/stainpqr_stage1b/coverage_oracle_stainpms_monuseg/actions.csv \
+  --test_actions ./logs/stainpqr_stage1b/coverage_oracle_stainpms_tnbc/actions.csv \
+  --out_dir ./logs/stainpqr_stage2a/coverage_selector_train_monuseg_test_tnbc
+
+python tools/train_coverage_selector.py \
+  --train_actions ./logs/stainpqr_stage1b/coverage_oracle_stainpms_tnbc/actions.csv \
+  --test_actions ./logs/stainpqr_stage1b/coverage_oracle_stainpms_monuseg/actions.csv \
+  --out_dir ./logs/stainpqr_stage2a/coverage_selector_train_tnbc_test_monuseg
+```
+
+Combined group-CV:
+
+```bash
+python tools/train_coverage_selector.py \
+  --train_actions \
+    ./logs/stainpqr_stage1b/coverage_oracle_stainpms_monuseg/actions.csv \
+    ./logs/stainpqr_stage1b/coverage_oracle_stainpms_tnbc/actions.csv \
+  --out_dir ./logs/stainpqr_stage2a/coverage_selector_combined_cv
+```
+
+Key outputs:
+
+- `summary.json`: AUROC/AP, Brier/ECE, and budget curves for learned/rule scores.
+- `selector_model.json`: feature normalization and learned linear weights.
+- `predictions.csv`: action-level predictions for plotting and error analysis.
