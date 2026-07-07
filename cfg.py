@@ -108,6 +108,20 @@ def parse_args():
     parser.add_argument("--oracle_gt_match_radius", default=8, type=int)
     parser.add_argument("--oracle_min_added_area", default=8, type=int)
 
+    parser.add_argument(
+        "--stage2_selective_refine",
+        action="store_true",
+        help="Run StainPQR Stage 2C selective coverage refinement and exit.",
+    )
+    parser.add_argument("--selective_artifacts_dir", default="", type=str)
+    parser.add_argument("--selective_out_dir", default="", type=str)
+    parser.add_argument("--selective_split", default="test", choices=["test", "train"])
+    parser.add_argument("--selective_actions_csv", nargs="+", default=[])
+    parser.add_argument("--selective_predictions_csv", default="", type=str)
+    parser.add_argument("--selective_score", default="selector_prob_iou_area", type=str)
+    parser.add_argument("--selective_budget", default=2, type=int)
+    parser.add_argument("--selective_min_score", default=-1e30, type=float)
+
     opt = parser.parse_args()
 
     return opt

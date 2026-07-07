@@ -491,3 +491,83 @@ python tools/train_coverage_selector.py \
     ./logs/stainpqr_stage1b/coverage_oracle_stainpms_tnbc/actions.csv \
   --out_dir ./logs/stainpqr_stage2b/coverage_selector_combined_train_to_test
 ```
+
+Stage 2B interpretation so far:
+
+- MoNuSeg train -> test: `selector_prob_iou_area` is the preferred learned
+  score, especially at budgets 2/4.
+- TNBC train -> test: `selector_prob_added_area` is strongest at budget 1 and
+  remains competitive at budget 2.
+- Combined train -> test: mixed calibration is less reliable because the TNBC
+  train oracle has very few positive coverage actions. Prefer dataset-specific
+  selectors unless later calibration fixes this.
+
+## Stage 2C: True Selective Re-Decoding
+
+Goal:
+
+Validate that the selected actions still improve full-image metrics when they
+are executed together. Stage 2A/2B budget curves add single-action Delta PQ
+values, but selected actions can interact after insertion. Stage 2C replays the
+selected actions with the frozen decoder, merges the masks into the first-pass
+prediction, and recomputes Dice/AJI/DQ/SQ/PQ.
+
+After pulling the Stage 2C code, rerun the relevant holdout selector commands
+from Stage 2B once so `predictions.csv` contains action coordinates and baseline
+score aliases.
+
+Recommended first check on MoNuSeg:
+
+```bash
+rm -rf ./logs/stainpqr_stage2c/monuseg_b2_selector_prob_iou_area
+
+python main.py \
+  --stage2_selective_refine \
+  --dataset monuseg \
+  --data_path ./data/monuseg \
+  --sam_ckpt ../CA-SAM2-HRC/deliver_ckpts/monuseg_pms_best_pq.pth \
+  --sam_config sam2_hiera_l \
+  --texture --context \
+  --overlap 92 \
+  --test_nms_thr 12 \
+  --b 1 \
+  --selective_split test \
+  --selective_artifacts_dir ./logs/stainpqr_stage0/stainpms_monuseg_test \
+  --selective_actions_csv ./logs/stainpqr_stage1b/coverage_oracle_stainpms_monuseg/actions.csv \
+  --selective_predictions_csv ./logs/stainpqr_stage2b/coverage_selector_monuseg_train_to_test/predictions.csv \
+  --selective_score selector_prob_iou_area \
+  --selective_budget 2 \
+  --selective_out_dir ./logs/stainpqr_stage2c/monuseg_b2_selector_prob_iou_area
+```
+
+Recommended first check on TNBC:
+
+```bash
+rm -rf ./logs/stainpqr_stage2c/tnbc_b1_selector_prob_added_area
+
+python main.py \
+  --stage2_selective_refine \
+  --dataset monuseg \
+  --data_path ./data/tnbc \
+  --sam_ckpt ../CA-SAM2-HRC/deliver_ckpts/tnbc_pms_best_e156.pth \
+  --sam_config sam2_hiera_l \
+  --texture --context \
+  --overlap 32 \
+  --test_nms_thr 12 \
+  --b 1 \
+  --selective_split test \
+  --selective_artifacts_dir ./logs/stainpqr_stage0/stainpms_tnbc_test \
+  --selective_actions_csv ./logs/stainpqr_stage1b/coverage_oracle_stainpms_tnbc/actions.csv \
+  --selective_predictions_csv ./logs/stainpqr_stage2b/coverage_selector_tnbc_train_to_test/predictions.csv \
+  --selective_score selector_prob_added_area \
+  --selective_budget 1 \
+  --selective_out_dir ./logs/stainpqr_stage2c/tnbc_b1_selector_prob_added_area
+```
+
+Key outputs:
+
+- `summary.json`: base/refined full-image metrics and deltas.
+- `image_metrics.csv`: per-image base/refined metrics.
+- `selected_actions.csv`: selected actions, scores, decode status, and applied
+  added area.
+- `<image>_pred.npy`: refined prediction maps for optional qualitative figures.

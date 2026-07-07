@@ -311,6 +311,44 @@ def main():
         )
         return
 
+    if cfgs.stage2_selective_refine:
+        ckpt = torch.load(cfgs.sam_ckpt, map_location="cpu")
+        if "model1" in ckpt:
+            model1.load_state_dict(ckpt["model1"])
+        else:
+            print(f"[checkpoint] no model1 state found in {cfgs.sam_ckpt}")
+        texture_memory_bank_list = ckpt.get("texture_memory_bank_list", []) or []
+
+        selective_loader = test_loader
+        if cfgs.selective_split == "train":
+            train_img_root, train_lbl_root = _train_split_paths(cfgs)
+            selective_dataset = copy.copy(test_dataset)
+            selective_dataset.image_root = train_img_root
+            selective_dataset.label_root = train_lbl_root
+            selective_dataset.paths = sorted(os.listdir(train_img_root))
+            selective_loader = DataLoader(
+                selective_dataset,
+                batch_size=1,
+                shuffle=False,
+                num_workers=cfgs.num_workers,
+                pin_memory=True,
+            )
+            print(f"[stage2-selective] train split; n={len(selective_dataset.paths)} from {train_img_root}")
+        else:
+            print(f"[stage2-selective] test split; n={len(test_loader.dataset)}")
+
+        from stainpqr.coverage_oracle import run_selective_coverage_refinement
+
+        run_selective_coverage_refinement(
+            cfgs,
+            selective_loader,
+            net,
+            model1_encoder,
+            texture_memory_bank_list,
+            device,
+        )
+        return
+
     if cfgs.eval:
         ckpt = torch.load(cfgs.sam_ckpt, map_location="cpu")
         if "model1" in ckpt:

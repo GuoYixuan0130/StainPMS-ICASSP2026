@@ -66,6 +66,18 @@ and report budget curves rather than a single large-budget point. The next
 acceptance target is train-oracle to test-oracle holdout performance, not
 test-oracle group-CV alone.
 
+Train-oracle to test-oracle holdout supports using dataset-specific selectors:
+
+| Holdout | Key result |
+| --- | --- |
+| MoNuSeg train -> test | `selector_prob_iou_area` gives the best budget-2/4 learned refinement ranking. |
+| TNBC train -> test | `selector_prob_added_area` is best at budget 1 and remains competitive at budget 2. |
+| Combined train -> test | mixed calibration is less reliable because TNBC train oracle has very few positive actions. |
+
+The next stage is Stage 2C selective refinement: rerun the frozen decoder only
+for selected actions, merge the resulting masks into the first-pass prediction,
+and recompute full-image Dice/AJI/DQ/SQ/PQ.
+
 See [docs/STAINPQR_EXPERIMENTS.md](docs/STAINPQR_EXPERIMENTS.md) for the
 current AutoDL workflow.
 

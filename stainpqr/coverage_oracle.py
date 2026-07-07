@@ -21,9 +21,11 @@ from run.run_on_epoch import inference, mask_process_eval
 from tools.analyze_eval_artifacts import (
     _ids,
     _pairwise_stats,
+    analyze_pair,
     get_fast_aji,
     get_fast_pq,
     remap_label,
+    summarize,
 )
 
 
@@ -447,4 +449,244 @@ def run_coverage_oracle(
     print(f"Wrote actions: {actions_csv}")
     print(f"Wrote images: {images_csv}")
     print(f"Wrote summary: {summary_json}")
+    return summary
+
+
+def _csv_rows(path: Path) -> list[dict]:
+    with open(path, "r", encoding="utf-8-sig", newline="") as f:
+        lines = [line for line in f if line.strip()]
+        return list(csv.DictReader(lines))
+
+
+def _csv_float(row: dict, key: str, default: float = 0.0) -> float:
+    try:
+        value = float(row.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(value):
+        return default
+    return value
+
+
+def _csv_int(row: dict, key: str, default: int = 0) -> int:
+    try:
+        return int(float(row.get(key, default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _load_selective_actions(cfgs, prediction_rows: list[dict]) -> dict[tuple[str, int], dict]:
+    action_paths = [Path(path) for path in getattr(cfgs, "selective_actions_csv", []) or []]
+    if not action_paths:
+        inferred = sorted({str(row.get("source_csv", "")) for row in prediction_rows if row.get("source_csv")})
+        action_paths = [Path(path) for path in inferred]
+    if not action_paths:
+        raise ValueError("--selective_actions_csv is required when predictions do not contain source_csv")
+
+    actions: dict[tuple[str, int], dict] = {}
+    for path in action_paths:
+        if not path.exists():
+            raise FileNotFoundError(f"Missing selective action CSV: {path}")
+        for row in _csv_rows(path):
+            image = str(row.get("image", ""))
+            rank = _csv_int(row, "action_rank")
+            item = dict(row)
+            item["image"] = image
+            item["action_rank"] = rank
+            item["x"] = _csv_int(row, "x")
+            item["y"] = _csv_int(row, "y")
+            actions[(image, rank)] = item
+    return actions
+
+
+def _load_selective_predictions(cfgs) -> list[dict]:
+    path = Path(cfgs.selective_predictions_csv)
+    if not path.exists():
+        raise FileNotFoundError(f"Missing selective prediction CSV: {path}")
+    score_name = str(cfgs.selective_score)
+    rows = []
+    for row in _csv_rows(path):
+        score = _csv_float(row, score_name, default=-math.inf)
+        if score < float(cfgs.selective_min_score):
+            continue
+        item = dict(row)
+        item["image"] = str(row.get("image", ""))
+        item["action_rank"] = _csv_int(row, "action_rank")
+        item["_selective_score"] = score
+        rows.append(item)
+    return rows
+
+
+def _group_selected_actions(cfgs) -> dict[str, list[dict]]:
+    prediction_rows = _load_selective_predictions(cfgs)
+    action_lookup = _load_selective_actions(cfgs, prediction_rows)
+    grouped: dict[str, list[dict]] = {}
+    for pred_row in prediction_rows:
+        key = (str(pred_row["image"]), int(pred_row["action_rank"]))
+        action = action_lookup.get(key)
+        if action is None:
+            continue
+        item = dict(action)
+        item["_selective_score"] = float(pred_row["_selective_score"])
+        item["_selector_action_rank"] = int(pred_row["action_rank"])
+        grouped.setdefault(str(item["image"]), []).append(item)
+
+    budget = max(0, int(cfgs.selective_budget))
+    for image, items in list(grouped.items()):
+        ordered = sorted(items, key=lambda row: float(row["_selective_score"]), reverse=True)
+        grouped[image] = ordered[:budget] if budget > 0 else []
+    return grouped
+
+
+def _summary_delta(base_summary: dict, refined_summary: dict) -> dict:
+    metric_delta = {}
+    for key, base_value in base_summary["mean_metrics"].items():
+        metric_delta[key] = float(refined_summary["mean_metrics"][key] - base_value)
+    total_delta = {}
+    for key, base_value in base_summary["totals"].items():
+        total_delta[key] = int(refined_summary["totals"][key] - base_value)
+    return {"mean_metrics": metric_delta, "totals": total_delta}
+
+
+@torch.no_grad()
+def run_selective_coverage_refinement(
+    cfgs,
+    loader,
+    net,
+    point_encoder,
+    memory_bank_list,
+    device,
+) -> dict:
+    if not cfgs.selective_artifacts_dir:
+        raise ValueError("--selective_artifacts_dir is required for --stage2_selective_refine")
+    if not cfgs.selective_predictions_csv:
+        raise ValueError("--selective_predictions_csv is required for --stage2_selective_refine")
+
+    artifact_dir = Path(cfgs.selective_artifacts_dir)
+    out_dir = Path(cfgs.selective_out_dir or artifact_dir / "stage2c_selective_refine")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    grouped_actions = _group_selected_actions(cfgs)
+    net.eval()
+    point_encoder.eval()
+
+    base_rows: list[dict] = []
+    refined_rows: list[dict] = []
+    image_rows: list[dict] = []
+    selected_rows: list[dict] = []
+
+    pbar = tqdm(total=len(loader), desc="Selective refinement", unit="image")
+    for batch in loader:
+        img_seg, inst_maps, _, _, _, _, ori_shape, _, name = batch
+        name_str = _safe_name(name)
+        gt = np.asarray(inst_maps.numpy()[0]).astype(np.int32)
+        pred_path = artifact_dir / f"{name_str}_pred.npy"
+        if not pred_path.exists():
+            raise FileNotFoundError(f"Missing Stage 0 pred artifact: {pred_path}")
+        base_pred = np.load(pred_path).astype(np.int32)
+        current_pred = base_pred.copy()
+        images_seg = img_seg.to(device)
+
+        base_row = analyze_pair(name_str, gt, base_pred)
+        decoded_count = 0
+        applied_count = 0
+        image_selected = grouped_actions.get(name_str, [])
+
+        for local_rank, action in enumerate(image_selected):
+            decoded = _decode_action_mask(
+                images_seg,
+                action,
+                ori_shape,
+                cfgs,
+                net,
+                point_encoder,
+                memory_bank_list,
+                device,
+            )
+            selected_record = {
+                "image": name_str,
+                "local_rank": int(local_rank),
+                "action_rank": int(action["action_rank"]),
+                "score": float(action["_selective_score"]),
+                "x": int(action["x"]),
+                "y": int(action["y"]),
+                "decoded": bool(decoded is not None),
+                "applied": False,
+                "added_area": 0,
+            }
+            if decoded is not None:
+                decoded_count += 1
+                current_pred, added_area = _apply_insert(
+                    current_pred,
+                    decoded["mask"],
+                    int(cfgs.oracle_min_added_area),
+                )
+                selected_record["added_area"] = int(added_area)
+                selected_record["applied"] = bool(added_area >= int(cfgs.oracle_min_added_area))
+                if selected_record["applied"]:
+                    applied_count += 1
+            selected_rows.append(selected_record)
+
+        refined_row = analyze_pair(name_str, gt, current_pred)
+        base_rows.append(base_row)
+        refined_rows.append(refined_row)
+        np.save(out_dir / f"{name_str}_pred.npy", current_pred.astype(np.int32))
+
+        image_item = {
+            "image": name_str,
+            "selected_count": int(len(image_selected)),
+            "decoded_count": int(decoded_count),
+            "applied_count": int(applied_count),
+        }
+        for key in ["dice1", "dice2", "aji", "aji_p", "dq", "sq", "pq"]:
+            image_item[f"base_{key}"] = float(base_row[key])
+            image_item[f"refined_{key}"] = float(refined_row[key])
+            image_item[f"delta_{key}"] = float(refined_row[key] - base_row[key])
+        image_rows.append(image_item)
+        pbar.update()
+    pbar.close()
+
+    with open(out_dir / "image_metrics.csv", "w", newline="", encoding="utf-8") as f:
+        fieldnames = list(image_rows[0].keys()) if image_rows else ["image"]
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(image_rows)
+
+    with open(out_dir / "selected_actions.csv", "w", newline="", encoding="utf-8") as f:
+        fieldnames = list(selected_rows[0].keys()) if selected_rows else [
+            "image",
+            "local_rank",
+            "action_rank",
+            "score",
+            "x",
+            "y",
+            "decoded",
+            "applied",
+            "added_area",
+        ]
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(selected_rows)
+
+    base_summary = summarize(base_rows)
+    refined_summary = summarize(refined_rows)
+    summary = {
+        "num_images": len(refined_rows),
+        "score": str(cfgs.selective_score),
+        "budget": int(cfgs.selective_budget),
+        "min_score": float(cfgs.selective_min_score),
+        "base": base_summary,
+        "refined": refined_summary,
+        "delta": _summary_delta(base_summary, refined_summary),
+        "selected_actions": int(len(selected_rows)),
+        "decoded_actions": int(sum(1 for row in selected_rows if row["decoded"])),
+        "applied_actions": int(sum(1 for row in selected_rows if row["applied"])),
+    }
+    with open(out_dir / "summary.json", "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+
+    print(json.dumps(summary, indent=2))
+    print(f"Wrote image metrics: {out_dir / 'image_metrics.csv'}")
+    print(f"Wrote selected actions: {out_dir / 'selected_actions.csv'}")
+    print(f"Wrote summary: {out_dir / 'summary.json'}")
     return summary

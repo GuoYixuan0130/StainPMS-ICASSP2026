@@ -75,6 +75,10 @@ def _load_actions(paths: list[Path]) -> list[dict]:
                     "source_csv": str(path),
                     "image": str(row.get("image", "")),
                     "group": f"{path}::{row.get('image', '')}",
+                    "type": str(row.get("type", "")),
+                    "x": _to_float(row.get("x"), 0.0),
+                    "y": _to_float(row.get("y"), 0.0),
+                    "target_gt_id": _to_int(row.get("target_gt_id"), 0),
                     "target_error": str(row.get("target_error", "")),
                     "action_rank": _to_int(row.get("action_rank"), 0),
                     "evidence": _to_float(row.get("evidence"), 0.0),
@@ -282,6 +286,8 @@ def _attach_scores(rows: list[dict], x: np.ndarray, w_cls: np.ndarray, w_reg: np
         item["selector_prob_added_area"] = float(p * log_added_area)
         item["selector_prob_missed_like"] = float(p * missed_like_proxy)
         item["selector_prob_iou_area"] = float(p * (decoded_quality + 0.05 * log_added_area))
+        item["missed_like_proxy"] = float(missed_like_proxy)
+        item["decoded_iou_high"] = float(_baseline_score(row, "decoded_iou_high"))
         out.append(item)
     return out
 
@@ -412,6 +418,10 @@ def _write_predictions(path: Path, rows: list[dict]) -> None:
         "source_csv",
         "image",
         "action_rank",
+        "type",
+        "x",
+        "y",
+        "target_gt_id",
         "target_error",
         "evidence",
         "residual_evidence",
@@ -428,6 +438,8 @@ def _write_predictions(path: Path, rows: list[dict]) -> None:
         "selector_prob_added_area",
         "selector_prob_missed_like",
         "selector_prob_iou_area",
+        "missed_like_proxy",
+        "decoded_iou_high",
     ]
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
