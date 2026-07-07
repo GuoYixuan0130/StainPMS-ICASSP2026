@@ -317,6 +317,19 @@ Use `best_budget_methods` in `summary.json` to see which non-oracle ranking wins
 each budget. For this stage, a useful selector must beat `missed_like_proxy` and
 `added_area` at budgets 1/2/4; action-level AUROC/AP alone is not enough.
 
+Current test-oracle group-CV reading:
+
+- MoNuSeg: `selector_prob_iou_area` is the strongest stable learned score at
+  budgets 2/4.
+- TNBC: `selector_prob_added_area` is strongest at budget 1, while
+  `missed_like_proxy` is still competitive at budget 2.
+- Combined: learned probability hybrids beat the hand-built rules at budgets
+  1/2, but larger budgets can over-correct.
+
+Treat these as feasibility results only, because the labels come from test
+oracle actions. The next paper-grade check is train-oracle to test-oracle
+holdout.
+
 Group-CV on MoNuSeg:
 
 ```bash
@@ -364,3 +377,117 @@ Key outputs:
   `delta_pq_sum`.
 - `selector_model.json`: feature normalization and learned linear weights.
 - `predictions.csv`: action-level predictions for plotting and error analysis.
+
+## Stage 2B: Train-Oracle to Test-Oracle Holdout
+
+Goal:
+
+Generate oracle labels on the training split, train the selector only on those
+training actions, and evaluate selection on the held-out test action CSVs from
+Stage 1B. This removes the main leakage concern from the Stage 2A group-CV
+feasibility audit.
+
+### MoNuSeg Train Artifacts
+
+```bash
+rm -rf ./logs/stainpqr_stage0/stainpms_monuseg_train
+
+python main.py --eval --eval_on_train \
+  --dataset monuseg \
+  --data_path ./data/monuseg \
+  --sam_ckpt ../CA-SAM2-HRC/deliver_ckpts/monuseg_pms_best_pq.pth \
+  --sam_config sam2_hiera_l \
+  --texture --context \
+  --overlap 92 \
+  --test_nms_thr 12 \
+  --b 1 \
+  --exp_name stage0_stainpms_monuseg_train \
+  --dump_eval_artifacts_dir ./logs/stainpqr_stage0/stainpms_monuseg_train
+
+python tools/analyze_eval_artifacts.py \
+  --artifacts_dir ./logs/stainpqr_stage0/stainpms_monuseg_train
+```
+
+### MoNuSeg Train Coverage Oracle
+
+```bash
+rm -rf ./logs/stainpqr_stage1b/coverage_oracle_stainpms_monuseg_train
+
+python main.py \
+  --stage1_coverage_oracle \
+  --dataset monuseg \
+  --data_path ./data/monuseg \
+  --sam_ckpt ../CA-SAM2-HRC/deliver_ckpts/monuseg_pms_best_pq.pth \
+  --sam_config sam2_hiera_l \
+  --texture --context \
+  --overlap 92 \
+  --test_nms_thr 12 \
+  --b 1 \
+  --oracle_split train \
+  --oracle_artifacts_dir ./logs/stainpqr_stage0/stainpms_monuseg_train \
+  --oracle_out_dir ./logs/stainpqr_stage1b/coverage_oracle_stainpms_monuseg_train
+```
+
+### TNBC Train Artifacts
+
+```bash
+rm -rf ./logs/stainpqr_stage0/stainpms_tnbc_train
+
+python main.py --eval --eval_on_train \
+  --dataset monuseg \
+  --data_path ./data/tnbc \
+  --sam_ckpt ../CA-SAM2-HRC/deliver_ckpts/tnbc_pms_best_e156.pth \
+  --sam_config sam2_hiera_l \
+  --texture --context \
+  --overlap 32 \
+  --test_nms_thr 12 \
+  --b 1 \
+  --exp_name stage0_stainpms_tnbc_train \
+  --dump_eval_artifacts_dir ./logs/stainpqr_stage0/stainpms_tnbc_train
+
+python tools/analyze_eval_artifacts.py \
+  --artifacts_dir ./logs/stainpqr_stage0/stainpms_tnbc_train
+```
+
+### TNBC Train Coverage Oracle
+
+```bash
+rm -rf ./logs/stainpqr_stage1b/coverage_oracle_stainpms_tnbc_train
+
+python main.py \
+  --stage1_coverage_oracle \
+  --dataset monuseg \
+  --data_path ./data/tnbc \
+  --sam_ckpt ../CA-SAM2-HRC/deliver_ckpts/tnbc_pms_best_e156.pth \
+  --sam_config sam2_hiera_l \
+  --texture --context \
+  --overlap 32 \
+  --test_nms_thr 12 \
+  --b 1 \
+  --oracle_split train \
+  --oracle_artifacts_dir ./logs/stainpqr_stage0/stainpms_tnbc_train \
+  --oracle_out_dir ./logs/stainpqr_stage1b/coverage_oracle_stainpms_tnbc_train
+```
+
+### Holdout Selector Evaluation
+
+```bash
+python tools/train_coverage_selector.py \
+  --train_actions ./logs/stainpqr_stage1b/coverage_oracle_stainpms_monuseg_train/actions.csv \
+  --test_actions ./logs/stainpqr_stage1b/coverage_oracle_stainpms_monuseg/actions.csv \
+  --out_dir ./logs/stainpqr_stage2b/coverage_selector_monuseg_train_to_test
+
+python tools/train_coverage_selector.py \
+  --train_actions ./logs/stainpqr_stage1b/coverage_oracle_stainpms_tnbc_train/actions.csv \
+  --test_actions ./logs/stainpqr_stage1b/coverage_oracle_stainpms_tnbc/actions.csv \
+  --out_dir ./logs/stainpqr_stage2b/coverage_selector_tnbc_train_to_test
+
+python tools/train_coverage_selector.py \
+  --train_actions \
+    ./logs/stainpqr_stage1b/coverage_oracle_stainpms_monuseg_train/actions.csv \
+    ./logs/stainpqr_stage1b/coverage_oracle_stainpms_tnbc_train/actions.csv \
+  --test_actions \
+    ./logs/stainpqr_stage1b/coverage_oracle_stainpms_monuseg/actions.csv \
+    ./logs/stainpqr_stage1b/coverage_oracle_stainpms_tnbc/actions.csv \
+  --out_dir ./logs/stainpqr_stage2b/coverage_selector_combined_train_to_test
+```

@@ -49,8 +49,22 @@ for stricter NaN/empty-value handling. Strong rule baselines remain
 `missed_like_proxy` and `added_area`; the revised selector script therefore
 reports both pure learned scores and probability-rule hybrids:
 `selector_prob_added_area`, `selector_prob_missed_like`, and
-`selector_prob_iou_area`. The next acceptance target is to beat these rule
-baselines under budgets 1/2/4, not merely to improve action-level AUROC/AP.
+`selector_prob_iou_area`.
+
+After the NaN-safe selector update, group-CV on the current test-oracle action
+sets supports the selective-refinement hypothesis:
+
+| Selector audit | Strongest stable observation |
+| --- | --- |
+| MoNuSeg | `selector_prob_iou_area` improves budget-2/4 selected Delta PQ over `missed_like_proxy` and `added_area`. |
+| TNBC | `selector_prob_added_area` gives the best budget-1 gain; budget 2 remains close to `missed_like_proxy`. |
+| Combined | learned probability hybrids beat the hand-built rules at budgets 1/2, while larger budgets start to over-correct. |
+
+The current working choice is to treat `selector_prob_iou_area` as the main
+stable learned score, keep `selector_prob_added_area` as the budget-1 ablation,
+and report budget curves rather than a single large-budget point. The next
+acceptance target is train-oracle to test-oracle holdout performance, not
+test-oracle group-CV alone.
 
 See [docs/STAINPQR_EXPERIMENTS.md](docs/STAINPQR_EXPERIMENTS.md) for the
 current AutoDL workflow.
