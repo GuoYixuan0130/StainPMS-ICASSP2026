@@ -6,13 +6,14 @@ The script trains two small CPU-only heads:
   - logistic risk head: P(Delta PQ > 0)
   - ridge utility head: E[Delta PQ]
 
-The main selector score is:
+The initial selector score is:
 
     expected_utility = P(Delta PQ > 0) * max(E[Delta PQ], 0)
 
 The script compares this learned score against strong rule baselines such as
 `decoded_iou_high`, `added_area`, and `missed_like_proxy` under small per-image
-budgets.
+budgets. It also reports probability-rule hybrid scores because the utility
+regression head can be unstable on small oracle sets.
 """
 
 from __future__ import annotations
@@ -43,9 +44,12 @@ def _to_float(value, default: float = math.nan) -> float:
     if value is None or value == "":
         return default
     try:
-        return float(value)
+        out = float(value)
     except ValueError:
         return default
+    if not math.isfinite(out):
+        return default
+    return out
 
 
 def _to_int(value, default: int = 0) -> int:
@@ -110,14 +114,22 @@ def _feature_row(row: dict, max_rank: int = 19) -> list[float]:
 def _matrix(rows: list[dict], mean=None, std=None):
     max_rank = 19
     x = np.asarray([_feature_row(row, max_rank=max_rank) for row in rows], dtype=np.float64)
+    x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     y_cls = np.asarray([1.0 if row["positive"] else 0.0 for row in rows], dtype=np.float64)
     y_reg = np.asarray([float(row["delta_pq"]) for row in rows], dtype=np.float64)
+    y_reg = np.nan_to_num(y_reg, nan=0.0, posinf=0.0, neginf=0.0)
     if mean is None:
         mean = x.mean(axis=0)
+        mean = np.nan_to_num(mean, nan=0.0, posinf=0.0, neginf=0.0)
     if std is None:
         std = x.std(axis=0)
+        std = np.nan_to_num(std, nan=1.0, posinf=1.0, neginf=1.0)
+        std[std < 1e-8] = 1.0
+    else:
+        std = np.nan_to_num(std, nan=1.0, posinf=1.0, neginf=1.0)
         std[std < 1e-8] = 1.0
     x_std = (x - mean) / std
+    x_std = np.nan_to_num(x_std, nan=0.0, posinf=0.0, neginf=0.0)
     x_aug = np.concatenate([np.ones((x.shape[0], 1), dtype=np.float64), x_std], axis=1)
     return x_aug, y_cls, y_reg, mean, std
 
@@ -149,7 +161,10 @@ def _train_logistic(
 def _train_ridge(x: np.ndarray, y: np.ndarray, *, l2: float) -> np.ndarray:
     reg = np.eye(x.shape[1], dtype=np.float64) * float(l2)
     reg[0, 0] = 0.0
-    return np.linalg.solve(x.T @ x + reg, x.T @ y)
+    try:
+        return np.linalg.solve(x.T @ x + reg, x.T @ y)
+    except np.linalg.LinAlgError:
+        return np.linalg.lstsq(x.T @ x + reg, x.T @ y, rcond=None)[0]
 
 
 def _safe_auc(labels: np.ndarray, scores: np.ndarray):
@@ -219,24 +234,30 @@ def _ece(labels: np.ndarray, prob: np.ndarray, bins: int = 10):
     return float(ece)
 
 
+def _finite(value: float, default: float = 0.0) -> float:
+    if not math.isfinite(value):
+        return default
+    return float(value)
+
+
 def _baseline_score(row: dict, method: str) -> float:
     if method == "decoded_iou_high":
-        return float(row["decoded_predicted_iou"])
+        return _finite(float(row["decoded_predicted_iou"]))
     if method == "added_area":
-        return float(row["added_area"])
+        return _finite(float(row["added_area"]))
     if method == "residual_evidence":
-        return float(row["residual_evidence"])
+        return _finite(float(row["residual_evidence"]))
     if method == "rank_first":
-        return -float(row["action_rank"])
+        return -_finite(float(row["action_rank"]))
     if method == "missed_like_proxy":
-        return (
+        return _finite(
             float(row["residual_evidence"])
             + 0.25 * float(row["decoded_predicted_iou"])
             + 0.25 * float(row["decoded_stability_score"])
             + 0.0005 * float(row["added_area"])
         )
     if method == "oracle_delta":
-        return float(row["delta_pq"])
+        return _finite(float(row["delta_pq"]))
     raise ValueError(f"Unknown baseline method: {method}")
 
 
@@ -246,9 +267,21 @@ def _attach_scores(rows: list[dict], x: np.ndarray, w_cls: np.ndarray, w_reg: np
     out = []
     for row, p, d in zip(rows, prob, pred_delta):
         item = dict(row)
-        item["selector_prob"] = float(p)
-        item["selector_delta"] = float(d)
+        p = _finite(float(p))
+        d = _finite(float(d))
+        log_added_area = math.log1p(max(0.0, _finite(float(row["added_area"]))))
+        missed_like_proxy = max(0.0, _baseline_score(row, "missed_like_proxy"))
+        decoded_quality = max(
+            0.0,
+            0.5 * _baseline_score(row, "decoded_iou_high")
+            + 0.5 * _finite(float(row["decoded_stability_score"])),
+        )
+        item["selector_prob"] = p
+        item["selector_delta"] = d
         item["selector_expected_utility"] = float(p * max(0.0, d))
+        item["selector_prob_added_area"] = float(p * log_added_area)
+        item["selector_prob_missed_like"] = float(p * missed_like_proxy)
+        item["selector_prob_iou_area"] = float(p * (decoded_quality + 0.05 * log_added_area))
         out.append(item)
     return out
 
@@ -261,8 +294,15 @@ def _groups(rows: list[dict]) -> dict[str, list[dict]]:
 
 
 def _score(row: dict, method: str) -> float:
-    if method in ("selector_prob", "selector_delta", "selector_expected_utility"):
-        return float(row[method])
+    if method in (
+        "selector_prob",
+        "selector_delta",
+        "selector_expected_utility",
+        "selector_prob_added_area",
+        "selector_prob_missed_like",
+        "selector_prob_iou_area",
+    ):
+        return _finite(float(row[method]))
     return _baseline_score(row, method)
 
 
@@ -311,6 +351,24 @@ def _score_metrics(rows: list[dict], methods: list[str]) -> dict:
             item["brier"] = _brier(labels, scores)
             item["ece"] = _ece(labels, scores)
         out[method] = item
+    return out
+
+
+def _best_budget_methods(budget_metrics: dict, methods: list[str]) -> dict:
+    candidates = [method for method in methods if method != "oracle_delta"]
+    budgets = sorted({budget for method in candidates for budget in budget_metrics[method].keys()}, key=int)
+    out = {}
+    for budget in budgets:
+        best_method = max(
+            candidates,
+            key=lambda method: float(budget_metrics[method][budget]["delta_pq_sum"]),
+        )
+        out[budget] = {
+            "method": best_method,
+            "delta_pq_sum": float(budget_metrics[best_method][budget]["delta_pq_sum"]),
+            "precision": float(budget_metrics[best_method][budget]["precision"]),
+            "harmful": int(budget_metrics[best_method][budget]["harmful"]),
+        }
     return out
 
 
@@ -367,6 +425,9 @@ def _write_predictions(path: Path, rows: list[dict]) -> None:
         "selector_prob",
         "selector_delta",
         "selector_expected_utility",
+        "selector_prob_added_area",
+        "selector_prob_missed_like",
+        "selector_prob_iou_area",
     ]
     with open(path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
@@ -413,6 +474,9 @@ def main() -> None:
         "selector_expected_utility",
         "selector_prob",
         "selector_delta",
+        "selector_prob_added_area",
+        "selector_prob_missed_like",
+        "selector_prob_iou_area",
         "missed_like_proxy",
         "decoded_iou_high",
         "added_area",
@@ -420,6 +484,8 @@ def main() -> None:
         "rank_first",
         "oracle_delta",
     ]
+    score_metrics = _score_metrics(pred_rows, methods)
+    budget_metrics = _budget_metrics(pred_rows, methods, args.budgets)
     summary = {
         "mode": mode,
         "train_actions": [str(path) for path in args.train_actions],
@@ -427,8 +493,9 @@ def main() -> None:
         "num_train_rows": len(train_rows),
         "num_eval_rows": len(pred_rows),
         "positive_rate_eval": float(sum(1 for row in pred_rows if row["positive"]) / max(1, len(pred_rows))),
-        "score_metrics": _score_metrics(pred_rows, methods),
-        "budget_metrics": _budget_metrics(pred_rows, methods, args.budgets),
+        "score_metrics": score_metrics,
+        "budget_metrics": budget_metrics,
+        "best_budget_methods": _best_budget_methods(budget_metrics, methods),
     }
 
     with open(args.out_dir / "summary.json", "w", encoding="utf-8") as f:

@@ -300,8 +300,22 @@ the strongest rule baselines. The first model is intentionally small:
 ```text
 features: residual evidence, decoded IoU, stability, decoded/added area, action rank
 heads: logistic P(Delta PQ > 0) + ridge E[Delta PQ]
-score: P(Delta PQ > 0) * max(E[Delta PQ], 0)
+initial score: P(Delta PQ > 0) * max(E[Delta PQ], 0)
 ```
+
+The first AutoDL summaries showed that `selector_prob` can be useful on
+MoNuSeg, but the regression-based expected-utility score is not yet reliable
+and TNBC/combined runs need strict NaN handling. The current script therefore
+also reports hybrid scores that test whether learned probability improves the
+strong hand-built rules:
+
+- `selector_prob_added_area`
+- `selector_prob_missed_like`
+- `selector_prob_iou_area`
+
+Use `best_budget_methods` in `summary.json` to see which non-oracle ranking wins
+each budget. For this stage, a useful selector must beat `missed_like_proxy` and
+`added_area` at budgets 1/2/4; action-level AUROC/AP alone is not enough.
 
 Group-CV on MoNuSeg:
 
@@ -346,5 +360,7 @@ python tools/train_coverage_selector.py \
 Key outputs:
 
 - `summary.json`: AUROC/AP, Brier/ECE, and budget curves for learned/rule scores.
+- `best_budget_methods`: best non-oracle score per budget by selected
+  `delta_pq_sum`.
 - `selector_model.json`: feature normalization and learned linear weights.
 - `predictions.csv`: action-level predictions for plotting and error analysis.

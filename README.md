@@ -41,10 +41,16 @@ missed FNs are highly useful:
 | MoNuSeg | 25.7% | 86.7% | Coverage actions help only when they identify missed FNs. |
 | TNBC | 20.4% | 70.8% | Small budgets are essential; blind correction hurts PQ. |
 
-Simple ranking baselines already provide useful references: `decoded_iou_high`,
-`added_area`, and a hand-built `missed_like_proxy` are much stronger than raw
-residual evidence. The next target is a calibrated coverage utility selector
-that beats these rule baselines under budgets 1/2/4.
+Stage 2A selector checks sharpened the target. On MoNuSeg, the learned
+`selector_prob` ranks useful coverage actions well, but the first
+`selector_expected_utility` score is weakened by the small utility-regression
+head. On TNBC and the combined split, the first selector run exposed the need
+for stricter NaN/empty-value handling. Strong rule baselines remain
+`missed_like_proxy` and `added_area`; the revised selector script therefore
+reports both pure learned scores and probability-rule hybrids:
+`selector_prob_added_area`, `selector_prob_missed_like`, and
+`selector_prob_iou_area`. The next acceptance target is to beat these rule
+baselines under budgets 1/2/4, not merely to improve action-level AUROC/AP.
 
 See [docs/STAINPQR_EXPERIMENTS.md](docs/STAINPQR_EXPERIMENTS.md) for the
 current AutoDL workflow.
