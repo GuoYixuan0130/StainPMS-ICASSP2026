@@ -548,6 +548,18 @@ def _summary_delta(base_summary: dict, refined_summary: dict) -> dict:
     return {"mean_metrics": metric_delta, "totals": total_delta}
 
 
+def _analyze_pair_default(name: str, gt: np.ndarray, pred: np.ndarray) -> dict:
+    return analyze_pair(
+        name,
+        gt,
+        pred,
+        match_iou=0.5,
+        near_low=0.3,
+        weak_high=0.6,
+        overlap_frac=0.1,
+    )
+
+
 @torch.no_grad()
 def run_selective_coverage_refinement(
     cfgs,
@@ -587,7 +599,7 @@ def run_selective_coverage_refinement(
         current_pred = base_pred.copy()
         images_seg = img_seg.to(device)
 
-        base_row = analyze_pair(name_str, gt, base_pred)
+        base_row = _analyze_pair_default(name_str, gt, base_pred)
         decoded_count = 0
         applied_count = 0
         image_selected = grouped_actions.get(name_str, [])
@@ -627,7 +639,7 @@ def run_selective_coverage_refinement(
                     applied_count += 1
             selected_rows.append(selected_record)
 
-        refined_row = analyze_pair(name_str, gt, current_pred)
+        refined_row = _analyze_pair_default(name_str, gt, current_pred)
         base_rows.append(base_row)
         refined_rows.append(refined_row)
         np.save(out_dir / f"{name_str}_pred.npy", current_pred.astype(np.int32))
