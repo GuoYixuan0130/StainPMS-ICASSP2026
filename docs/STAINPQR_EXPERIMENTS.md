@@ -669,3 +669,60 @@ python main.py \
   --selective_budget 1 \
   --selective_out_dir ./logs/stainpqr_stage2c/tnbc_b1_residual_evidence
 ```
+
+## Stage 2D: Qualitative Panels
+
+Goal:
+
+Export action-centered qualitative crops for the Stage 2C refined predictions.
+The most useful panels should show:
+
+- the selected corrective prompt,
+- first-pass StainPMS boundary,
+- StainPQR refined boundary,
+- the newly inserted region,
+- GT boundary for reference.
+
+Current recommended candidates:
+
+| Dataset | Primary success candidates | Failure or caution candidates |
+| --- | --- | --- |
+| MoNuSeg | `TCGA-AO-A0J2-01A-01-BSA`, `TCGA-GL-6846-01A-01-BS1`, `TCGA-ZF-A9R5-01A-01-TS1` | `TCGA-HT-8564-01Z-00-DX1` |
+| TNBC | `09_5`, `09_2`, `09_1`, `10_2` | `10_4`, and optionally the high-gain outlier `09_6` |
+
+MoNuSeg panels:
+
+```bash
+python tools/stage2c_qualitative_panels.py \
+  --data_root ./data/monuseg \
+  --split test \
+  --artifacts_dir ./logs/stainpqr_stage0/stainpms_monuseg_test \
+  --refined_dir ./logs/stainpqr_stage2c/monuseg_b4_selector_prob_iou_area \
+  --image_metrics_csv ./logs/stainpqr_stage2c/monuseg_b4_selector_prob_iou_area/image_metrics.csv \
+  --selected_actions_csv ./logs/stainpqr_stage2c/monuseg_b4_selector_prob_iou_area/selected_actions.csv \
+  --names TCGA-AO-A0J2-01A-01-BSA TCGA-GL-6846-01A-01-BS1 TCGA-ZF-A9R5-01A-01-TS1 TCGA-HT-8564-01Z-00-DX1 \
+  --max_actions_per_image 2 \
+  --crop_size 192 \
+  --out_dir ./logs/stainpqr_stage2d/monuseg_qual_panels
+```
+
+TNBC panels:
+
+```bash
+python tools/stage2c_qualitative_panels.py \
+  --data_root ./data/tnbc \
+  --split test \
+  --artifacts_dir ./logs/stainpqr_stage0/stainpms_tnbc_test \
+  --refined_dir ./logs/stainpqr_stage2c/tnbc_b1_selector_prob_added_area \
+  --image_metrics_csv ./logs/stainpqr_stage2c/tnbc_b1_selector_prob_added_area/image_metrics.csv \
+  --selected_actions_csv ./logs/stainpqr_stage2c/tnbc_b1_selector_prob_added_area/selected_actions.csv \
+  --names 09_5 09_2 09_1 10_2 10_4 09_6 \
+  --max_actions_per_image 1 \
+  --crop_size 192 \
+  --out_dir ./logs/stainpqr_stage2d/tnbc_qual_panels
+```
+
+Outputs:
+
+- `<image>_a<local_rank>_r<action_rank>_x<x>_y<y>.png`: five-panel crop strip.
+- `panel_index.csv`: metrics and action coordinates for every exported crop.

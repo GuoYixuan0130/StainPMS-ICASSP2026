@@ -99,6 +99,11 @@ These results support a budgeted selective-correction story: coverage refinement
 mainly increases DQ by recovering missed nuclei, while too many insertions
 increase FP and reduce SQ.
 
+Current qualitative candidates are `TCGA-AO-A0J2-01A-01-BSA`,
+`TCGA-GL-6846-01A-01-BS1`, and `TCGA-ZF-A9R5-01A-01-TS1` for MoNuSeg, plus
+`09_5`, `09_2`, `09_1`, and `10_2` for TNBC. Use `10_4` as a TNBC caution case
+and `TCGA-HT-8564-01Z-00-DX1` as a MoNuSeg failure/over-correction case.
+
 See [docs/STAINPQR_EXPERIMENTS.md](docs/STAINPQR_EXPERIMENTS.md) for the
 current AutoDL workflow.
 
