@@ -576,12 +576,16 @@ Current true-replay reading:
 
 - MoNuSeg: `selector_prob_iou_area` improves PQ at budgets 1/2/4. Budget 4 is
   currently highest (`+0.00104` PQ, `+0.00462` AJI), but it also inserts more FP
-  than budget 2.
+  than budget 2. Budget 8 turns PQ negative (`-0.00029`), so the curve has a
+  clear over-correction point.
 - MoNuSeg: at budget 2, `selector_prob_iou_area` (`+0.00068` PQ) beats
   `missed_like_proxy` (`+0.00027` PQ), while raw `residual_evidence` hurts PQ
-  (`-0.00048`).
+  (`-0.00048`). At budget 4, the learned score (`+0.00104` PQ) also beats
+  `missed_like_proxy` (`+0.00014` PQ).
 - TNBC: budget 1 is the useful setting. `selector_prob_added_area` improves PQ
   by about `+0.00828`, while budget 2 over-corrects and drops most of the gain.
+  The rule baseline behaves similarly: `missed_like_proxy` is strong at budget 1
+  (`+0.00818` PQ) but drops at budget 2 (`+0.00063` PQ).
 - TNBC: raw `residual_evidence` at budget 1 is clearly harmful (`-0.01036` PQ),
   proving that stain residual peaks need risk selection.
 - In both datasets the gain mainly comes from DQ/FN recovery, while SQ can
@@ -592,6 +596,7 @@ Completed minimal checks:
 1. Raw residual-evidence ranking at the same budgets, proving that selection is
    needed.
 2. MoNuSeg budget 4 for the learned score, showing a larger but FP-heavier gain.
+3. MoNuSeg budget 8 and TNBC budget 2, showing where over-correction begins.
 
 MoNuSeg raw residual baseline:
 

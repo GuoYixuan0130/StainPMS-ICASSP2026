@@ -85,11 +85,14 @@ Early Stage 2C true re-decoding results:
 | MoNuSeg | `selector_prob_iou_area` | 1 | +0.00149 | +0.00055 | +0.00001 | +0.00044 | positive but conservative |
 | MoNuSeg | `selector_prob_iou_area` | 2 | +0.00259 | +0.00093 | -0.00005 | +0.00068 | best current MoNuSeg replay |
 | MoNuSeg | `selector_prob_iou_area` | 4 | +0.00462 | +0.00149 | -0.00014 | +0.00104 | higher gain but more FP |
+| MoNuSeg | `selector_prob_iou_area` | 8 | +0.00526 | -0.00004 | -0.00033 | -0.00029 | too many insertions hurt PQ |
 | MoNuSeg | `missed_like_proxy` | 2 | +0.00231 | +0.00039 | -0.00004 | +0.00027 | learned score improves over rule |
+| MoNuSeg | `missed_like_proxy` | 4 | +0.00335 | +0.00036 | -0.00017 | +0.00014 | rule saturates earlier |
 | MoNuSeg | `residual_evidence` | 2 | +0.00099 | -0.00060 | -0.00002 | -0.00048 | raw residual ranking hurts PQ |
 | TNBC | `selector_prob_added_area` | 1 | +0.00963 | +0.01916 | -0.00572 | +0.00828 | strong correction of missed FNs |
 | TNBC | `missed_like_proxy` | 1 | +0.01063 | +0.01916 | -0.00584 | +0.00818 | rule is very competitive at B1 |
 | TNBC | `selector_prob_added_area` | 2 | +0.00133 | +0.00881 | -0.00669 | +0.00115 | budget 2 over-corrects |
+| TNBC | `missed_like_proxy` | 2 | +0.00985 | +0.00839 | -0.00690 | +0.00063 | rule also over-corrects at B2 |
 | TNBC | `residual_evidence` | 1 | -0.00010 | -0.01355 | -0.00068 | -0.01036 | raw residual ranking is harmful |
 
 These results support a budgeted selective-correction story: coverage refinement
