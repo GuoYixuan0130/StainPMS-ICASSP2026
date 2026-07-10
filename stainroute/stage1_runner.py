@@ -253,7 +253,7 @@ def _update_texture_memory(
     net: Any,
     encoded: EncodedCrop,
     decoded_logits: torch.Tensor,
-    mean_iou: torch.Tensor,
+    prompt_iou_predictions: torch.Tensor,
     prompt_points: torch.Tensor,
     ori_shape: Any,
     cfgs: Any,
@@ -264,7 +264,10 @@ def _update_texture_memory(
 
     if not cfgs.texture:
         return
-    inst_pred = combine_mask(ori_shape, prompt_points, decoded_logits, mean_iou)
+    # combine_mask performs prompt-level NMS and therefore requires one score
+    # per prompt.  The scalar mean is only the memory-bank quality summary.
+    inst_pred = combine_mask(ori_shape, prompt_points, decoded_logits, prompt_iou_predictions)
+    mean_iou = prompt_iou_predictions.mean()
     high_res = torch.from_numpy(inst_pred.astype(float)).to(torch.float32).unsqueeze(0).unsqueeze(0).to(device)
     mask_features, mask_positions = net._encode_new_memory(
         current_vision_feats=list(encoded.vision_feats),
@@ -435,7 +438,7 @@ def _base_prediction_with_cache(
             net=net,
             encoded=encoded,
             decoded_logits=decoded.logits,
-            mean_iou=decoded.mean_predicted_iou,
+            prompt_iou_predictions=decoded.predicted_iou,
             prompt_points=local_prompts,
             ori_shape=ori_shape,
             cfgs=cfgs,
