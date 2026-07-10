@@ -26,14 +26,14 @@ with the invoked commands and do not edit their evaluation settings.
 
 ```bash
 mkdir -p logs/stainroute/stage0/casam2_monuseg_test
-python main.py --eval --dataset monuseg --data_path ./data/monuseg --sam_ckpt ./checkpoints/CA-SAM2_monuseg.pth --sam_config sam2_hiera_l --texture --context --overlap 92 --test_nms_thr 12 --b 1 --seed 3407 --exp_name stainroute_stage0_casam2_monuseg --dump_eval_artifacts_dir ./logs/stainroute/stage0/casam2_monuseg_test 2>&1 | tee logs/stainroute/stage0/casam2_monuseg_test/main_stdout.log
+python main.py --eval --dataset monuseg --data_path ./data/monuseg --sam_ckpt ../CA-SAM2-HRC/checkpoints/CA-SAM2_monuseg.pth --sam_config sam2_hiera_l --texture --context --overlap 92 --test_nms_thr 12 --b 1 --seed 3407 --exp_name stainroute_stage0_casam2_monuseg --dump_eval_artifacts_dir ./logs/stainroute/stage0/casam2_monuseg_test 2>&1 | tee logs/stainroute/stage0/casam2_monuseg_test/main_stdout.log
 ```
 
 ## MoNuSeg StainPMS
 
 ```bash
 mkdir -p logs/stainroute/stage0/stainpms_monuseg_test
-python main.py --eval --dataset monuseg --data_path ./data/monuseg --sam_ckpt ./deliver_ckpts/monuseg_pms_full_best.pth --sam_config sam2_hiera_l --texture --context --overlap 92 --test_nms_thr 12 --b 1 --seed 3407 --exp_name stainroute_stage0_stainpms_monuseg --dump_eval_artifacts_dir ./logs/stainroute/stage0/stainpms_monuseg_test 2>&1 | tee logs/stainroute/stage0/stainpms_monuseg_test/main_stdout.log
+python main.py --eval --dataset monuseg --data_path ./data/monuseg --sam_ckpt ../CA-SAM2-HRC/deliver_ckpts/monuseg_pms_best_pq.pth --sam_config sam2_hiera_l --texture --context --overlap 92 --test_nms_thr 12 --b 1 --seed 3407 --exp_name stainroute_stage0_stainpms_monuseg --dump_eval_artifacts_dir ./logs/stainroute/stage0/stainpms_monuseg_test 2>&1 | tee logs/stainroute/stage0/stainpms_monuseg_test/main_stdout.log
 ```
 
 ## TNBC CA-SAM2
@@ -47,7 +47,7 @@ python main.py --eval --dataset monuseg --data_path ./data/tnbc --sam_ckpt ./del
 
 ```bash
 mkdir -p logs/stainroute/stage0/stainpms_tnbc_test
-python main.py --eval --dataset monuseg --data_path ./data/tnbc --sam_ckpt ./deliver_ckpts/tnbc_pms_best_e156.pth --sam_config sam2_hiera_l --texture --context --overlap 32 --test_nms_thr 12 --b 1 --seed 3407 --exp_name stainroute_stage0_stainpms_tnbc --dump_eval_artifacts_dir ./logs/stainroute/stage0/stainpms_tnbc_test 2>&1 | tee logs/stainroute/stage0/stainpms_tnbc_test/main_stdout.log
+python main.py --eval --dataset monuseg --data_path ./data/tnbc --sam_ckpt ../CA-SAM2-HRC/deliver_ckpts/tnbc_pms_best_e156.pth --sam_config sam2_hiera_l --texture --context --overlap 32 --test_nms_thr 12 --b 1 --seed 3407 --exp_name stainroute_stage0_stainpms_tnbc --dump_eval_artifacts_dir ./logs/stainroute/stage0/stainpms_tnbc_test 2>&1 | tee logs/stainroute/stage0/stainpms_tnbc_test/main_stdout.log
 ```
 
 ## Metric reconciliation
