@@ -3,12 +3,13 @@ import unittest
 
 from stainroute.oracle import matched_iou_sum, pq_factorized
 from tools.analyze_eval_artifacts import get_fast_pq
+from sam2_train.modeling.stats_utils import get_fast_pq as get_main_fast_pq
 
 
 class StainRouteMetricTest(unittest.TestCase):
     def test_factorized_pq_matches_existing_implementation(self) -> None:
-        # All retained pairs are strictly above 0.5, matching the legacy metric's
-        # threshold convention exactly (up to its 1e-6 SQ stabilizer).
+        # All retained pairs are strictly above 0.5, so the legacy and
+        # inclusive implementations agree up to the 1e-6 SQ stabilizer.
         gt = np.array(
             [
                 [1, 1, 0, 2, 2, 0],
@@ -38,6 +39,16 @@ class StainRouteMetricTest(unittest.TestCase):
 
         self.assertAlmostEqual(matched_iou_sum(gt, pred), 0.5)
         self.assertAlmostEqual(pq_factorized(gt, pred), 0.5)
+        self.assertAlmostEqual(get_fast_pq(gt, pred, match_iou=0.5)[0][2], 0.5, delta=1.0e-6)
+        # The main-loop implementation requires contiguous IDs and an explicit
+        # background value, as real evaluation maps provide after remapping.
+        gt_main = np.array([[1, 1, 1, 1, 0]], dtype=np.int32)
+        pred_main = np.array([[1, 1, 0, 0, 0]], dtype=np.int32)
+        self.assertAlmostEqual(
+            get_main_fast_pq(gt_main, pred_main, match_iou=0.5)[0][2],
+            0.5,
+            delta=1.0e-6,
+        )
 
     def test_factorized_pq_handles_empty_and_shape_errors(self) -> None:
         empty = np.zeros((3, 3), dtype=np.int32)

@@ -179,7 +179,19 @@ def get_fast_pq(true: np.ndarray, pred: np.ndarray, match_iou: float = 0.5):
         return [1.0, 1.0, 1.0], [[], [], [], []]
 
     if match_iou >= 0.5:
-        paired_true_idx, paired_pred_idx = np.nonzero(iou > match_iou)
+        exact_threshold = iou == match_iou
+        if not np.any(exact_threshold):
+            paired_true_idx, paired_pred_idx = np.nonzero(iou > match_iou)
+        else:
+            if linear_sum_assignment is None:
+                raise RuntimeError("SciPy is required for inclusive PQ threshold matching")
+            eligible = iou >= match_iou
+            cardinality_bonus = float(min(iou.shape) + 1)
+            weights = np.where(eligible, cardinality_bonus + iou, 0.0)
+            paired_true_idx, paired_pred_idx = linear_sum_assignment(-weights)
+            keep = eligible[paired_true_idx, paired_pred_idx]
+            paired_true_idx = paired_true_idx[keep]
+            paired_pred_idx = paired_pred_idx[keep]
     else:
         if linear_sum_assignment is None:
             raise RuntimeError("SciPy is required for PQ matching below IoU 0.5")

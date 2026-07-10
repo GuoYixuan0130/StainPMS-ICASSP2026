@@ -81,7 +81,7 @@ def _matched_pair_ious(
     eligible = iou >= float(match_iou)
     if not np.any(eligible):
         return np.empty(0, dtype=np.float64)
-    cardinality_bonus = 2.0
+    cardinality_bonus = float(min(iou.shape) + 1)
     cost = np.where(eligible, -(cardinality_bonus + iou), 0.0)
     row_indices, col_indices = linear_sum_assignment(cost)
     selected = iou[row_indices, col_indices]

@@ -178,14 +178,15 @@ def get_fast_aji_plus(true, pred):
 def get_fast_pq(true, pred, match_iou=0.5):
     """`match_iou` is the IoU threshold level to determine the pairing between
     GT instances `p` and prediction instances `g`. `p` and `g` is a pair
-    if IoU > `match_iou`. However, pair of `p` and `g` must be unique 
+    if IoU >= `match_iou` at the standard 0.5 PQ threshold. A pair must be unique
     (1 prediction instance to 1 GT instance mapping).
 
     If `match_iou` < 0.5, Munkres assignment (solving minimum weight matching
     in bipartite graphs) is caculated to find the maximal amount of unique pairing. 
 
-    If `match_iou` >= 0.5, all IoU(p,g) > 0.5 pairing is proven to be unique and
-    the number of pairs is also maximal.    
+    If no pair lies exactly on the threshold, matches above 0.5 are unique. If
+    an exact-threshold pair exists, a one-to-one maximum-cardinality assignment
+    is used to honour the inclusive StainRoute metric definition.
 
     Fast computation requires instance IDs are in contiguous orderding 
     i.e [1, 2, 3, 4] not [2, 3, 6, 10]. Please call `remap_label` beforehand 
@@ -240,10 +241,23 @@ def get_fast_pq(true, pred, match_iou=0.5):
             pairwise_iou[true_id - 1, pred_id - 1] = iou
     #
     if match_iou >= 0.5:
-        paired_iou = pairwise_iou[pairwise_iou > match_iou]
-        pairwise_iou[pairwise_iou <= match_iou] = 0.0
-        paired_true, paired_pred = np.nonzero(pairwise_iou)
-        paired_iou = pairwise_iou[paired_true, paired_pred]
+        exact_threshold = pairwise_iou == match_iou
+        if not np.any(exact_threshold):
+            pairwise_iou[pairwise_iou <= match_iou] = 0.0
+            paired_true, paired_pred = np.nonzero(pairwise_iou)
+            paired_iou = pairwise_iou[paired_true, paired_pred]
+        else:
+            eligible = pairwise_iou >= match_iou
+            # Maximise eligible-pair cardinality first, then summed IoU. The
+            # large bonus guarantees that a matching with one more eligible
+            # pair is always preferred over any IoU-only trade-off.
+            cardinality_bonus = float(min(pairwise_iou.shape) + 1)
+            weights = np.where(eligible, cardinality_bonus + pairwise_iou, 0.0)
+            paired_true, paired_pred = linear_sum_assignment(-weights)
+            keep = eligible[paired_true, paired_pred]
+            paired_true = paired_true[keep]
+            paired_pred = paired_pred[keep]
+            paired_iou = pairwise_iou[paired_true, paired_pred]
         paired_true += 1  # index is instance id - 1
         paired_pred += 1  # hence return back to original
     else:  # * Exhaustive maximal unique pairing
