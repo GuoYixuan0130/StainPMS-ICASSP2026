@@ -26,7 +26,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from stainroute.oracle import pq_factorized
-from tools.analyze_eval_artifacts import analyze_pair, summarize
+from tools.analyze_eval_artifacts import _pairwise_stats, analyze_pair, summarize
 
 
 METRIC_KEYS = ("dice1", "dice2", "aji", "aji_p", "dq", "sq", "pq")
@@ -98,13 +98,16 @@ def _load_main_metrics(artifact_dir: Path, stdout_path: Path | None) -> tuple[di
     return metrics, str(stdout_path) if metrics is not None and stdout_path is not None else None
 
 
-def _artifact_rows(artifact_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, float]]:
+def _artifact_rows(
+    artifact_dir: Path,
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, float], list[dict[str, Any]]]:
     gt_paths = sorted(artifact_dir.glob("*_gt.npy"))
     if not gt_paths:
         raise FileNotFoundError(f"No '*_gt.npy' files under {artifact_dir}")
 
     rows: list[dict[str, Any]] = []
     factorized_values: list[float] = []
+    diagnostics: list[dict[str, Any]] = []
     for gt_path in gt_paths:
         stem = gt_path.name[: -len("_gt.npy")]
         pred_path = artifact_dir / f"{stem}_pred.npy"
@@ -112,22 +115,37 @@ def _artifact_rows(artifact_dir: Path) -> tuple[list[dict[str, Any]], dict[str, 
             raise FileNotFoundError(f"Missing prediction for {gt_path.name}: {pred_path}")
         gt = np.load(gt_path)
         pred = np.load(pred_path)
-        rows.append(
-            analyze_pair(
-                stem,
-                gt,
-                pred,
-                match_iou=0.5,
-                near_low=0.3,
-                weak_high=0.6,
-                overlap_frac=0.1,
-            )
+        row = analyze_pair(
+            stem,
+            gt,
+            pred,
+            match_iou=0.5,
+            near_low=0.3,
+            weak_high=0.6,
+            overlap_frac=0.1,
         )
-        factorized_values.append(pq_factorized(gt, pred, match_iou=0.5))
+        rows.append(row)
+        factorized_pq = pq_factorized(gt, pred, match_iou=0.5)
+        factorized_values.append(factorized_pq)
+        _, _, _, _, _, pairwise_iou = _pairwise_stats(gt, pred)
+        exact_half_count = int(
+            np.count_nonzero(np.isclose(pairwise_iou, 0.5, rtol=0.0, atol=1.0e-12))
+        )
+        diagnostics.append(
+            {
+                "image": stem,
+                "artifact_pq": float(row["pq"]),
+                "factorized_pq": float(factorized_pq),
+                "artifact_minus_factorized_pq": float(row["pq"] - factorized_pq),
+                "exact_iou_half_pair_count": exact_half_count,
+                "gt_count": int(row["gt_count"]),
+                "pred_count": int(row["pred_count"]),
+            }
+        )
 
     analysis = summarize(rows)
     factorized = {"pq": float(np.mean(factorized_values))}
-    return rows, analysis, factorized
+    return rows, analysis, factorized, diagnostics
 
 
 def _as_run_record(spec: dict[str, Any], tolerance: float) -> dict[str, Any]:
@@ -139,7 +157,7 @@ def _as_run_record(spec: dict[str, Any], tolerance: float) -> dict[str, Any]:
     checkpoint_path = Path(spec["checkpoint_path"])
     if not checkpoint_path.is_file():
         raise FileNotFoundError(f"checkpoint_path does not exist: {checkpoint_path}")
-    rows, artifact_summary, factorized = _artifact_rows(artifact_dir)
+    rows, artifact_summary, factorized, diagnostics = _artifact_rows(artifact_dir)
     stdout_path = Path(spec["main_stdout_path"]) if spec.get("main_stdout_path") else None
     main_metrics, main_metrics_source = _load_main_metrics(artifact_dir, stdout_path)
     artifact_metrics = artifact_summary["mean_metrics"]
@@ -179,6 +197,7 @@ def _as_run_record(spec: dict[str, Any], tolerance: float) -> dict[str, Any]:
         "metric_consistent": compatible,
         "expected_metrics": spec.get("expected_metrics"),
         "canonical": bool(spec.get("canonical", False)),
+        "metric_diagnostics": diagnostics,
     }
 
 
@@ -220,6 +239,32 @@ def _write_csv(records: list[dict[str, Any]], path: Path) -> None:
             writer.writerow(row)
 
 
+def _write_diagnostics(records: list[dict[str, Any]], path: Path) -> None:
+    fieldnames = [
+        "dataset",
+        "method",
+        "image",
+        "artifact_pq",
+        "factorized_pq",
+        "artifact_minus_factorized_pq",
+        "exact_iou_half_pair_count",
+        "gt_count",
+        "pred_count",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for record in records:
+            for item in record["metric_diagnostics"]:
+                writer.writerow(
+                    {
+                        "dataset": record["dataset"],
+                        "method": record["method"],
+                        **item,
+                    }
+                )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--spec", required=True, type=Path, help="JSON run specification")
@@ -236,6 +281,7 @@ def main() -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = args.out_dir / "baseline_manifest.json"
     metrics_path = args.out_dir / "baseline_metrics.csv"
+    diagnostics_path = args.out_dir / "metric_reconciliation_diagnostics.csv"
     manifest = {
         "git_sha": _git_sha(),
         "tolerance": float(args.tolerance),
@@ -243,8 +289,19 @@ def main() -> int:
     }
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     _write_csv(records, metrics_path)
+    _write_diagnostics(records, diagnostics_path)
 
-    print(json.dumps({"manifest": str(manifest_path), "metrics": str(metrics_path), "runs": records}, indent=2))
+    print(
+        json.dumps(
+            {
+                "manifest": str(manifest_path),
+                "metrics": str(metrics_path),
+                "diagnostics": str(diagnostics_path),
+                "runs": records,
+            },
+            indent=2,
+        )
+    )
     return 0 if all(record["metric_consistent"] for record in records) else 2
 
 

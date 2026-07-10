@@ -62,6 +62,9 @@ The command creates the required raw evidence files:
 
 - `logs/stainroute/stage0/baseline_manifest.json`
 - `logs/stainroute/stage0/baseline_metrics.csv`
+- `logs/stainroute/stage0/metric_reconciliation_diagnostics.csv`
 
 It returns non-zero if the main evaluation, artifact analyzer, and factorized
-PQ paths disagree beyond `2e-6`. Do not continue to Stage 1 when it fails.
+PQ paths disagree beyond `2e-6`. The diagnostics CSV identifies the per-image
+factorized-PQ difference and any exact-IoU-0.5 pairs. Do not continue to Stage
+1 when it fails.
