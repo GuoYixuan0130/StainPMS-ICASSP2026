@@ -81,6 +81,23 @@ def _parse_main_stdout(path: Path | None) -> dict[str, float] | None:
     return dict(zip(METRIC_KEYS, values, strict=True))
 
 
+def _load_main_metrics(artifact_dir: Path, stdout_path: Path | None) -> tuple[dict[str, float] | None, str | None]:
+    """Load exact metrics written by main.py, with stdout parsing as fallback."""
+
+    summary_path = artifact_dir / "main_eval_metrics.json"
+    if summary_path.is_file():
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+        metrics = payload.get("metrics")
+        if not isinstance(metrics, dict):
+            raise ValueError(f"Invalid metrics payload in {summary_path}")
+        missing = [key for key in METRIC_KEYS if key not in metrics]
+        if missing:
+            raise ValueError(f"Missing metrics in {summary_path}: {', '.join(missing)}")
+        return ({key: float(metrics[key]) for key in METRIC_KEYS}, str(summary_path))
+    metrics = _parse_main_stdout(stdout_path)
+    return metrics, str(stdout_path) if metrics is not None and stdout_path is not None else None
+
+
 def _artifact_rows(artifact_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, float]]:
     gt_paths = sorted(artifact_dir.glob("*_gt.npy"))
     if not gt_paths:
@@ -124,7 +141,7 @@ def _as_run_record(spec: dict[str, Any], tolerance: float) -> dict[str, Any]:
         raise FileNotFoundError(f"checkpoint_path does not exist: {checkpoint_path}")
     rows, artifact_summary, factorized = _artifact_rows(artifact_dir)
     stdout_path = Path(spec["main_stdout_path"]) if spec.get("main_stdout_path") else None
-    main_metrics = _parse_main_stdout(stdout_path)
+    main_metrics, main_metrics_source = _load_main_metrics(artifact_dir, stdout_path)
     artifact_metrics = artifact_summary["mean_metrics"]
 
     differences: dict[str, float] = {}
@@ -152,6 +169,7 @@ def _as_run_record(spec: dict[str, Any], tolerance: float) -> dict[str, Any]:
         "seed": int(spec["seed"]),
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "num_images": len(rows),
+        "main_metrics_source": main_metrics_source,
         "metrics": {
             "main_evaluation": main_metrics,
             "artifact_analysis": artifact_metrics,

@@ -5,8 +5,9 @@ commit has been transferred there. Do not change a command, checkpoint, seed,
 overlap, NMS threshold, test split, or TTA setting after seeing a metric.
 
 All commands write their terminal output into the corresponding artifact
-directory. The final reconciliation command uses that raw output rather than
-hand-copied values.
+directory. They also write unrounded `main_eval_metrics.json`; the final
+reconciliation command uses this structured value rather than hand-copied or
+rounded terminal values. The stdout log remains a backward-compatible backup.
 
 ```bash
 set -euo pipefail

@@ -1,6 +1,8 @@
 import copy
+import json
 import math
 import os
+import sys
 import time
 
 import matplotlib.pyplot as plt
@@ -207,6 +209,38 @@ def freeze_sam2_image_encoder(net):
             param.requires_grad_(False)
 
 
+def write_eval_metric_artifact(cfgs, eval_split, metrics):
+    """Write unrounded evaluation metrics alongside optional map artifacts.
+
+    The text printed to stdout is intentionally concise and rounded, which is
+    not sufficient for Stage 0 metric reconciliation.  This sidecar is written
+    only when artifact dumping was explicitly requested and does not affect
+    evaluation, NMS, or instance assembly.
+    """
+
+    dump_dir = str(getattr(cfgs, "dump_eval_artifacts_dir", "") or "")
+    if not dump_dir:
+        return
+    metric_names = ("dice1", "dice2", "aji", "aji_p", "dq", "sq", "pq")
+    payload = {
+        "split": str(eval_split),
+        "metrics": {
+            name: float(value) for name, value in zip(metric_names, metrics, strict=True)
+        },
+        "checkpoint_path": str(cfgs.sam_ckpt),
+        "dataset": str(cfgs.dataset),
+        "overlap": int(cfgs.overlap),
+        "nms_threshold": int(cfgs.test_nms_thr),
+        "seed": int(cfgs.seed),
+        "command": list(sys.argv),
+    }
+    os.makedirs(dump_dir, exist_ok=True)
+    path = os.path.join(dump_dir, "main_eval_metrics.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    print(f"Wrote unrounded evaluation metrics: {path}")
+
+
 def main():
     args = Config.fromfile("./args.py")
     cfgs = cfg.parse_args()
@@ -395,6 +429,7 @@ def main():
             f"aji: {seg_aji * 100:.2f} aji_p: {seg_aji_p * 100:.2f} "
             f"dq: {seg_dq * 100:.2f} sq: {seg_sq * 100:.2f} pq: {seg_pq * 100:.2f}"
         )
+        write_eval_metric_artifact(cfgs, eval_split, metrics)
         return
 
     if cfgs.pms_self_bootstrap:
