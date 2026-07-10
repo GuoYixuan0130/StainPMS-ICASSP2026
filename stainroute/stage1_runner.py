@@ -1043,7 +1043,13 @@ def run_stage1_oracle(
     loader, image_root, split_manifest = _subset_loader(cfgs, test_dataset, split_manifest_path, cfgs.stainroute_split)
     add_config = AddCandidateConfig(**config["add"])
     split_candidate_config = SplitCandidateConfig(**config["split"])
-    split_assembly_config = SplitAssemblyConfig(**config["assembly"])
+    split_assembly_config = SplitAssemblyConfig(
+        **{
+            key: value
+            for key, value in config["assembly"].items()
+            if key in {"min_child_area", "min_parent_coverage", "max_raw_child_iou"}
+        }
+    )
     out_dir = Path(cfgs.stainroute_out_dir or f"logs/stainroute/stage1/{Path(cfgs.data_path).name}_{cfgs.stainroute_split}")
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "decoded_actions").mkdir(exist_ok=True)
