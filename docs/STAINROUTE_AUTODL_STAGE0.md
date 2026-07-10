@@ -15,12 +15,14 @@ cd /path/to/StainPMS-ICASSP2026
 conda activate CA-SAM2
 git rev-parse HEAD
 mkdir -p logs/stainroute/stage0
-cp configs/stainroute_stage0_runs.example.json configs/stainroute_stage0_runs.json
 ```
 
-Before running, edit only the paths in `configs/stainroute_stage0_runs.json`
-if the AutoDL checkpoint location differs. Keep the `command` fields consistent
-with the invoked commands and do not edit their evaluation settings.
+Use the Git-tracked `configs/stainroute_stage0_runs.example.json` directly;
+it contains the canonical shared-checkpoint paths. If a future environment
+genuinely uses different paths, copy it to a distinct untracked filename and
+pass that filename explicitly to the reconciliation command. Keep the
+`command` fields consistent with the invoked commands and do not edit their
+evaluation settings.
 
 ## MoNuSeg CA-SAM2
 
@@ -53,7 +55,7 @@ python main.py --eval --dataset monuseg --data_path ./data/tnbc --sam_ckpt ../CA
 ## Metric reconciliation
 
 ```bash
-python tools/stainroute_stage0_reconcile.py --spec configs/stainroute_stage0_runs.json --out-dir logs/stainroute/stage0
+python tools/stainroute_stage0_reconcile.py --spec configs/stainroute_stage0_runs.example.json --out-dir logs/stainroute/stage0
 ```
 
 The command creates the required raw evidence files:
