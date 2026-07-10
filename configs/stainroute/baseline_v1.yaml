@@ -1,0 +1,47 @@
+{
+  "baseline_name": "StainRoute Development Baseline v1",
+  "purpose": "Frozen development baseline for Stage 1 oracle feasibility only",
+  "historical_tnbc_provenance": "unresolved; never compare new results directly with legacy paper TNBC values",
+  "evaluation": {
+    "test_nms_thr": 12,
+    "tta": false,
+    "decoder_batch_size": 1,
+    "seed": 3407,
+    "texture": true,
+    "context": true,
+    "matching": {
+      "iou_threshold": 0.5,
+      "inclusive": true,
+      "one_to_one": true,
+      "evaluators_must_agree": ["main", "artifact", "factorized"]
+    }
+  },
+  "checkpoints": {
+    "monuseg_casam2": {
+      "path": "../CA-SAM2-HRC/checkpoints/CA-SAM2_monuseg.pth",
+      "sha256": "33bc933508c96b7b8332c27185fc1b24da83c90fa82598b265af6e72a3a059cd"
+    },
+    "monuseg_stainpms": {
+      "path": "../CA-SAM2-HRC/deliver_ckpts/monuseg_pms_best_pq.pth",
+      "sha256": "6616c24626a162580d79aa7035d0b6c1a4ae6240a6c2f4599960dd4efac95db1"
+    },
+    "tnbc_casam2": {
+      "path": "../CA-SAM2-HRC/deliver_ckpts/tnbc_baseline_best_e147.pth",
+      "sha256": "a73f6b16544572dda931f5b3eac479f4c9574ab2417866a8a87c97bbda0f74c6"
+    },
+    "tnbc_stainpms": {
+      "path": "../CA-SAM2-HRC/deliver_ckpts/tnbc_pms_best_e156.pth",
+      "sha256": "44a3cb3e93051301d789e44f93769588abfa727d7a174b0270f55305ef023781"
+    }
+  },
+  "development_data_roots": {
+    "monuseg": "./data/monuseg",
+    "tnbc": "./data/tnbc"
+  },
+  "frozen_stage0_metrics": {
+    "monuseg_casam2_pq": 0.6198607828147481,
+    "monuseg_stainpms_pq": 0.6577682482753315,
+    "tnbc_casam2_pq": 0.6634113153754566,
+    "tnbc_stainpms_pq": 0.6680768045208283
+  }
+}

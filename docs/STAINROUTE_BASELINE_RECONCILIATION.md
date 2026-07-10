@@ -94,3 +94,22 @@ Only after that provenance check can the lead decide whether the current
 NMS-12 `e147/e156` evaluation becomes the new canonical baseline. No model
 fine-tuning or Stage 1 oracle/router work is authorized while this report is
 blocked.
+
+## Addendum — 2026-07-10: conditional Stage 1 authorization
+
+The project lead reviewed this report and authorized a **conditional** Stage 1
+oracle feasibility study. Historical TNBC provenance remains unresolved.
+
+- Current e147/e156 checkpoints, the current TNBC data snapshot, and NMS=12
+  are accepted as **StainRoute Development Baseline v1**.
+- This authorization unblocks only train/calibration ADD/SPLIT oracle studies.
+  It does not authorize router training, test-split oracle enumeration, model
+  fine-tuning, boundary actions, or final paper experiments.
+- All final TNBC comparisons must be rerun against Baseline v1. Historical
+  paper TNBC values must never be mixed into a new-method comparison.
+- A subsequently recovered historical artifact is a separate provenance
+  experiment and must not silently replace Baseline v1.
+
+The development-baseline specification is
+`configs/stainroute/baseline_v1.yaml`; its generated host/data/checksum
+manifest is `logs/stainroute/stage1/baseline_v1_manifest.json`.
