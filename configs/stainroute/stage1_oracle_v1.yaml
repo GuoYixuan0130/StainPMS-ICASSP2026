@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "generator_version": "stainroute-stage1-oracle-v1",
+  "add": {
+    "h_sigma": 1.0,
+    "coverage_dilation_radius": 5,
+    "residual_percentile": 80.0,
+    "min_component_area": 8,
+    "min_peak_distance": 12,
+    "max_candidates": 20,
+    "generator_version": "stainroute-add-v1"
+  },
+  "split": {
+    "h_sigma": 1.0,
+    "min_parent_area": 64,
+    "min_peak_distance": 12,
+    "min_normalized_peak_distance": 0.2,
+    "max_peaks_per_parent": 4,
+    "max_pairs_per_parent": 3,
+    "min_peak_height_ratio": 0.5,
+    "min_valley_depth": 0.2,
+    "generator_version": "stainroute-split-v1"
+  },
+  "assembly": {
+    "min_added_area": 8,
+    "min_child_area": 8,
+    "min_parent_coverage": 0.2,
+    "max_raw_child_iou": 0.9
+  },
+  "conflicts": {
+    "support_iou_threshold": 0.5
+  },
+  "oracle": {
+    "budgets": [1, 2, 4, 8],
+    "exact_max_candidates": 18,
+    "beam_width": 64,
+    "beam_validation_max_candidates": 12,
+    "bootstrap_samples": 2000,
+    "bootstrap_seed": 3407,
+    "random_trials": 100
+  }
+}

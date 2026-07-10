@@ -109,6 +109,21 @@ def parse_args():
     parser.add_argument("--oracle_min_added_area", default=8, type=int)
 
     parser.add_argument(
+        "--stage1_stainroute_oracle",
+        action="store_true",
+        help="Run Stage 1 ADD/SPLIT oracle only on a frozen train or calibration manifest split.",
+    )
+    parser.add_argument("--stainroute_split_manifest", default="", type=str)
+    parser.add_argument("--stainroute_split", default="router_train", choices=["router_train", "calibration"])
+    parser.add_argument("--stainroute_action_config", default="configs/stainroute/stage1_oracle_v1.yaml", type=str)
+    parser.add_argument("--stainroute_out_dir", default="", type=str)
+    parser.add_argument("--stainroute_baseline_manifest", default="logs/stainroute/stage1/baseline_v1_manifest.json", type=str)
+    parser.add_argument("--stainroute_max_images", default=0, type=int)
+    parser.add_argument("--stainroute_exact_max_candidates", default=18, type=int)
+    parser.add_argument("--stainroute_beam_width", default=64, type=int)
+    parser.add_argument("--stainroute_bootstrap_samples", default=2000, type=int)
+
+    parser.add_argument(
         "--stage2_selective_refine",
         action="store_true",
         help="Run StainPQR Stage 2C selective coverage refinement and exit.",

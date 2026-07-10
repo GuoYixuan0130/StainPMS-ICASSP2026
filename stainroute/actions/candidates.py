@@ -12,6 +12,7 @@ from skimage.feature import peak_local_max
 from skimage.filters import gaussian
 from skimage.measure import label, regionprops
 from skimage.morphology import binary_dilation, disk
+from skimage.segmentation import watershed
 
 from stainroute.utils import canonical_json_sha256
 
@@ -88,15 +89,22 @@ def _line_values(image: np.ndarray, p1: Point, p2: Point) -> np.ndarray:
     return image[ys, xs]
 
 
-def _distance_basin_ratio(mask: np.ndarray, p1: Point, p2: Point) -> float:
-    ys, xs = np.nonzero(mask)
-    if len(xs) == 0:
-        return 0.0
-    d1 = (xs - p1.x) ** 2 + (ys - p1.y) ** 2
-    d2 = (xs - p2.x) ** 2 + (ys - p2.y) ** 2
-    first = int(np.count_nonzero(d1 <= d2))
-    second = len(xs) - first
-    return float(min(first, second) / max(1, max(first, second)))
+def _distance_basin_features(mask: np.ndarray, p1: Point, p2: Point) -> dict[str, float]:
+    """Compute deterministic distance-transform basins from the two H peaks."""
+
+    distance = distance_transform_edt(mask)
+    markers = np.zeros(mask.shape, dtype=np.int32)
+    markers[p1.y, p1.x] = 1
+    markers[p2.y, p2.x] = 2
+    basins = watershed(-distance, markers=markers, mask=mask)
+    first = int(np.count_nonzero(basins == 1))
+    second = int(np.count_nonzero(basins == 2))
+    return {
+        "distance_basin_area_ratio": float(min(first, second) / max(1, max(first, second))),
+        "distance_transform_at_peak_1": float(distance[p1.y, p1.x]),
+        "distance_transform_at_peak_2": float(distance[p2.y, p2.x]),
+        "distance_transform_max": float(distance.max()) if distance.size else 0.0,
+    }
 
 
 def generate_add_candidates(
@@ -226,7 +234,8 @@ def generate_split_candidates(
             valley_depth = 1.0 - valley / max(1.0e-12, min(height1, height2))
             if valley_depth < config.min_valley_depth:
                 continue
-            basin_ratio = _distance_basin_ratio(parent, p1, p2)
+            basin_features = _distance_basin_features(parent, p1, p2)
+            basin_ratio = basin_features["distance_basin_area_ratio"]
             proposal_score = height1 + height2 + normalized_distance + basin_ratio - valley_depth
             features = {
                 "parent_pred_id": parent_id,
@@ -240,7 +249,7 @@ def generate_split_candidates(
                 "peak_distance": distance,
                 "normalized_peak_distance": normalized_distance,
                 "peak_valley_depth": valley_depth,
-                "distance_basin_area_ratio": basin_ratio,
+                **basin_features,
                 "h_parent": _local_stats(evidence, parent),
             }
             proposals.append((proposal_score, p1, p2, features))

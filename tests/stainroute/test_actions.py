@@ -46,11 +46,36 @@ class ActionSchemaAndCandidateTest(unittest.TestCase):
         second = generate_add_candidates(image, prediction, image_id="image")
         self.assertEqual([item.to_json() for item in first], [item.to_json() for item in second])
 
+    def test_replacing_or_randomizing_gt_cannot_change_candidate_geometry(self) -> None:
+        """The candidate API deliberately has no GT input or hidden state."""
+
+        image = np.full((64, 64, 3), 220, dtype=np.uint8)
+        image[12:22, 12:22, 2] = 10
+        image[38:48, 38:48, 2] = 15
+        prediction = np.zeros((64, 64), dtype=np.int32)
+        gt_empty = np.zeros((64, 64), dtype=np.int32)
+        gt_random = np.random.default_rng(3407).integers(0, 9, size=(64, 64), dtype=np.int32)
+        # Neither label map is passed: if this ever changes, the signature
+        # assertions above and this strict geometry comparison must be updated
+        # as a leakage review rather than silently accepting the change.
+        _ = gt_empty
+        first = [item.to_json() for item in generate_add_candidates(image, prediction, image_id="image")]
+        _ = gt_random
+        second = [item.to_json() for item in generate_add_candidates(image, prediction, image_id="image")]
+        self.assertEqual(first, second)
+        for candidate in generate_split_candidates(image, prediction, image_id="image"):
+            self.assertNotIn("gt", str(candidate.generation_features).lower())
+
     def test_coordinate_round_trip(self) -> None:
         point = Point(3, 60)
         box = crop_box_around_point(point, image_width=80, image_height=100, crop_size=32)
         local = global_to_crop(point, box)
         self.assertEqual(crop_to_global(local, box), point)
+
+    def test_coordinate_round_trip_at_image_boundaries(self) -> None:
+        for point in (Point(0, 0), Point(79, 0), Point(0, 99), Point(79, 99)):
+            box = crop_box_around_point(point, image_width=80, image_height=100, crop_size=32)
+            self.assertEqual(crop_to_global(global_to_crop(point, box), box), point)
 
 
 class AssemblyAndConflictTest(unittest.TestCase):

@@ -68,14 +68,23 @@ def _resolve_child_overlap(
     second: np.ndarray,
     first_point: Point,
     second_point: Point,
+    first_logits: np.ndarray | None = None,
+    second_logits: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     overlap = first & second
     if not np.any(overlap):
         return first, second
     ys, xs = np.nonzero(overlap)
-    first_distance = (xs - first_point.x) ** 2 + (ys - first_point.y) ** 2
-    second_distance = (xs - second_point.x) ** 2 + (ys - second_point.y) ** 2
-    first_wins = first_distance <= second_distance
+    if first_logits is not None and second_logits is not None:
+        first_logits = np.asarray(first_logits)
+        second_logits = np.asarray(second_logits)
+        if first_logits.shape != first.shape or second_logits.shape != second.shape:
+            raise ValueError("Child logit shapes must match child masks")
+        first_wins = first_logits[ys, xs] >= second_logits[ys, xs]
+    else:
+        first_distance = (xs - first_point.x) ** 2 + (ys - first_point.y) ** 2
+        second_distance = (xs - second_point.x) ** 2 + (ys - second_point.y) ** 2
+        first_wins = first_distance <= second_distance
     first = first.copy()
     second = second.copy()
     first[ys[~first_wins], xs[~first_wins]] = False
@@ -91,6 +100,8 @@ def apply_split_action(
     child_second: np.ndarray,
     first_point: Point,
     second_point: Point,
+    first_logits: np.ndarray | None = None,
+    second_logits: np.ndarray | None = None,
     config: SplitAssemblyConfig = SplitAssemblyConfig(),
 ) -> AssemblyResult:
     """Replace one parent with two mutually exclusive child instances."""
@@ -120,7 +131,14 @@ def apply_split_action(
     if raw_iou >= config.max_raw_child_iou:
         return AssemblyResult(prediction.copy(), False, "near_identical_children", details)
 
-    first, second = _resolve_child_overlap(first, second, first_point, second_point)
+    first, second = _resolve_child_overlap(
+        first,
+        second,
+        first_point,
+        second_point,
+        first_logits=first_logits,
+        second_logits=second_logits,
+    )
     first_area = int(first.sum())
     second_area = int(second.sum())
     details["child_first_area"] = first_area
