@@ -248,6 +248,20 @@ def _assign_tiles(actions: list[ActionCandidate], caches: dict[tuple[int, int, i
     return output
 
 
+def _smoke_candidate_subset(actions: list[ActionCandidate]) -> list[ActionCandidate]:
+    """Bound a smoke run without changing the frozen formal action space.
+
+    The smoke objective is encoder-cache equivalence and ADD/SPLIT execution
+    plumbing.  It is explicitly not an oracle-headroom measurement, so it
+    uses the first two deterministic proposals from each family and a tiny
+    control/search budget.  Formal runs (``max_images == 0``) never call this.
+    """
+
+    additions = [action for action in actions if action.action_type is ActionType.ADD]
+    splits = [action for action in actions if action.action_type is ActionType.SPLIT]
+    return additions[:2] + splits[:2]
+
+
 def _update_texture_memory(
     *,
     net: Any,
@@ -348,9 +362,11 @@ def _base_prediction_with_cache(
     counters = {"encoder_calls": 0, "base_decoder_actions": 0}
 
     crop_boxes = [tuple(int(item) for item in box) for box in crop_with_overlap(image_tensor[0], cfgs.crop_size, cfgs.crop_size, cfgs.overlap, cfgs.load).tolist()]
-    for crop_box in crop_boxes:
+    print(f"[stage1-base] tiles={len(crop_boxes)} image_shape={height}x{width}", flush=True)
+    for crop_index, crop_box in enumerate(crop_boxes, start=1):
         x1, y1, x2, y2 = crop_box
         crop = image_tensor[..., y1:y2, x1:x2]
+        print(f"[stage1-base] tile={crop_index}/{len(crop_boxes)} box={crop_box}", flush=True)
         points, scores, classes, _, _, _, _ = predict(
             point_net,
             crop,
@@ -1032,6 +1048,8 @@ def run_stage1_oracle(
     split_manifest_path = Path(cfgs.stainroute_split_manifest)
     config_path = Path(cfgs.stainroute_action_config)
     config = _json_config(config_path)
+    max_images = int(cfgs.stainroute_max_images or 0)
+    smoke_mode = max_images > 0
     baseline = _require_frozen_baseline(cfgs, split_manifest_path)
     for option, config_key in (
         ("stainroute_exact_max_candidates", "exact_max_candidates"),
@@ -1044,6 +1062,20 @@ def run_stage1_oracle(
                 f"({config['oracle'][config_key]}), not {getattr(cfgs, option)}"
             )
     loader, image_root, split_manifest = _subset_loader(cfgs, test_dataset, split_manifest_path, cfgs.stainroute_split)
+    if smoke_mode:
+        # Keep the configured formal action space intact on disk.  These
+        # execution-only limits make a one-image plumbing smoke practical on
+        # a high-resolution MoNuSeg slide.
+        config = copy.deepcopy(config)
+        config["oracle"].update(
+            {
+                "budgets": [1, 2],
+                "exact_max_candidates": 4,
+                "beam_width": 4,
+                "bootstrap_samples": 20,
+                "random_trials": 4,
+            }
+        )
     add_config = AddCandidateConfig(**config["add"])
     split_candidate_config = SplitCandidateConfig(**config["split"])
     split_assembly_config = SplitAssemblyConfig(
@@ -1081,7 +1113,6 @@ def run_stage1_oracle(
     net.eval()
     point_net.eval()
     point_encoder.eval()
-    max_images = int(cfgs.stainroute_max_images or 0)
     feature_rows: list[dict[str, Any]] = []
     label_rows: list[dict[str, Any]] = []
     per_image_rows: list[dict[str, Any]] = []
@@ -1097,6 +1128,11 @@ def run_stage1_oracle(
         started = time.perf_counter()
         image_tensor, inst_maps, _, _, _, _, ori_shape, _, name = batch
         image_id = _safe_name(name)
+        print(
+            f"[stage1] image={image_index + 1}/{min(len(loader), max_images) if smoke_mode else len(loader)} "
+            f"id={image_id} smoke={smoke_mode}",
+            flush=True,
+        )
         base, caches, selected_records, equivalence, counters = _base_prediction_with_cache(
             image_tensor=image_tensor,
             ori_shape=ori_shape,
@@ -1111,10 +1147,20 @@ def run_stage1_oracle(
         raw_image = imread(_find_image(image_root, image_id))[..., :3]
         generated = generate_add_candidates(raw_image, base, image_id=image_id, config=add_config)
         generated += generate_split_candidates(raw_image, base, image_id=image_id, config=split_candidate_config)
+        generated_add = sum(action.action_type is ActionType.ADD for action in generated)
+        generated_split = sum(action.action_type is ActionType.SPLIT for action in generated)
+        if smoke_mode:
+            generated = _smoke_candidate_subset(generated)
+        print(
+            f"[stage1-actions] generated_add={generated_add} generated_split={generated_split} "
+            f"decoded_candidates={len(generated)}",
+            flush=True,
+        )
         tiled = _assign_tiles(generated, caches)
         decoded, decoder_cost = _decode_grouped_actions(
             tiled, caches, ori_shape=ori_shape, cfgs=cfgs, net=net, device=device
         )
+        print(f"[stage1-actions] decoded={len(decoded)} decoder_cost={decoder_cost}", flush=True)
         decoded = _attach_prediction_conflicts(
             decoded, float(config["conflicts"]["support_iou_threshold"])
         )
@@ -1183,6 +1229,8 @@ def run_stage1_oracle(
                 "base_dq": base_eval.dq,
                 "base_sq": base_eval.sq,
                 "base_matched_iou_sum": base_eval.matched_iou_sum,
+                "generated_add_candidates": generated_add,
+                "generated_split_candidates": generated_split,
                 "add_candidates": sum(item.candidate.action_type is ActionType.ADD for item in finalized.values()),
                 "split_candidates": sum(item.candidate.action_type is ActionType.SPLIT for item in finalized.values()),
                 **public_diagnostics,
@@ -1321,6 +1369,17 @@ def run_stage1_oracle(
         "image_count": len(per_image_rows),
         "is_smoke_run": bool(max_images > 0),
         "max_images": max_images,
+        "smoke_profile": (
+            {
+                "candidate_limit_per_family": 2,
+                "budgets": [1, 2],
+                "bootstrap_samples": 20,
+                "random_trials": 4,
+                "purpose": "cache/assembly plumbing only; not a formal oracle measurement",
+            }
+            if smoke_mode
+            else None
+        ),
         "gt_policy": "GT read only after candidates are generated and decoded; utility/diagnostics only",
         "normalized_recovery_definition": "(PQ_oracle - PQ_StainPMS) / (1 - PQ_StainPMS)",
     }
