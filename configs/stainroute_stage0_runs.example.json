@@ -33,13 +33,13 @@
       "method": "CA-SAM2",
       "artifact_dir": "logs/stainroute/stage0/casam2_tnbc_test",
       "main_stdout_path": "logs/stainroute/stage0/casam2_tnbc_test/main_stdout.log",
-      "checkpoint_path": "deliver_ckpts/tnbc_baseline_best_e147.pth",
+      "checkpoint_path": "../CA-SAM2-HRC/deliver_ckpts/tnbc_baseline_best_e147.pth",
       "split": "patients-9-11",
       "overlap": 32,
       "nms_threshold": 12,
       "seed": 3407,
       "canonical": true,
-      "command": "python main.py --eval --dataset monuseg --data_path ./data/tnbc --sam_ckpt ./deliver_ckpts/tnbc_baseline_best_e147.pth --sam_config sam2_hiera_l --texture --context --overlap 32 --test_nms_thr 12 --b 1 --seed 3407 --exp_name stainroute_stage0_casam2_tnbc --dump_eval_artifacts_dir ./logs/stainroute/stage0/casam2_tnbc_test",
+      "command": "python main.py --eval --dataset monuseg --data_path ./data/tnbc --sam_ckpt ../CA-SAM2-HRC/deliver_ckpts/tnbc_baseline_best_e147.pth --sam_config sam2_hiera_l --texture --context --overlap 32 --test_nms_thr 12 --b 1 --seed 3407 --exp_name stainroute_stage0_casam2_tnbc --dump_eval_artifacts_dir ./logs/stainroute/stage0/casam2_tnbc_test",
       "expected_metrics": {"aji": 0.639, "dq": 0.835, "sq": 0.808, "pq": 0.676}
     },
     {

@@ -40,7 +40,7 @@ python main.py --eval --dataset monuseg --data_path ./data/monuseg --sam_ckpt ..
 
 ```bash
 mkdir -p logs/stainroute/stage0/casam2_tnbc_test
-python main.py --eval --dataset monuseg --data_path ./data/tnbc --sam_ckpt ./deliver_ckpts/tnbc_baseline_best_e147.pth --sam_config sam2_hiera_l --texture --context --overlap 32 --test_nms_thr 12 --b 1 --seed 3407 --exp_name stainroute_stage0_casam2_tnbc --dump_eval_artifacts_dir ./logs/stainroute/stage0/casam2_tnbc_test 2>&1 | tee logs/stainroute/stage0/casam2_tnbc_test/main_stdout.log
+python main.py --eval --dataset monuseg --data_path ./data/tnbc --sam_ckpt ../CA-SAM2-HRC/deliver_ckpts/tnbc_baseline_best_e147.pth --sam_config sam2_hiera_l --texture --context --overlap 32 --test_nms_thr 12 --b 1 --seed 3407 --exp_name stainroute_stage0_casam2_tnbc --dump_eval_artifacts_dir ./logs/stainroute/stage0/casam2_tnbc_test 2>&1 | tee logs/stainroute/stage0/casam2_tnbc_test/main_stdout.log
 ```
 
 ## TNBC StainPMS
