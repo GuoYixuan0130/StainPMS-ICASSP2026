@@ -49,10 +49,10 @@ from stainroute.inference.coordinates import global_to_crop
 from stainroute.metrics import PQEvaluation, evaluate_pq
 from stainroute.oracle_actions import (
     ActionUtility,
-    beam_joint_oracle,
     compute_action_utility,
     exact_joint_oracle,
     normalized_oracle_recovery,
+    utility_guided_beam_joint_oracle,
 )
 from stainroute.utils import sha256_file
 
@@ -787,6 +787,7 @@ def _oracle_rows_for_family(
     rows = []
     oracle_config = config["oracle"]
     for budget in oracle_config["budgets"]:
+        print(f"[stage1-oracle] family={family} budget={budget} candidates={len(actions)}", flush=True)
         validation: dict[str, Any] = {
             "beam_validation_candidate_count": None,
             "beam_validation_pq_abs_error": None,
@@ -796,14 +797,20 @@ def _oracle_rows_for_family(
             result = exact_joint_oracle(actions, budget=int(budget), conflict_graph=graph, evaluate_subset=evaluate_subset)
             strategy = "exact"
         else:
-            result = beam_joint_oracle(
+            single_action_scores = {
+                action.action_id: float(action.utility_fields.get("delta_matched_iou_sum", 0.0))
+                for action in actions
+            }
+            result = utility_guided_beam_joint_oracle(
                 actions,
                 budget=int(budget),
                 conflict_graph=graph,
                 evaluate_subset=evaluate_subset,
+                single_action_scores=single_action_scores,
                 beam_width=int(oracle_config["beam_width"]),
+                final_evaluation_limit=int(oracle_config["beam_final_evaluations"]),
             )
-            strategy = "beam"
+            strategy = "utility_guided_beam"
             validation_actions = sorted(actions, key=lambda action: action.action_id)[
                 : int(oracle_config.get("beam_validation_max_candidates", 12))
             ]
@@ -817,12 +824,17 @@ def _oracle_rows_for_family(
                 conflict_graph=validation_graph,
                 evaluate_subset=evaluate_subset,
             )
-            beam_validation = beam_joint_oracle(
+            beam_validation = utility_guided_beam_joint_oracle(
                 validation_actions,
                 budget=int(budget),
                 conflict_graph=validation_graph,
                 evaluate_subset=evaluate_subset,
+                single_action_scores={
+                    action.action_id: float(action.utility_fields.get("delta_matched_iou_sum", 0.0))
+                    for action in validation_actions
+                },
                 beam_width=int(oracle_config["beam_width"]),
+                final_evaluation_limit=int(oracle_config["beam_final_evaluations"]),
             )
             validation = {
                 "beam_validation_candidate_count": len(validation_actions),
@@ -836,7 +848,8 @@ def _oracle_rows_for_family(
                 "family": family,
                 "budget": int(budget),
                 "search_strategy": strategy,
-                "beam_width": int(oracle_config["beam_width"]) if strategy == "beam" else None,
+                "beam_width": int(oracle_config["beam_width"]) if strategy == "utility_guided_beam" else None,
+                "beam_final_evaluations": result.full_evaluation_count if strategy == "utility_guided_beam" else None,
                 "candidate_count": len(actions),
                 "selected_action_ids": ";".join(result.action_ids),
                 "selected_cost": result.cost,

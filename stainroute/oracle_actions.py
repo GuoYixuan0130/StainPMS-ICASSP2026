@@ -101,6 +101,7 @@ class OracleSubsetResult:
     action_ids: tuple[str, ...]
     cost: int
     evaluation: PQEvaluation
+    full_evaluation_count: int = 0
 
 
 def _is_feasible(ids: Iterable[str], conflict_graph: dict[str, set[str]]) -> bool:
@@ -195,6 +196,74 @@ def beam_joint_oracle(
         )
         states = {item.action_ids: item for item in ranked[:beam_width]}
     return best
+
+
+def utility_guided_beam_joint_oracle(
+    actions: Sequence[ActionCandidate],
+    *,
+    budget: int,
+    conflict_graph: dict[str, set[str]],
+    evaluate_subset: Callable[[tuple[str, ...]], PQEvaluation],
+    single_action_scores: dict[str, float],
+    beam_width: int,
+    final_evaluation_limit: int,
+) -> OracleSubsetResult:
+    """Conflict-aware GT-oracle beam with bounded full-map evaluations.
+
+    For large candidate pools, evaluating global PQ after every combinatorial
+    expansion is needlessly expensive.  Stage 1 is allowed to use GT utility
+    for oracle selection, so expansions are ranked by the recorded *single*
+    action ``delta_matched_iou_sum``.  The most promising deterministic beam
+    states are then evaluated by the complete global evaluator.  This remains
+    an explicitly approximate beam oracle, never an exact upper bound.
+    """
+
+    if beam_width <= 0 or final_evaluation_limit <= 0:
+        raise ValueError("beam_width and final_evaluation_limit must be positive")
+    action_by_id = {action.action_id: action for action in actions}
+    ordered_ids = tuple(sorted(action_by_id))
+
+    def score(ids: tuple[str, ...]) -> float:
+        return float(sum(single_action_scores.get(action_id, 0.0) for action_id in ids))
+
+    states: dict[tuple[str, ...], tuple[int, float]] = {(): (0, 0.0)}
+    retained: dict[tuple[str, ...], tuple[int, float]] = {(): (0, 0.0)}
+    while states:
+        expansions: dict[tuple[str, ...], tuple[int, float]] = {}
+        for ids, (cost, _) in states.items():
+            selected = set(ids)
+            for action_id in ordered_ids:
+                if action_id in selected:
+                    continue
+                action = action_by_id[action_id]
+                next_cost = cost + action.action_cost
+                if next_cost > budget:
+                    continue
+                next_ids = tuple(sorted((*ids, action_id)))
+                if not _is_feasible(next_ids, conflict_graph):
+                    continue
+                expansions[next_ids] = (next_cost, score(next_ids))
+        ranked = sorted(expansions.items(), key=lambda item: (-item[1][1], item[1][0], item[0]))
+        states = dict(ranked[:beam_width])
+        retained.update(states)
+
+    ranked_candidates = sorted(retained.items(), key=lambda item: (-item[1][1], item[1][0], item[0]))
+    # Zero-action is always a valid risk-free selection and must be evaluated
+    # even when many positive single-action scores fill the finite beam list.
+    candidates = [((), retained[()])]
+    candidates.extend(item for item in ranked_candidates if item[0] and len(candidates) < final_evaluation_limit)
+    best: OracleSubsetResult | None = None
+    for ids, (cost, _) in candidates:
+        result = OracleSubsetResult(ids, cost, evaluate_subset(ids))
+        if _better(result, best):
+            best = result
+    assert best is not None
+    return OracleSubsetResult(
+        best.action_ids,
+        best.cost,
+        best.evaluation,
+        full_evaluation_count=len(candidates),
+    )
 
 
 def normalized_oracle_recovery(base_pq: float, oracle_pq: float, perfect_pq: float = 1.0) -> float | None:

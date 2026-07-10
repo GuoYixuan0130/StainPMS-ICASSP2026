@@ -35,8 +35,10 @@
     "exact_max_candidates": 18,
     "beam_width": 64,
     "beam_validation_max_candidates": 12,
+    "beam_final_evaluations": 48,
+    "beam_guidance": "single_action_delta_matched_iou_sum",
     "bootstrap_samples": 2000,
     "bootstrap_seed": 3407,
-    "random_trials": 100
+    "random_trials": 16
   }
 }

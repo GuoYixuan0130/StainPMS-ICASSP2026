@@ -4,7 +4,12 @@ import numpy as np
 
 from stainroute.actions import ActionCandidate, ActionType, Point, apply_add_action
 from stainroute.metrics import PQEvaluation, evaluate_pq
-from stainroute.oracle_actions import beam_joint_oracle, compute_action_utility, exact_joint_oracle
+from stainroute.oracle_actions import (
+    beam_joint_oracle,
+    compute_action_utility,
+    exact_joint_oracle,
+    utility_guided_beam_joint_oracle,
+)
 
 
 def _add(action_id: str) -> ActionCandidate:
@@ -63,3 +68,25 @@ class InclusiveMetricAndJointOracleTest(unittest.TestCase):
         direct_delta = evaluate_pq(gt, after).pq - evaluate_pq(gt, base).pq
         self.assertAlmostEqual(utility.delta_pq, direct_delta, places=12)
         self.assertAlmostEqual(utility.delta_matched_iou_sum, 1.0, places=12)
+
+    def test_utility_guided_beam_matches_exact_when_all_states_are_retained(self) -> None:
+        actions = [_add("a"), _add("b"), _split("c")]
+        values = {(): 0.5, ("a",): 0.6, ("b",): 0.7, ("c",): 0.75, ("a", "b"): 0.9}
+
+        def evaluate(ids):
+            return PQEvaluation(0.0, 0, 0, 0, 0.0, 0.0, values.get(tuple(ids), 0.0), ())
+
+        conflicts = {"a": {"c"}, "b": set(), "c": {"a"}}
+        exact = exact_joint_oracle(actions, budget=2, conflict_graph=conflicts, evaluate_subset=evaluate)
+        guided = utility_guided_beam_joint_oracle(
+            actions,
+            budget=2,
+            conflict_graph=conflicts,
+            evaluate_subset=evaluate,
+            single_action_scores={"a": 0.1, "b": 0.2, "c": 0.25},
+            beam_width=8,
+            final_evaluation_limit=16,
+        )
+        self.assertEqual(guided.action_ids, exact.action_ids)
+        self.assertAlmostEqual(guided.evaluation.pq, exact.evaluation.pq)
+        self.assertGreater(guided.full_evaluation_count, 0)
