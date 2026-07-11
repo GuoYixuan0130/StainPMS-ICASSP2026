@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "project": "PromptCredit",
+  "stage": "PC-Stage 0",
+  "dataset": "TNBC",
+  "authorized_split": "router_train",
+  "allowed_patients": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "selection_algorithm": "ascending SHA256('3407:' + image_id), then image_id",
+  "selection_seed": 3407,
+  "selection_count": 6,
+  "source_split_content_sha256": "630caa2f71a35b3b5b883951dff51b2cec79a357cdb927964ad0700c4e170f8a",
+  "image_ids": [
+    "02_1",
+    "05_1",
+    "04_5",
+    "05_4",
+    "03_3",
+    "04_7"
+  ],
+  "image_ids_sha256": "d172ba88ebe645c4abd1a4bf78f8b7b66da60a58ba093b153754611f3bdf2ea6",
+  "prohibited": [
+    "calibration",
+    "test",
+    "MoNuSeg"
+  ],
+  "content_sha256": "e1bfcdd57a526e435c95b4e91aa99f5f2f12a5ec75ec7a985f6353f4f89393ff"
+}
