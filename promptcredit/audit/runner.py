@@ -24,6 +24,7 @@ import torch.nn.functional as F
 from promptcredit.audit.data import AuditCrop, iter_selected_tnbc_crops
 from promptcredit.audit.gradient import coordinate_gradient_probe, freeze_parameters_and_clear_gradients
 from promptcredit.audit.guardrails import sha256_file, validate_stage0_inputs
+from promptcredit.audit.verdict import stage0_verdict
 from promptcredit.matching import collision_groups, hungarian_assignment, nearest_assignment, point_inside_mask
 from promptcredit.metrics import binary_iou, score_utility_summary, soft_iou
 from promptcredit.utils.selection import build_selection_payload
@@ -178,12 +179,12 @@ def _verdict(assignment: dict[str, Any], utility: dict[str, Any], gradient: dict
         and gradient.get("gradient_step_prompt_loss_improvement_fraction", 0.0) >= 0.60
         and not gradient.get("nan_or_infinite_observed", True)
     )
-    if not actionable or (not assignment_gap and not quality_gap):
-        verdict = "NO-GO"
-    elif assignment_gap and quality_gap:
-        verdict = "GO"
-    else:
-        verdict = "CONDITIONAL GO"
+    verdict = stage0_verdict(
+        assignment_gap=assignment_gap,
+        quality_gap=quality_gap,
+        actionable_gradient=actionable,
+        acceptable_cost=True,
+    )
     return verdict, {"assignment_gap": assignment_gap, "quality_gap": quality_gap, "actionable_gradient": actionable}
 
 
@@ -559,4 +560,3 @@ def run_stage0(
         "memory_policy": "Frozen checkpoint texture bank; local per-image context bank; no checkpoint/artifact mutation.",
     })
     return report
-
