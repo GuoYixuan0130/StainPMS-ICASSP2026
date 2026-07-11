@@ -32,7 +32,15 @@ from nuset.audit.decoder import AllTokenMasks, extract_all_tokens_once, select_t
 from nuset.audit.metrics import assembly_metrics, headroom_summary, ranking_summary, selector_indices, token_record_rows
 from nuset.audit.models import FrozenNuSetBundle, load_frozen_bundle, module_state_sha256
 
-from run.run_on_epoch import _assemble_instance_map, _ori_hw, combine_mask, context_memory_attention, crop_with_overlap, mask_process_eval
+# ``run.utils`` parses process argv at import time.  NuSet has its own CLI and
+# unit-test arguments, so hide them only for this legacy baseline utility
+# import.  The imported functions themselves are unchanged baseline helpers.
+_argv_before_baseline_import = sys.argv
+try:
+    sys.argv = [sys.argv[0]]
+    from run.run_on_epoch import _assemble_instance_map, _ori_hw, combine_mask, context_memory_attention, crop_with_overlap, mask_process_eval
+finally:
+    sys.argv = _argv_before_baseline_import
 from sam2_train.modeling.utils import point_nms, predict
 
 

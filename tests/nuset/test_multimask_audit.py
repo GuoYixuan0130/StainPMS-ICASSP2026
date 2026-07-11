@@ -86,8 +86,8 @@ class NuSetMultiMaskAuditTest(unittest.TestCase):
     def test_inclusive_iou_half_is_a_true_positive(self) -> None:
         from nuset.audit.metrics import assembly_metrics
 
-        truth = torch.tensor([[1, 1], [0, 0]]).numpy()
-        prediction = torch.tensor([[1, 1], [1, 1]]).numpy()
+        truth = torch.tensor([[1, 1, 0], [0, 0, 0]]).numpy()
+        prediction = torch.tensor([[1, 1, 1], [1, 0, 0]]).numpy()
         metrics = assembly_metrics(truth, prediction)
         self.assertEqual(metrics["tp"], 1)
         self.assertEqual(metrics["fp"], 0)
