@@ -394,6 +394,7 @@ def predict(
         nms_thr=-1,
         ori_shape=None,
         filtering=False,
+        prompt_score_mode="objectness",
 ):
     ori_h, ori_w = ori_shape
     outputs,_,_,_ = model(image)
@@ -411,7 +412,20 @@ def predict(
     valid_flag = classes < (scores.shape[-1] - 1)
 
     points = points[valid_flag]
-    scores = scores[valid_flag].max(1)
+    foreground_scores = scores[:, 0]
+    if prompt_score_mode == "objectness":
+        ranking_scores = foreground_scores
+    else:
+        if "pred_quality_logits" not in outputs:
+            raise ValueError(f"prompt_score_mode={prompt_score_mode} requires a PromptCredit quality head")
+        quality_scores = torch.sigmoid(outputs["pred_quality_logits"][0]).cpu().numpy()
+        if prompt_score_mode == "objectness_x_quality":
+            ranking_scores = foreground_scores * quality_scores
+        elif prompt_score_mode == "quality":
+            ranking_scores = quality_scores
+        else:
+            raise ValueError(f"Unknown prompt_score_mode: {prompt_score_mode}")
+    scores = ranking_scores[valid_flag]
     classes = classes[valid_flag]
 
     mask = outputs['pred_masks'][0, 0].to(torch.float32).cpu().numpy() > 0

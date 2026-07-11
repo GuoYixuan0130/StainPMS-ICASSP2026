@@ -209,32 +209,52 @@ def _draw_reliability_diagram(path: Path, reliability_bins: list[dict[str, Any]]
 
 
 class _ModelBundle:
-    def __init__(self, *, point_net: Any, point_encoder: Any, net: Any, texture_memory_bank: list[Any], device: torch.device):
+    def __init__(self, *, point_net: Any, point_encoder: Any, net: Any, texture_memory_bank: list[Any], device: torch.device, point_checkpoint_compatibility: dict[str, list[str]] | None = None):
         self.point_net = point_net
         self.point_encoder = point_encoder
         self.net = net
         self.texture_memory_bank = texture_memory_bank
         self.device = device
+        self.point_checkpoint_compatibility = point_checkpoint_compatibility or {"missing_keys": [], "unexpected_keys": []}
 
 
-def _load_models(config_path: Path, sam_config: str, checkpoint: Path, device: torch.device) -> _ModelBundle:
+def _load_models(
+    config_path: Path,
+    sam_config: str,
+    checkpoint: Path,
+    device: torch.device,
+    *,
+    enable_quality_head: bool = False,
+) -> _ModelBundle:
     from mmengine.config import Config
     from sam2_train.build_sam import build_sam2
     from sam2_train.modeling.dpa_p2pnet import build_model
+    from promptcredit.method.checkpoint import load_point_checkpoint_compat
 
     config = Config.fromfile(str(config_path))
-    point_net, point_encoder = build_model(config)
+    point_net, point_encoder = build_model(config, enable_quality_head=enable_quality_head)
     checkpoint_payload = torch.load(checkpoint, map_location="cpu")
     if "model1" not in checkpoint_payload or "model" not in checkpoint_payload:
         raise ValueError("Frozen StainPMS checkpoint must contain both model1 and model states")
-    point_net.load_state_dict(checkpoint_payload["model1"])
+    if enable_quality_head:
+        point_checkpoint_compatibility = load_point_checkpoint_compat(point_net, checkpoint_payload["model1"])
+    else:
+        point_net.load_state_dict(checkpoint_payload["model1"])
+        point_checkpoint_compatibility = {"missing_keys": [], "unexpected_keys": []}
     net = build_sam2(sam_config, str(checkpoint), device=device, mode="eval")
     point_net.to(device).eval()
     point_encoder.to(device).eval()
     net.eval()
     # A local copy preserves checkpoint artifacts while retaining the frozen v1 texture context.
     texture_memory_bank = list(checkpoint_payload.get("texture_memory_bank_list", []) or [])
-    return _ModelBundle(point_net=point_net, point_encoder=point_encoder, net=net, texture_memory_bank=texture_memory_bank, device=device)
+    return _ModelBundle(
+        point_net=point_net,
+        point_encoder=point_encoder,
+        net=net,
+        texture_memory_bank=texture_memory_bank,
+        device=device,
+        point_checkpoint_compatibility=point_checkpoint_compatibility,
+    )
 
 
 def _apply_context_memory(context_bank: list[Any], feats: list[torch.Tensor], positions: list[torch.Tensor], net: Any, x: int, y: int) -> tuple[list[torch.Tensor], list[torch.Tensor]]:

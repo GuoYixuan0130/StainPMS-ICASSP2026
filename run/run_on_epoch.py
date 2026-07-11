@@ -11,6 +11,12 @@ from tqdm import tqdm
 from run.utils import vis_inst_image
 from sam2_train.modeling.stats_utils import *
 from sam2_train.modeling.utils import *
+from promptcredit.method import (
+    build_quality_targets,
+    directional_credit,
+    gather_nearest_coordinates,
+    quality_focal_loss,
+)
 
 
 def _safe_image_name(name):
@@ -207,6 +213,14 @@ def find_nearest_points(pred_coords, points_choose):
     return nearest_points
 
 
+def _hard_iou_per_prompt(pred_logits, gt_masks):
+    hard = pred_logits > 0
+    gt = gt_masks.bool()
+    intersection = (hard & gt).sum(dim=(1, 2)).float()
+    union = (hard | gt).sum(dim=(1, 2)).float()
+    return torch.where(union > 0, intersection / union, torch.ones_like(union))
+
+
 def train_on_epoch(
     cfgs,
     point_net,
@@ -297,8 +311,18 @@ def train_on_epoch(
 
                 outputs1, _, _, _ = point_net(imgs)
                 prompt_labels = torch.cat(labels_choose).to(device)
-                nearest_points = find_nearest_points(outputs1["pred_coords"].cpu(), points_choose)
-                nearest_points_cat = torch.cat([nearest_points[i] for i in range(len(nearest_points))]).to(device)
+                prompt_credit_enabled = bool(getattr(cfgs, "prompt_credit_enabled", False))
+                prompt_credit_selection = None
+                if prompt_credit_enabled:
+                    prompt_credit_selection = gather_nearest_coordinates(outputs1["pred_coords"], points_choose)
+                    nearest_points_cat = prompt_credit_selection.coordinates
+                    prompt_coordinates = directional_credit(
+                        nearest_points_cat, float(getattr(cfgs, "prompt_credit_grad_scale", 0.0))
+                    )
+                else:
+                    nearest_points = find_nearest_points(outputs1["pred_coords"].cpu(), points_choose)
+                    nearest_points_cat = torch.cat([nearest_points[i] for i in range(len(nearest_points))]).to(device)
+                    prompt_coordinates = nearest_points_cat
                 cell_nums = cell_nums.to(device)
 
                 if nearest_points_cat.shape[0] == 0:
@@ -365,13 +389,21 @@ def train_on_epoch(
                 image_embed = feats[-1]
                 high_res_feats = feats[:-1]
 
-                with torch.no_grad():
+                if prompt_credit_enabled:
                     se, de = net.sam_prompt_encoder(
-                        points=(nearest_points_cat, prompt_labels),
+                        points=(prompt_coordinates, prompt_labels),
                         boxes=None,
                         masks=None,
                         batch_size=batch_size,
                     )
+                else:
+                    with torch.no_grad():
+                        se, de = net.sam_prompt_encoder(
+                            points=(prompt_coordinates, prompt_labels),
+                            boxes=None,
+                            masks=None,
+                            batch_size=batch_size,
+                        )
 
                 low_res_multimasks, iou_predictions, _, _ = net.sam_mask_decoder(
                     image_embeddings=image_embed,
@@ -468,6 +500,22 @@ def train_on_epoch(
                     continue
 
                 loss_dict = criterion(outputs1, targets, pred, values, gt_inst_masks, epoch)
+                if prompt_credit_enabled:
+                    # Directional credit is exactly focal+dice through the scaled
+                    # coordinate value; decoder-IoU loss is excluded from it.
+                    loss_dict["loss_iou"] = loss_dict["loss_iou"].detach()
+                    if "pred_quality_logits" not in outputs1 or prompt_credit_selection is None:
+                        raise RuntimeError("PromptCredit enabled but quality head/nearest selection is unavailable")
+                    hard_iou = _hard_iou_per_prompt(pred.detach(), gt_inst_masks)
+                    quality_targets = build_quality_targets(
+                        outputs1["pred_quality_logits"],
+                        prompt_credit_selection.source_indices,
+                        hard_iou,
+                    )
+                    quality_loss = quality_focal_loss(outputs1["pred_quality_logits"], quality_targets)
+                    loss_dict["loss_prompt_credit_quality"] = (
+                        quality_loss * float(getattr(cfgs, "prompt_credit_quality_loss_coef", 0.0))
+                    )
 
                 pms_coef = getattr(criterion, "pms_loss_coef", 0.0)
                 if getattr(cfgs, "use_pms", False) and pms_coef > 0 and len(b_coords_batch) == batch_size:
@@ -730,6 +778,7 @@ def validation_on_epoch(
                         ori_shape=np.array((y2 - y1, x2 - x1)),
                         filtering=args.test.filtering,
                         nms_thr=args.test.nms_thr,
+                        prompt_score_mode=getattr(cfgs, "prompt_score_mode", "objectness"),
                     )
 
                 if len(pd_points) == 0:

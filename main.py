@@ -16,6 +16,7 @@ from conf import settings
 from run.dataset.monuseg import MONUSEG
 from run.run_on_epoch import train_on_epoch, validation_on_epoch
 from run.utils import create_logger, get_network, set_log_dir
+from promptcredit.method import configure_promptcredit_v1_trainable, load_point_checkpoint_compat
 from sam2_train.modeling.criterion import build_criterion
 from sam2_train.modeling.dpa_p2pnet import build_model
 from sam2_train.modeling.utils import collate_fn, set_seed
@@ -30,13 +31,18 @@ def count_trainable_params(*modules):
     )
 
 
-def load_ca_sam2_point_head_checkpoint(cfgs, model1):
+def load_ca_sam2_point_head_checkpoint(cfgs, model1, prompt_credit_enabled=False):
     ckpt = torch.load(cfgs.sam_ckpt, map_location="cpu")
     if "model1" not in ckpt:
         print(f"[checkpoint] no CA-SAM2 point-head weights found in {cfgs.sam_ckpt}")
         return
 
-    missing_keys, unexpected_keys = model1.load_state_dict(ckpt["model1"], strict=False)
+    if prompt_credit_enabled:
+        compatibility = load_point_checkpoint_compat(model1, ckpt["model1"])
+        missing_keys = compatibility["missing_keys"]
+        unexpected_keys = compatibility["unexpected_keys"]
+    else:
+        missing_keys, unexpected_keys = model1.load_state_dict(ckpt["model1"], strict=False)
     print(f"[checkpoint] loaded CA-SAM2 point head from {cfgs.sam_ckpt}")
     print(f"[checkpoint] model1 missing keys: {len(missing_keys)}")
     if missing_keys:
@@ -199,7 +205,9 @@ def maybe_load_warm_start(cfgs, model1):
     del ckpt
     if not has_point_head:
         return None
-    load_ca_sam2_point_head_checkpoint(cfgs, model1)
+    load_ca_sam2_point_head_checkpoint(
+        cfgs, model1, prompt_credit_enabled=bool(getattr(cfgs, "prompt_credit_enabled", False))
+    )
     return load_ca_sam2_texture_bank(cfgs)
 
 
@@ -257,12 +265,21 @@ def main():
         gpu_device=device,
         distribution=cfgs.distributed,
     )
-    model1, model1_encoder = build_model(args)
+    model1, model1_encoder = build_model(
+        args, enable_quality_head=bool(getattr(cfgs, "prompt_credit_enabled", False))
+    )
     model1.to(device)
     model1_encoder.to(device)
 
     val_texture_bank_template = maybe_load_warm_start(cfgs, model1)
-    freeze_sam2_image_encoder(net)
+    prompt_credit_manifest = None
+    if cfgs.prompt_credit_enabled:
+        prompt_credit_manifest = configure_promptcredit_v1_trainable(model1, net)
+        if prompt_credit_manifest["quality_head_parameter_count"] >= 100_000:
+            raise ValueError("PromptCredit quality_head exceeds the approved 0.1M-parameter budget")
+        print("[promptcredit] trainable parameter manifest:", prompt_credit_manifest)
+    else:
+        freeze_sam2_image_encoder(net)
 
     actual_lr = args.optimizer.lr if cfgs.lr < 0 else cfgs.lr
     actual_wd = args.optimizer.weight_decay if cfgs.weight_decay < 0 else cfgs.weight_decay
@@ -302,6 +319,9 @@ def main():
     )
 
     cfgs.path_helper = set_log_dir("logs", cfgs.exp_name)
+    if prompt_credit_manifest is not None:
+        with open(os.path.join(cfgs.path_helper["prefix"], "promptcredit_trainable_parameters.json"), "w", encoding="utf-8") as handle:
+            json.dump(prompt_credit_manifest, handle, indent=2)
     logger = create_logger(cfgs.path_helper["log_path"])
     logger.info(cfgs)
 
@@ -426,7 +446,10 @@ def main():
     if cfgs.eval:
         ckpt = torch.load(cfgs.sam_ckpt, map_location="cpu")
         if "model1" in ckpt:
-            model1.load_state_dict(ckpt["model1"])
+            if cfgs.prompt_credit_enabled:
+                load_point_checkpoint_compat(model1, ckpt["model1"])
+            else:
+                model1.load_state_dict(ckpt["model1"])
         if "epoch" in ckpt:
             settings.EPOCH = ckpt["epoch"]
         texture_memory_bank_list = ckpt.get("texture_memory_bank_list", []) or []

@@ -90,7 +90,8 @@ class DPAP2PNet(nn.Module):
             dropout=0.1,
             space: int = 16,
             hidden_dim: int = 256,
-            with_mask=False
+            with_mask=False,
+            enable_quality_head: bool = False,
     ):
         """
             Initializes the model.
@@ -102,12 +103,22 @@ class DPAP2PNet(nn.Module):
         self.num_levels = num_levels
         self.hidden_dim = hidden_dim
         self.with_mask = with_mask
+        self.enable_quality_head = bool(enable_quality_head)
         self.strides = [2 ** (i + 2) for i in range(self.num_levels)]
 
         self.deform_layer = MLP(hidden_dim, hidden_dim, 2, 2, drop=dropout)
 
         self.reg_head = MLP(hidden_dim, hidden_dim, 2, 2, drop=dropout)
         self.cls_head = MLP(hidden_dim, hidden_dim, 2, num_classes + 1, drop=dropout)
+        # Built only for PromptCredit so the default architecture and RNG path
+        # remain byte-for-byte compatible with historical StainPMS runs.
+        if self.enable_quality_head:
+            cpu_rng_state = torch.get_rng_state()
+            try:
+                torch.manual_seed(3407)
+                self.quality_head = MLP(hidden_dim, hidden_dim, 2, 1, drop=dropout)
+            finally:
+                torch.set_rng_state(cpu_rng_state)
 
         self.conv = nn.Conv2d(hidden_dim * num_levels, hidden_dim, kernel_size=3, padding=1)
 
@@ -152,10 +163,12 @@ class DPAP2PNet(nn.Module):
             'pred_masks': F.interpolate(
                 self.mask_head(feats1), size=images.shape[2:], mode='bilinear', align_corners=True)
         }
+        if self.enable_quality_head:
+            output['pred_quality_logits'] = self.quality_head(roi_features).flatten(1, 2).squeeze(-1)
 
         return output,feats_origin,embedding,feats
 
-def build_model(cfg):
+def build_model(cfg, enable_quality_head: bool = False):
     backbone = Backbone(cfg)
     
     model = DPAP2PNet(
@@ -164,7 +177,8 @@ def build_model(cfg):
         num_classes=cfg.data.num_classes,
         dropout=cfg.prompter.dropout,
         space=cfg.prompter.space,
-        hidden_dim=cfg.prompter.hidden_dim
+        hidden_dim=cfg.prompter.hidden_dim,
+        enable_quality_head=enable_quality_head,
     )
 
     return model,backbone

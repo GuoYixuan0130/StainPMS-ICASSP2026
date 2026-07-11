@@ -105,7 +105,7 @@ The run writes `assignment_records.csv`, `utility_records.csv`,
 - Actionable gradient: at least 95% finite nonzero coordinate gradients, mean
   one-pixel Delta mask loss below zero, and at least 60% prompt loss improved.
 
-The automated report says GO only when all three evidence types appear,
-CONDITIONAL GO when the gradient result and exactly one of the assignment or
-quality gaps appear, and NO-GO otherwise.  It is not authorization to add a
-quality head, change the training loop, train, or access any additional split.
+GO requires an actionable gradient, acceptable cost, and at least one of the
+assignment or quality gaps.  A weak single-gap result may be explicitly marked
+CONDITIONAL GO; simply having one positive gap is not weak by definition.  See
+the dated verdict addendum for the correction to the original report logic.

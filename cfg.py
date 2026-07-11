@@ -59,6 +59,15 @@ def parse_args():
     parser.add_argument("--test_nms_thr", default=-1, type=int)
     parser.add_argument("--test_filtering", default="", choices=["", "true", "false"])
 
+    parser.add_argument("--prompt_credit_enabled", action="store_true")
+    parser.add_argument("--prompt_credit_grad_scale", default=0.0, type=float)
+    parser.add_argument("--prompt_credit_quality_loss_coef", default=0.0, type=float)
+    parser.add_argument(
+        "--prompt_score_mode",
+        default="objectness",
+        choices=["objectness", "objectness_x_quality", "quality"],
+    )
+
     parser.add_argument("--use_pms", action="store_true")
     parser.add_argument("--pms_loss_coef", default=-1.0, type=float)
     parser.add_argument("--pms_object_weight", default=-1.0, type=float)

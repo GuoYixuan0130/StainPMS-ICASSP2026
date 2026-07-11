@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 from typing import Iterator
 
@@ -26,6 +27,8 @@ class AuditCrop:
     gt_centroids_xy: np.ndarray
     gt_areas: np.ndarray
     local_density: np.ndarray
+    image_crop_sha256: str
+    gt_crop_sha256: str
 
 
 def _starts(size: int, crop_size: int, overlap: int) -> list[int]:
@@ -86,6 +89,10 @@ def _normalize(image: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(np.ascontiguousarray(normalized.transpose(2, 0, 1))).float()
 
 
+def _array_sha256(array: np.ndarray) -> str:
+    return hashlib.sha256(np.ascontiguousarray(array).tobytes()).hexdigest()
+
+
 def iter_selected_tnbc_crops(
     data_root: Path,
     image_ids: list[str],
@@ -125,5 +132,6 @@ def iter_selected_tnbc_crops(
                 gt_centroids_xy=centroids,
                 gt_areas=areas,
                 local_density=density,
+                image_crop_sha256=_array_sha256(crop_image),
+                gt_crop_sha256=_array_sha256(crop_instance),
             )
-
