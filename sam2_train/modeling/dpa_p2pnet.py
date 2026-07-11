@@ -4,6 +4,7 @@ sys.path.insert(0, './sam2_train/modeling')
 import timm
 print(timm.__file__)
 import copy
+import math
 import torch
 import numpy as np
 import torch.nn.functional as F
@@ -113,12 +114,17 @@ class DPAP2PNet(nn.Module):
         # Built only for PromptCredit so the default architecture and RNG path
         # remain byte-for-byte compatible with historical StainPMS runs.
         if self.enable_quality_head:
-            cpu_rng_state = torch.get_rng_state()
-            try:
+            devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
+            with torch.random.fork_rng(devices=devices):
                 torch.manual_seed(3407)
                 self.quality_head = MLP(hidden_dim, hidden_dim, 2, 1, drop=dropout)
-            finally:
-                torch.set_rng_state(cpu_rng_state)
+                # A uniform low prior makes objectness x quality exactly
+                # rank-equivalent to objectness at paired-smoke step 0.
+                final_layer = self.quality_head.layers[-1]
+                if not isinstance(final_layer, nn.Linear):
+                    raise TypeError("PromptCredit quality_head must end in nn.Linear")
+                nn.init.zeros_(final_layer.weight)
+                nn.init.constant_(final_layer.bias, math.log(0.01 / 0.99))
 
         self.conv = nn.Conv2d(hidden_dim * num_levels, hidden_dim, kernel_size=3, padding=1)
 

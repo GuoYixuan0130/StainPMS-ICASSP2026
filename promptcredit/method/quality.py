@@ -17,6 +17,19 @@ class QualityTargets:
     duplicate_source_events: int
 
 
+@dataclass(frozen=True)
+class QualityLossAudit:
+    """Decomposed fixed-QFL accounting for the pre-smoke scale audit."""
+
+    proposal_total: int
+    matched_positive_count: int
+    unmatched_negative_count: int
+    positive_loss_sum: float
+    negative_loss_sum: float
+    negative_loss_scaled_sum: float
+    normalization_denominator: int
+
+
 def utility_target_from_hard_iou(hard_iou: torch.Tensor) -> torch.Tensor:
     """Threshold-aware detached utility target fixed by the project lead."""
     values = hard_iou.detach().to(torch.float32)
@@ -58,8 +71,10 @@ def build_quality_targets(
     )
 
 
-def quality_focal_loss(logits: torch.Tensor, targets: QualityTargets, gamma: float = 2.0) -> torch.Tensor:
-    """Quality Focal Loss with balanced unmatched-proposal contribution."""
+def quality_focal_loss_with_audit(
+    logits: torch.Tensor, targets: QualityTargets, gamma: float = 2.0
+) -> tuple[torch.Tensor, QualityLossAudit]:
+    """Quality Focal Loss and its exact fixed-normalization accounting."""
     if gamma != 2.0:
         raise ValueError("PromptCredit v1 Quality Focal Loss gamma is frozen to 2")
     probability = torch.sigmoid(logits)
@@ -72,7 +87,21 @@ def quality_focal_loss(logits: torch.Tensor, targets: QualityTargets, gamma: flo
     positive_loss = losses[positive].sum()
     # Scale the large unmatched set to one positive-set equivalent before division.
     negative_loss = losses[negative].sum() * (positive_count / max(negative_count, 1))
-    return (positive_loss + negative_loss) / positive_count
+    loss = (positive_loss + negative_loss) / positive_count
+    return loss, QualityLossAudit(
+        proposal_total=int(logits.numel()),
+        matched_positive_count=int(positive.sum().item()),
+        unmatched_negative_count=negative_count,
+        positive_loss_sum=float(positive_loss.detach().cpu()),
+        negative_loss_sum=float(losses[negative].sum().detach().cpu()),
+        negative_loss_scaled_sum=float(negative_loss.detach().cpu()),
+        normalization_denominator=positive_count,
+    )
+
+
+def quality_focal_loss(logits: torch.Tensor, targets: QualityTargets, gamma: float = 2.0) -> torch.Tensor:
+    """Quality Focal Loss with balanced unmatched-proposal contribution."""
+    return quality_focal_loss_with_audit(logits, targets, gamma=gamma)[0]
 
 
 def prompt_ranking_scores(
@@ -91,4 +120,3 @@ def prompt_ranking_scores(
     if mode == "quality":
         return quality_probability
     raise ValueError(f"Unknown prompt score mode: {mode}")
-

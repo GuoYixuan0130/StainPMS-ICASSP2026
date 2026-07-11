@@ -57,7 +57,12 @@ class PromptCreditMethodTest(unittest.TestCase):
         self.assertEqual(float(targets.values[0, 0]), 0.0)
 
     def test_quality_focal_finite_and_score_modes(self) -> None:
-        from promptcredit.method.quality import QualityTargets, prompt_ranking_scores, quality_focal_loss
+        from promptcredit.method.quality import (
+            QualityTargets,
+            prompt_ranking_scores,
+            quality_focal_loss,
+            quality_focal_loss_with_audit,
+        )
 
         logits = torch.tensor([[0.0, 1.0]], requires_grad=True)
         targets = QualityTargets(
@@ -69,6 +74,12 @@ class PromptCreditMethodTest(unittest.TestCase):
         loss = quality_focal_loss(logits, targets)
         self.assertTrue(torch.isfinite(loss))
         loss.backward()
+        _, audit = quality_focal_loss_with_audit(logits.detach(), targets)
+        self.assertEqual(audit.proposal_total, 2)
+        self.assertEqual(audit.matched_positive_count, 1)
+        self.assertEqual(audit.unmatched_negative_count, 1)
+        self.assertEqual(audit.normalization_denominator, 1)
+        self.assertTrue(torch.isfinite(torch.tensor(audit.positive_loss_sum)))
         foreground = torch.tensor([0.2, 0.8])
         torch.testing.assert_close(prompt_ranking_scores(foreground, None, "objectness"), foreground)
         quality = torch.tensor([0.0, 0.0])
@@ -113,7 +124,7 @@ class PromptCreditMethodTest(unittest.TestCase):
         self.assertTrue(frozen_parameters_have_no_grad(sam))
         self.assertEqual(before, module_state_sha256(sam))
 
-    def test_quality_head_initialization_is_seed_3407_deterministic(self) -> None:
+    def test_quality_head_initialization_is_seed_3407_deterministic_and_neutral(self) -> None:
         from sam2_train.modeling.dpa_p2pnet import DPAP2PNet
 
         class DummyBackbone(torch.nn.Module):
@@ -126,6 +137,59 @@ class PromptCreditMethodTest(unittest.TestCase):
         second = DPAP2PNet(DummyBackbone(), num_levels=1, num_classes=1, hidden_dim=4, enable_quality_head=True)
         for first_parameter, second_parameter in zip(first.quality_head.parameters(), second.quality_head.parameters(), strict=True):
             torch.testing.assert_close(first_parameter, second_parameter)
+
+        first.eval()
+        logits = first.quality_head(torch.randn(1, 2, 3, 4))
+        expected = torch.full_like(logits, float(torch.logit(torch.tensor(0.01))))
+        torch.testing.assert_close(logits, expected)
+        objectness = torch.tensor([0.2, 0.8, 0.5])
+        quality_logits = logits.flatten()[:3]
+        self.assertTrue(
+            torch.equal(
+                torch.argsort(objectness, descending=True, stable=True),
+                torch.argsort(objectness * torch.sigmoid(quality_logits), descending=True, stable=True),
+            )
+        )
+
+    def test_quality_head_does_not_change_legacy_coordinates_or_logits(self) -> None:
+        from sam2_train.modeling.dpa_p2pnet import DPAP2PNet
+
+        class DummyBackbone(torch.nn.Module):
+            def forward(self, images):
+                batch = images.shape[0]
+                features = torch.ones(batch, 4, 4, 4, device=images.device)
+                return [features], features
+
+        torch.manual_seed(91)
+        legacy = DPAP2PNet(DummyBackbone(), num_levels=1, num_classes=1, hidden_dim=4, dropout=0.0)
+        torch.manual_seed(91)
+        promptcredit = DPAP2PNet(
+            DummyBackbone(), num_levels=1, num_classes=1, hidden_dim=4, dropout=0.0, enable_quality_head=True
+        )
+        legacy.eval()
+        promptcredit.eval()
+        image = torch.zeros(1, 3, 16, 16)
+        legacy_output, *_ = legacy(image)
+        promptcredit_output, *_ = promptcredit(image)
+        torch.testing.assert_close(legacy_output["pred_coords"], promptcredit_output["pred_coords"])
+        torch.testing.assert_close(legacy_output["pred_logits"], promptcredit_output["pred_logits"])
+
+    def test_neutral_quality_keeps_point_nms_actions_identical(self) -> None:
+        from promptcredit.smoke.runner import _prompt_action_source_ids
+
+        output = {
+            "pred_coords": torch.tensor([[[2.0, 2.0], [4.0, 2.0], [20.0, 20.0]]]),
+            "pred_logits": torch.tensor([[[4.0, -4.0], [3.0, -3.0], [2.0, -2.0]]]),
+            "pred_quality_logits": torch.full((1, 3), float(torch.logit(torch.tensor(0.01)))),
+            "pred_masks": torch.ones(1, 1, 32, 32),
+        }
+        objectness_actions = _prompt_action_source_ids(
+            output, mode="objectness", nms_radius=4.0, semantic_filtering=True
+        )
+        combined_actions = _prompt_action_source_ids(
+            output, mode="objectness_x_quality", nms_radius=4.0, semantic_filtering=True
+        )
+        self.assertTrue(torch.equal(objectness_actions, combined_actions))
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ from .quality import (
     build_quality_targets,
     prompt_ranking_scores,
     quality_focal_loss,
+    quality_focal_loss_with_audit,
     utility_target_from_hard_iou,
 )
 
@@ -27,5 +28,6 @@ __all__ = [
     "optimizer_excludes_frozen",
     "prompt_ranking_scores",
     "quality_focal_loss",
+    "quality_focal_loss_with_audit",
     "utility_target_from_hard_iou",
 ]
