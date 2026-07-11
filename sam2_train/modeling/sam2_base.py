@@ -510,7 +510,7 @@ class SAM2Base(torch.nn.Module):
         # The case of `self.num_maskmem == 0` below is primarily used for reproducing SAM on images.
         # In this case, we skip the fusion with any memory.
         if self.num_maskmem == 0:  # Disable memory and skip fusion
-            pix_feat = current_vision_feats[-1].permute(1, 2, 0).view(B, C, H, W)
+            pix_feat = current_vision_feats[-1].permute(1, 2, 0).reshape(B, C, H, W)
             return pix_feat
 
         num_obj_ptr_tokens = 0
@@ -640,7 +640,7 @@ class SAM2Base(torch.nn.Module):
             if self.directly_add_no_mem_embed:
                 # directly add no-mem embedding (instead of using the transformer encoder)
                 pix_feat_with_mem = current_vision_feats[-1] + self.no_mem_embed
-                pix_feat_with_mem = pix_feat_with_mem.permute(1, 2, 0).view(B, C, H, W)
+                pix_feat_with_mem = pix_feat_with_mem.permute(1, 2, 0).reshape(B, C, H, W)
                 return pix_feat_with_mem
 
             # Use a dummy token on the first frame (to avoid emtpy memory input to tranformer encoder)
@@ -659,7 +659,7 @@ class SAM2Base(torch.nn.Module):
             num_obj_ptr_tokens=num_obj_ptr_tokens,
         )
         # reshape the output (HW)BC => BCHW
-        pix_feat_with_mem = pix_feat_with_mem.permute(1, 2, 0).view(B, C, H, W)
+        pix_feat_with_mem = pix_feat_with_mem.permute(1, 2, 0).reshape(B, C, H, W)
         return pix_feat_with_mem
 
     def _encode_new_memory(
@@ -674,7 +674,7 @@ class SAM2Base(torch.nn.Module):
         C = self.hidden_dim
         H, W = feat_sizes[-1]  # top-level (lowest-resolution) feature size
         # top-level feature, (HW)BC => BCHW
-        pix_feat = current_vision_feats[-1].permute(1, 2, 0).view(B, C, H, W)
+        pix_feat = current_vision_feats[-1].permute(1, 2, 0).reshape(B, C, H, W)
         if self.non_overlap_masks_for_mem_enc and not self.training:
             # optionally, apply non-overlapping constraints to the masks (it's applied
             # in the batch dimension and should only be used during eval, where all
@@ -727,7 +727,7 @@ class SAM2Base(torch.nn.Module):
         # High-resolution feature maps for the SAM head, reshape (HW)BC => BCHW
         if len(current_vision_feats) > 1:
             high_res_features = [
-                x.permute(1, 2, 0).view(x.size(1), x.size(2), *s)
+                x.permute(1, 2, 0).reshape(x.size(1), x.size(2), *s)
                 for x, s in zip(current_vision_feats[:-1], feat_sizes[:-1])
             ]
         else:
@@ -736,7 +736,7 @@ class SAM2Base(torch.nn.Module):
             # When use_mask_input_as_output_without_sam=True, we directly output the mask input
             # (see it as a GT mask) without using a SAM prompt encoder + mask decoder.
             pix_feat = current_vision_feats[-1].permute(1, 2, 0)
-            pix_feat = pix_feat.view(-1, self.hidden_dim, *feat_sizes[-1])
+            pix_feat = pix_feat.reshape(-1, self.hidden_dim, *feat_sizes[-1])
             sam_outputs = self._use_mask_as_output(
                 pix_feat, high_res_features, mask_inputs
             )

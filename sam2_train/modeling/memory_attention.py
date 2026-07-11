@@ -153,8 +153,8 @@ class MemoryAttention(nn.Module):
             memory_pos = memory_pos.transpose(0, 1)
 
         if state == 'context':
-            memory = self.mem_proj(memory.view(memory.shape[0], memory.shape[1], 16, 16)).flatten(2)
-            memory_pos = self.mem_proj(memory_pos.view(memory_pos.shape[0], memory_pos.shape[1], 16, 16)).flatten(2)
+            memory = self.mem_proj(memory.reshape(memory.shape[0], memory.shape[1], 16, 16)).flatten(2)
+            memory_pos = self.mem_proj(memory_pos.reshape(memory_pos.shape[0], memory_pos.shape[1], 16, 16)).flatten(2)
 
             for layer in self.context_layers:
                 kwds = {}
