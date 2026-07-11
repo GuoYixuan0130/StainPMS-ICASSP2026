@@ -82,6 +82,12 @@ explicitly marked `is_smoke_run: true` and are not formal results.
 
 ## 3. Formal frozen oracle runs
 
+> **Superseded for MoNuSeg on 2026-07-11.** Do not run the MoNuSeg commands
+> below unless a later project-lead decision explicitly restores them. Follow
+> [the MoNuSeg futility protocol](STAINROUTE_MONUSEG_FUTILITY_PROTOCOL.md)
+> instead. The TNBC commands are historical execution instructions; the formal
+> TNBC router-train and calibration artifacts have already been collected.
+
 Run all four commands without `--stainroute_max_images`. They decode only
 actions from `router_train` or `calibration`; none accesses a test split.
 
