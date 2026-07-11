@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 from pathlib import Path
 import tempfile
 import unittest
@@ -62,12 +63,17 @@ class PromptQProtocolTest(unittest.TestCase):
 
     def test_frozen_baseline_scalar_record_does_not_require_quality_artifacts(self) -> None:
         """The baseline arm has no quality head by design."""
-        import inspect
         from promptcredit.promptq.runner import _collect_scalar_records
 
         signature = inspect.signature(_collect_scalar_records)
         self.assertIn("require_quality_features", signature.parameters)
         self.assertTrue(signature.parameters["require_quality_features"].default)
+
+    def test_scalar_record_contract_freezes_audit_tensors_to_cpu(self) -> None:
+        from promptcredit.promptq import runner
+
+        source = inspect.getsource(runner._collect_scalar_crop)
+        self.assertIn('"hard_iou": source_hard_iou.cpu()', source)
 
 
 if __name__ == "__main__":

@@ -226,7 +226,10 @@ def _collect_scalar_crop(
             "features": output["quality_roi_features"][0].detach().cpu().to(torch.float16),
             "utility": targets.values[0].detach().cpu(),
             "matched": targets.matched_proposals[0].detach().cpu(),
-            "hard_iou": source_hard_iou,
+            # Scalar-smoke records are immutable host-side audit data.  Keep
+            # every tensor on CPU so NumPy-only calibration code never crosses
+            # an implicit CUDA boundary.
+            "hard_iou": source_hard_iou.cpu(),
         }
     )
     return record
