@@ -8,7 +8,7 @@ Only patients 1–6 are train-side diagnostics and only patients 7–8 are devel
 
 ## Cache policy
 
-The audit first reads the immutable NuRank train/development caches. It checks for low-resolution four-token logits. If they exist, the formal cache is replayed directly. If they do not, the audit writes a new `reextracted_lowres_cache/` only under its new artifact directory, runs one deterministic frozen extraction for patients 1–8, and checks group order, prompt IDs/classes, coordinates, original predicted IoU, and upsampled logits against the formal NuRank cache. Any mismatch stops the audit. Point model, point encoder, and SAM2 checksums are written by the extraction and must remain unchanged.
+The audit first reads the immutable NuRank train/development caches. It checks for low-resolution four-token logits. A saved `mask_logits` tensor of `256×256` is also accepted as an exact low-resolution alias in this frozen path: SAM2 emits `256×256` mask logits and the existing path applies bilinear resize to the same `256×256` size; NuSet Stage 0 recorded zero token-0 error for that operation. If neither representation exists, the audit writes a new `reextracted_lowres_cache/` only under its new artifact directory, runs one deterministic frozen extraction for patients 1–8, and checks group order, prompt IDs/classes, coordinates, original predicted IoU, and upsampled logits against the formal NuRank cache. Any mismatch stops the audit. Point model, point encoder, and SAM2 checksums are written by the extraction and must remain unchanged.
 
 ## Failure attribution
 

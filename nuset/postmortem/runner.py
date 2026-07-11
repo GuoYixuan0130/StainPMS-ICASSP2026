@@ -125,9 +125,26 @@ def _cache_has_lowres(cache_dir: Path) -> bool:
     manifest = load_manifest(cache_dir)
     if not manifest.get("groups"):
         return False
-    path = cache_dir / manifest["groups"][0]["path"]
-    with np.load(path, allow_pickle=False) as payload:
-        return "low_res_logits" in payload.files
+    for entry in manifest["groups"]:
+        path = cache_dir / entry["path"]
+        with np.load(path, allow_pickle=False) as payload:
+            if "low_res_logits" in payload.files:
+                continue
+            # SAM2's mask decoder already emits 256x256 logits in this frozen path; the
+            # saved ``mask_logits`` are therefore F.interpolate(x, (256,256)) with equal
+            # input/output size. NuSet Stage 0 recorded a zero token-0 error for that path.
+            if "mask_logits" not in payload.files or tuple(payload["mask_logits"].shape[-2:]) != (256, 256):
+                return False
+    return True
+
+
+def _lowres_logits(group: dict[str, Any]) -> np.ndarray:
+    if "low_res_logits" in group:
+        return np.asarray(group["low_res_logits"], dtype=np.float32)
+    logits = np.asarray(group["mask_logits"], dtype=np.float32)
+    if tuple(logits.shape[-2:]) != (256, 256):
+        raise RuntimeError("Postmortem cache lacks low-resolution logits and no exact 256x256 identity alias")
+    return logits
 
 
 def _verify_reextraction(original_dir: Path, reproduced_dir: Path) -> dict[str, Any]:
@@ -152,7 +169,7 @@ def _prepare_caches(*, nurank_run_dir: Path, out_dir: Path, data_root: Path, spl
     for path in original.values():
         load_manifest(path)
     if all(_cache_has_lowres(path) for path in original.values()):
-        return original, {"cache_source": "formal_nurank_cache_with_low_resolution_logits", "reextraction": None}
+        return original, {"cache_source": "formal_nurank_cache_lowres_or_exact_256_identity_alias", "reextraction": None}
     _enforce_time(started)
     reextracted = {role: out_dir / "reextracted_lowres_cache" / role for role in ("train", "development")}
     bundle = load_frozen_bundle(config_path, sam_config, checkpoint, device)
@@ -357,7 +374,7 @@ def _process_split(*, split: str, cache_dir: Path, items: dict[str, Any], ranker
     for group in iter_groups(cache_dir):
         _enforce_time(started)
         image_id = group["_entry"]["image_id"]; item = items[image_id]
-        low = torch.from_numpy(np.asarray(group["low_res_logits"], dtype=np.float32)).to(device)
+        low = torch.from_numpy(_lowres_logits(group)).to(device)
         upsampled = upsample_logits(low)
         max_token0_upsample_error = max(max_token0_upsample_error, float((upsampled[:, 0].cpu() - torch.from_numpy(np.asarray(group["mask_logits"], dtype=np.float32))[:, 0]).abs().max()))
         if max_token0_upsample_error > 1e-5:
