@@ -42,6 +42,16 @@ class NuSetPostmortemFusionTest(unittest.TestCase):
         result = failure_mode(train_existing=existing, train_nurank=weak, development_existing=existing, development_nurank=weak, development_single=existing, development_pq_delta=.0)
         self.assertEqual(result["failure_mode"], "representation_or_objective_failure")
 
+    def test_boundary_band_does_not_cover_deep_interior_or_exterior(self) -> None:
+        from scipy.ndimage import distance_transform_edt
+
+        truth = torch.zeros(15, 15, dtype=torch.bool).numpy()
+        truth[3:12, 3:12] = True
+        boundary = (truth & (distance_transform_edt(truth) <= 3)) | (~truth & (distance_transform_edt(~truth) <= 3))
+        self.assertFalse(bool(boundary[7, 7]))
+        self.assertFalse(bool(boundary[0, 0]))
+        self.assertTrue(bool(boundary[3, 7]))
+
     def test_postmortem_source_has_no_optimizer_or_backward(self) -> None:
         from nuset.postmortem import runner
 

@@ -260,7 +260,12 @@ def _error_complement(item, group: dict[str, Any], token_logits: torch.Tensor) -
         fn0, fp0 = fn[0], fp[0]
         recoverable = np.logical_and(fn0, masks[1:].any(axis=0))
         rejectable = np.logical_and(fp0, (~masks[1:]).any(axis=0))
-        boundary = np.logical_or(distance_transform_edt(truth) <= 3, distance_transform_edt(~truth) <= 3)
+        # Distance-to-zero is zero everywhere outside the input set.  Restrict each
+        # distance field to its own side of the contour; otherwise their union would
+        # incorrectly classify the whole crop as boundary.
+        inside_band = np.logical_and(truth, distance_transform_edt(truth) <= 3)
+        outside_band = np.logical_and(~truth, distance_transform_edt(~truth) <= 3)
+        boundary = np.logical_or(inside_band, outside_band)
         result.fn0 += int(fn0.sum()); result.fn_recoverable += int(recoverable.sum())
         result.fp0 += int(fp0.sum()); result.fp_rejectable += int(rejectable.sum())
         result.boundary_recoverable += int(np.logical_and(recoverable, boundary).sum()); result.interior_recoverable += int(np.logical_and(recoverable, ~boundary).sum())
