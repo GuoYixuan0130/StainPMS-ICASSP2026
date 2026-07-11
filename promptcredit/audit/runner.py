@@ -314,7 +314,7 @@ def _prepare_decoder_features(bundle: _ModelBundle, image: torch.Tensor, context
         batch_size = vision_feats[-1].size(1)
         feature_sizes = [(64, 64), (32, 32), (16, 16)]
         decoded_feats = [
-            feature.permute(1, 2, 0).view(batch_size, -1, *feature_size)
+            feature.permute(1, 2, 0).reshape(batch_size, -1, *feature_size)
             for feature, feature_size in zip(vision_feats[::-1], feature_sizes[::-1])
         ][::-1]
         if len(context_bank) < 100:

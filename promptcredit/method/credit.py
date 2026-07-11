@@ -19,7 +19,7 @@ def legacy_nearest_indices(predicted_coordinates: torch.Tensor, gt_points: Seque
     indices: list[torch.Tensor] = []
     for crop_index, points in enumerate(gt_points):
         source = predicted_coordinates[crop_index].detach().cpu().float()
-        targets = points.detach().cpu().view(-1, 2).float()
+        targets = points.detach().cpu().reshape(-1, 2).float()
         if len(targets) == 0:
             indices.append(torch.empty(0, dtype=torch.long))
         else:
@@ -37,7 +37,7 @@ def gather_nearest_coordinates(predicted_coordinates: torch.Tensor, gt_points: S
     selected: list[torch.Tensor] = []
     source_indices: list[torch.Tensor] = []
     for crop_index, points in enumerate(gt_points):
-        targets = points.view(-1, 2).to(predicted_coordinates.device, dtype=torch.float32)
+        targets = points.reshape(-1, 2).to(predicted_coordinates.device, dtype=torch.float32)
         source = predicted_coordinates[crop_index]
         if len(targets) == 0:
             source_indices.append(torch.empty(0, dtype=torch.long, device=source.device))
@@ -58,4 +58,3 @@ def directional_credit(coordinates: torch.Tensor, alpha: float) -> torch.Tensor:
         raise ValueError("PromptCredit v1 directional alpha must be within [0, 0.10]")
     detached = coordinates.detach()
     return detached + float(alpha) * (coordinates - detached)
-

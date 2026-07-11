@@ -77,7 +77,7 @@ def coordinate_gradient_probe(
     gradient_norm = gradient.flatten(1).norm(dim=1)
     finite = torch.isfinite(gradient).all(dim=(1, 2)) & torch.isfinite(gradient_norm)
     nonzero = finite & (gradient_norm > 0)
-    normalized = gradient / gradient_norm.clamp_min(torch.finfo(gradient.dtype).eps).view(-1, 1, 1)
+    normalized = gradient / gradient_norm.clamp_min(torch.finfo(gradient.dtype).eps).reshape(-1, 1, 1)
     moved = coord.detach() - eta_pixels * normalized.detach()
     moved[..., 0].clamp_(0.0, float(width - 1))
     moved[..., 1].clamp_(0.0, float(height - 1))
@@ -98,4 +98,3 @@ def coordinate_gradient_probe(
         "moved_coordinates": moved.detach(),
         "frozen_parameter_grads_none": all(parameter.grad is None for parameter in params),
     }
-
