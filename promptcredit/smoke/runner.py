@@ -140,7 +140,9 @@ def _decode_train(bundle: Any, image_embed: torch.Tensor, high_res_features: lis
 
 def _targets_for_crop(crop: AuditCrop, device: torch.device) -> tuple[dict[str, Any], torch.Tensor, torch.Tensor]:
     centroids = torch.as_tensor(crop.gt_centroids_xy, dtype=torch.float32, device=device)
-    instances = torch.as_tensor(crop.gt_masks, dtype=torch.float32, device=device)
+    # pytorch_toolbelt DiceLoss internally uses view(), so preserve the exact
+    # mask values while requiring a contiguous target layout at this boundary.
+    instances = torch.as_tensor(crop.gt_masks, dtype=torch.float32, device=device).contiguous()
     union_mask = instances.any(dim=0, keepdim=True).float()
     targets = {
         "gt_masks": union_mask,
