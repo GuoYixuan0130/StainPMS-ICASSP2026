@@ -11,6 +11,7 @@ from .freeze import (
     optimizer_excludes_frozen,
 )
 from .quality import (
+    QualityTargets,
     build_quality_targets,
     prompt_ranking_scores,
     quality_focal_loss,
@@ -20,6 +21,7 @@ from .quality import (
 
 __all__ = [
     "build_quality_targets",
+    "QualityTargets",
     "configure_promptcredit_v1_trainable",
     "configure_promptq_trainable",
     "directional_credit",

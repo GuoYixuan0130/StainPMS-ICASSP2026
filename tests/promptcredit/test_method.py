@@ -57,6 +57,7 @@ class PromptCreditMethodTest(unittest.TestCase):
         self.assertEqual(float(targets.values[0, 0]), 0.0)
 
     def test_quality_focal_finite_and_score_modes(self) -> None:
+        from promptcredit.method import QualityTargets as ExportedQualityTargets
         from promptcredit.method.quality import (
             QualityTargets,
             prompt_ranking_scores,
@@ -71,6 +72,7 @@ class PromptCreditMethodTest(unittest.TestCase):
             matched_count=1,
             duplicate_source_events=0,
         )
+        self.assertIs(ExportedQualityTargets, QualityTargets)
         loss = quality_focal_loss(logits, targets)
         self.assertTrue(torch.isfinite(loss))
         loss.backward()
