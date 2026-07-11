@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "protocol": "STAINROUTE_MONUSEG_FUTILITY_PROTOCOL",
+  "seed": 3407,
+  "split": "router_train",
+  "runtime_profile": {
+    "selection_method": "sorted_router_train_then_random_shuffle_seed_3407_first",
+    "image_id": "TCGA-HE-7128-01Z-00-DX1",
+    "microbatch_actions_per_family": 2
+  },
+  "candidate_audit": {
+    "optimistic_budget": 4,
+    "add_cost": 1,
+    "split_cost": 2,
+    "near_threshold_iou_lower": 0.5,
+    "near_threshold_iou_upper": 0.6,
+    "exact_max_opportunities": 16,
+    "opportunity_concentration_threshold": 0.7
+  },
+  "pilot": {
+    "selection_method": "add_candidate_count_quartiles_with_seed_3407_tie_break",
+    "first_batch_size": 4,
+    "second_batch_size": 4,
+    "action_family": "ADD",
+    "budgets": [1, 2, 4],
+    "immediate_stop_mean_delta_pq": 0.001,
+    "consider_full_mean_delta_pq": 0.003,
+    "immediate_stop_largest_contribution": 0.7,
+    "consider_full_largest_contribution": 0.5
+  }
+}
