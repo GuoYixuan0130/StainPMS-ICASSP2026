@@ -38,7 +38,7 @@ class NuSetPostmortemFusionTest(unittest.TestCase):
         from nuset.postmortem.metrics import failure_mode
 
         existing = {"top1_accuracy": .2, "mean_oracle_regret": .2, "selected_mask_mean_iou": .3}
-        weak = {"top1_accuracy": .22, "mean_oracle_regret": .19, "selected_mask_mean_iou": .31}
+        weak = {"top1_accuracy": .22, "mean_oracle_regret": .19, "selected_mask_mean_iou": .304}
         result = failure_mode(train_existing=existing, train_nurank=weak, development_existing=existing, development_nurank=weak, development_single=existing, development_pq_delta=.0)
         self.assertEqual(result["failure_mode"], "representation_or_objective_failure")
 
