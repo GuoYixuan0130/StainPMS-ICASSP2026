@@ -48,7 +48,7 @@ def load_frozen_bundle(config_path: Path, sam_config: str, checkpoint: Path, dev
     point_net.to(device).eval()
     point_encoder.to(device).eval()
     net.eval()
-    for parameter in list(point_net.parameters()) + list(net.parameters()):
+    for parameter in list(point_net.parameters()) + list(point_encoder.parameters()) + list(net.parameters()):
         parameter.requires_grad_(False)
         parameter.grad = None
     return FrozenNuSetBundle(
