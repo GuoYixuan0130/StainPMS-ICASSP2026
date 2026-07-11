@@ -62,7 +62,7 @@ class AnchorPoints(nn.Module):
 class MLP(nn.Module):
     """ Very simple multi-layer perceptron (also called FFN)"""
 
-    def __init__(self, input_dim, hidden_dim, num_layers, output_dim, drop=0.1):
+    def __init__(self, input_dim, hidden_dim, num_layers, output_dim, drop=0.1, include_dropout=True):
         super().__init__()
         self.num_layers = num_layers
         h = [hidden_dim] * (num_layers - 1)
@@ -71,7 +71,8 @@ class MLP(nn.Module):
         for n, k in zip([input_dim] + h, h):
             self.layers.append(nn.Linear(n, k))
             self.layers.append(nn.ReLU(inplace=True))
-            self.layers.append(nn.Dropout(drop))
+            if include_dropout:
+                self.layers.append(nn.Dropout(drop))
         self.layers.append(nn.Linear(hidden_dim, output_dim))
 
     def forward(self, x):
@@ -94,6 +95,7 @@ class DPAP2PNet(nn.Module):
             with_mask=False,
             enable_quality_head: bool = False,
             quality_head_dropout: float | None = None,
+            quality_head_without_dropout: bool = False,
             detach_quality_features: bool = False,
             quantize_quality_features_fp16: bool = False,
             export_quality_features: bool = False,
@@ -109,6 +111,7 @@ class DPAP2PNet(nn.Module):
         self.hidden_dim = hidden_dim
         self.with_mask = with_mask
         self.enable_quality_head = bool(enable_quality_head)
+        self.quality_head_without_dropout = bool(quality_head_without_dropout)
         self.detach_quality_features = bool(detach_quality_features)
         self.quantize_quality_features_fp16 = bool(quantize_quality_features_fp16)
         self.export_quality_features = bool(export_quality_features)
@@ -125,7 +128,17 @@ class DPAP2PNet(nn.Module):
             with torch.random.fork_rng(devices=devices):
                 torch.manual_seed(3407)
                 quality_dropout = dropout if quality_head_dropout is None else float(quality_head_dropout)
-                self.quality_head = MLP(hidden_dim, hidden_dim, 2, 1, drop=quality_dropout)
+                # PromptQ requests no Dropout module at all.  The default
+                # preserves the historical optional PromptCredit-v1 head
+                # structure and the default StainPMS-disabled architecture.
+                self.quality_head = MLP(
+                    hidden_dim,
+                    hidden_dim,
+                    2,
+                    1,
+                    drop=quality_dropout,
+                    include_dropout=not self.quality_head_without_dropout,
+                )
                 # A uniform low prior makes objectness x quality exactly
                 # rank-equivalent to objectness at paired-smoke step 0.
                 final_layer = self.quality_head.layers[-1]
@@ -194,6 +207,7 @@ def build_model(
         cfg,
         enable_quality_head: bool = False,
         quality_head_dropout: float | None = None,
+        quality_head_without_dropout: bool = False,
         detach_quality_features: bool = False,
         quantize_quality_features_fp16: bool = False,
         export_quality_features: bool = False,
@@ -209,6 +223,7 @@ def build_model(
         hidden_dim=cfg.prompter.hidden_dim,
         enable_quality_head=enable_quality_head,
         quality_head_dropout=quality_head_dropout,
+        quality_head_without_dropout=quality_head_without_dropout,
         detach_quality_features=detach_quality_features,
         quantize_quality_features_fp16=quantize_quality_features_fp16,
         export_quality_features=export_quality_features,

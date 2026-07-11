@@ -204,6 +204,7 @@ class PromptCreditMethodTest(unittest.TestCase):
             dropout=0.1,
             enable_quality_head=True,
             quality_head_dropout=0.0,
+            quality_head_without_dropout=True,
             detach_quality_features=True,
             quantize_quality_features_fp16=True,
             export_quality_features=True,

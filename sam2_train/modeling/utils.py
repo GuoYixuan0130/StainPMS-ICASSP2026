@@ -395,12 +395,14 @@ def predict(
         ori_shape=None,
         filtering=False,
         prompt_score_mode="objectness",
+        return_candidate_trace=False,
 ):
     ori_h, ori_w = ori_shape
     outputs,_,_,_ = model(image)
 
     points = outputs['pred_coords'][0].cpu().numpy()
     scores = outputs['pred_logits'][0].softmax(-1).cpu().numpy()
+    source_indices = np.arange(len(points), dtype=np.int64)
 
     ori_points = points.copy()
     ori_scores = scores.copy()
@@ -412,9 +414,11 @@ def predict(
     valid_flag = classes < (scores.shape[-1] - 1)
 
     points = points[valid_flag]
+    source_indices = source_indices[valid_flag]
     foreground_scores = scores[:, 0]
     if prompt_score_mode == "objectness":
         ranking_scores = foreground_scores
+        quality_scores = np.full_like(foreground_scores, np.nan, dtype=np.float32)
     else:
         if "pred_quality_logits" not in outputs:
             raise ValueError(f"prompt_score_mode={prompt_score_mode} requires a PromptCredit quality head")
@@ -427,6 +431,8 @@ def predict(
             raise ValueError(f"Unknown prompt_score_mode: {prompt_score_mode}")
     scores = ranking_scores[valid_flag]
     classes = classes[valid_flag]
+    foreground_scores = foreground_scores[valid_flag]
+    quality_scores = quality_scores[valid_flag]
 
     mask = outputs['pred_masks'][0, 0].to(torch.float32).cpu().numpy() > 0
 
@@ -435,10 +441,21 @@ def predict(
         points = points[valid_flag]
         scores = scores[valid_flag]
         classes = classes[valid_flag]
+        source_indices = source_indices[valid_flag]
+        foreground_scores = foreground_scores[valid_flag]
+        quality_scores = quality_scores[valid_flag]
 
     # if len(points) and nms_thr > 0:
     #     points, scores, classes = point_nms(points, scores, classes, nms_thr)
 
+    if return_candidate_trace:
+        trace = {
+            "proposal_indices": source_indices,
+            "objectness_scores": foreground_scores,
+            "quality_scores": quality_scores,
+            "ranking_scores": scores,
+        }
+        return points, scores, classes, mask, outputs['pred_masks'],ori_points,ori_scores,trace
     return points, scores, classes, mask, outputs['pred_masks'],ori_points,ori_scores
 
 

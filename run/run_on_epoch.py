@@ -169,6 +169,15 @@ def _accumulate_coverage(prev_map, new_map, overlap_thr=0.5):
 
 
 def _append_metric_scores(inst_map, pred_map, score_lists):
+    metrics = _single_image_metrics(inst_map, pred_map)
+    if metrics is None:
+        return None
+    for name, value in metrics.items():
+        score_lists[name].append(value)
+    return metrics
+
+
+def _single_image_metrics(inst_map, pred_map):
     if (
         len(np.unique(inst_map)) == 1
         or len(pred_map) == 1
@@ -176,18 +185,56 @@ def _append_metric_scores(inst_map, pred_map, score_lists):
         or len(np.unique(inst_map)) == 0
         or len(np.unique(pred_map)) == 1
     ):
-        return
+        return None
 
     gt = remap_label(inst_map)
     pred = remap_label(pred_map)
     [dq_tmp, sq_tmp, pq_tmp], _ = get_fast_pq(gt, pred)
-    score_lists["dq"].append(dq_tmp)
-    score_lists["sq"].append(sq_tmp)
-    score_lists["pq"].append(pq_tmp)
-    score_lists["dice2"].append(get_fast_dice_2(gt, pred))
-    score_lists["dice1"].append(get_dice_1(gt, pred))
-    score_lists["aji_p"].append(get_fast_aji_plus(gt, pred))
-    score_lists["aji"].append(get_fast_aji(gt, pred))
+    return {
+        "dq": float(dq_tmp),
+        "sq": float(sq_tmp),
+        "pq": float(pq_tmp),
+        "dice2": float(get_fast_dice_2(gt, pred)),
+        "dice1": float(get_dice_1(gt, pred)),
+        "aji_p": float(get_fast_aji_plus(gt, pred)),
+        "aji": float(get_fast_aji(gt, pred)),
+    }
+
+
+def _point_nms_keep_indices(points, scores, nms_thr):
+    """Mirror current point_nms while returning retained input indices for audit."""
+    if len(points) == 0:
+        return np.empty(0, dtype=np.int64)
+    distances = np.linalg.norm(points[:, None, :] - points[None, :, :], axis=-1)
+    np.fill_diagonal(distances, np.inf)
+    reserved = np.ones(len(points), dtype=bool)
+    for index in np.argsort(-scores):
+        if reserved[index]:
+            reserved[distances[index] <= nms_thr] = False
+    return np.flatnonzero(reserved)
+
+
+def _max_hard_iou_to_instances(mask, instance_map):
+    """Return the best GT-instance IoU for one already-decoded hard mask.
+
+    This is an audit-only measurement.  It consumes the mask already produced
+    by the standard decoder call; it must never trigger an additional decoder
+    evaluation or alter instance assembly.
+    """
+    prediction = np.asarray(mask, dtype=bool)
+    truth = np.asarray(instance_map)
+    if prediction.shape != truth.shape:
+        raise ValueError("decoded mask and crop GT must have the same shape")
+    prediction_area = int(prediction.sum())
+    best = 0.0
+    for instance_id in np.unique(truth):
+        if instance_id == 0:
+            continue
+        target = truth == instance_id
+        union = prediction_area + int(target.sum()) - int((prediction & target).sum())
+        if union:
+            best = max(best, int((prediction & target).sum()) / union)
+    return float(best)
 
 
 def _mean_metric_tuple(score_lists):
@@ -725,6 +772,7 @@ def validation_on_epoch(
     iou_threshold,
     memory_bank_list,
     device,
+    return_details=False,
 ):
     point_net.eval()
     net.eval()
@@ -740,6 +788,7 @@ def validation_on_epoch(
         "dice1": [],
     }
     margin = 7
+    details = []
 
     with tqdm(total=len(val_loader), desc="Validation round", unit="batch", leave=False) as pbar:
         for _, (img_seg, inst_maps, type_maps, gt_points, labels, bi_masks, ori_shape, file_inds, name) in enumerate(val_loader):
@@ -755,6 +804,10 @@ def validation_on_epoch(
             all_points_class = []
             processed_boxes = []
             candidate_records = []
+            all_point_trace = []
+            decoded_prompt_records = []
+            final_nms_indices = np.empty(0, dtype=np.int64)
+            masks_decoded = 0
             point_id_map = {}
             next_id = 0
             context_memory_bank_list = []
@@ -767,19 +820,24 @@ def validation_on_epoch(
                 load,
             ).tolist()
 
-            for crop_box in crop_boxes:
+            for crop_id, crop_box in enumerate(crop_boxes):
                 x1, y1, x2, y2 = crop_box
                 img = images_seg[..., y1:y2, x1:x2].to(device)
 
                 with torch.no_grad():
-                    pd_points, pd_scores, pd_classes, _, _, _, _ = predict(
+                    prediction = predict(
                         point_net,
                         img,
                         ori_shape=np.array((y2 - y1, x2 - x1)),
                         filtering=args.test.filtering,
                         nms_thr=args.test.nms_thr,
                         prompt_score_mode=getattr(cfgs, "prompt_score_mode", "objectness"),
+                        return_candidate_trace=return_details,
                     )
+                if return_details:
+                    pd_points, pd_scores, pd_classes, _, _, _, _, point_trace = prediction
+                else:
+                    pd_points, pd_scores, pd_classes, _, _, _, _ = prediction
 
                 if len(pd_points) == 0:
                     processed_boxes.append(crop_box)
@@ -802,12 +860,26 @@ def validation_on_epoch(
                 pd_points = pd_points[keep_new]
                 pd_scores = pd_scores[keep_new]
                 pd_classes = pd_classes[keep_new]
+                if return_details:
+                    point_trace = {key: value[keep_new] for key, value in point_trace.items()}
                 if len(pd_points) == 0:
                     continue
 
                 all_points.append(pd_points)
                 all_points_scores.append(pd_scores)
                 all_points_class.append(pd_classes)
+                if return_details:
+                    for local_index, point in enumerate(pd_points):
+                        all_point_trace.append(
+                            {
+                                "crop_id": int(crop_id),
+                                "proposal_index": int(point_trace["proposal_indices"][local_index]),
+                                "point": [float(point[0]), float(point[1])],
+                                "objectness_score": float(point_trace["objectness_scores"][local_index]),
+                                "quality_score": float(point_trace["quality_scores"][local_index]),
+                                "ranking_score": float(point_trace["ranking_scores"][local_index]),
+                            }
+                        )
 
                 current_points = np.vstack(all_points)
                 current_scores = np.concatenate(all_points_scores)
@@ -818,6 +890,11 @@ def validation_on_epoch(
                     current_classes,
                     args.test.nms_thr,
                 )
+                if return_details:
+                    final_nms_indices = _point_nms_keep_indices(
+                        np.vstack(all_points), np.concatenate(all_points_scores), args.test.nms_thr
+                    )
+                    current_trace = [all_point_trace[int(index)] for index in final_nms_indices]
 
                 current_inds = []
                 for point in current_points:
@@ -850,6 +927,7 @@ def validation_on_epoch(
                 keep_np = keep.cpu().numpy()
 
                 with torch.no_grad():
+                    masks_decoded += int(sub_prompt_points.size(0))
                     pred, values, iou_predictions, vision_feats, image_embed = inference(
                         net,
                         point_encoder,
@@ -865,6 +943,21 @@ def validation_on_epoch(
                         cfgs,
                         device,
                     )
+
+                    if return_details:
+                        crop_instances = inst_maps[0, y1:y2, x1:x2]
+                        for local_index, trace_index in enumerate(np.flatnonzero(keep_np)):
+                            trace = dict(current_trace[int(trace_index)])
+                            trace.update(
+                                {
+                                    "decoded_hard_mask_iou": _max_hard_iou_to_instances(
+                                        pred[local_index].detach().cpu().numpy() > 0,
+                                        crop_instances,
+                                    ),
+                                    "sam_predicted_iou": float(iou_predictions[local_index].detach().cpu()),
+                                }
+                            )
+                            decoded_prompt_records.append(trace)
 
                     if cfgs.tta:
                         pred, values, iou_predictions = _tta_average(
@@ -1025,7 +1118,21 @@ def validation_on_epoch(
                     selected_records,
                 )
 
-            _append_metric_scores(inst_maps[0], pred_inst_map, score_lists)
+            image_metrics = _append_metric_scores(inst_maps[0], pred_inst_map, score_lists)
+            if return_details:
+                kept_trace = [all_point_trace[int(index)] for index in final_nms_indices]
+                details.append(
+                    {
+                        "image_id": _safe_image_name(name),
+                        "metrics": image_metrics,
+                        "prompts_before_point_nms": int(len(all_point_trace)),
+                        "prompts_after_point_nms": int(len(final_nms_indices)),
+                        "masks_decoded": int(masks_decoded),
+                        "point_nms_candidates": all_point_trace,
+                        "point_nms_kept_candidates": kept_trace,
+                        "decoded_prompt_records": decoded_prompt_records,
+                    }
+                )
 
             if cfgs.vis:
                 namecat = "Test_" + "_".join(str(item) for item in name) + "_"
@@ -1040,7 +1147,8 @@ def validation_on_epoch(
 
             pbar.update()
 
-    return _mean_metric_tuple(score_lists)
+    metrics = _mean_metric_tuple(score_lists)
+    return (metrics, details) if return_details else metrics
 
 
 def _tta_average(
