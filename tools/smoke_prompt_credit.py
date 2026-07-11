@@ -11,9 +11,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from promptcredit.smoke.runner import run_smoke
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--split-manifest", type=Path, default=Path("configs/splits/stainroute_tnbc.json"))
@@ -25,6 +22,8 @@ def main() -> int:
     parser.add_argument("--out-dir", type=Path, default=Path("logs/promptcredit/stage1_smoke"))
     parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
     args = parser.parse_args()
+    from promptcredit.smoke.runner import run_smoke
+
     report = run_smoke(
         data_root=args.data_root,
         split_manifest_path=args.split_manifest,
@@ -41,4 +40,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -171,7 +171,17 @@ def _build_experiment(
     *, name: str, config_path: Path, sam_config: str, checkpoint: Path, device: torch.device
 ) -> SmokeExperiment:
     from mmengine.config import Config
-    from sam2_train.modeling.criterion import build_criterion
+
+    # `criterion` imports a legacy utility module whose module-level code calls
+    # cfg.parse_args().  The smoke CLI has already parsed its own arguments, so
+    # hide them only during this one legacy import rather than letting that
+    # unrelated parser reject --data-root/--checkpoint/--out-dir.
+    original_argv = sys.argv
+    try:
+        sys.argv = [original_argv[0]]
+        from sam2_train.modeling.criterion import build_criterion
+    finally:
+        sys.argv = original_argv
 
     _set_seed()
     bundle = _load_models(config_path, sam_config, checkpoint, device, enable_quality_head=True)
