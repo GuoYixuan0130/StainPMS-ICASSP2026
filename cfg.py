@@ -124,6 +124,20 @@ def parse_args():
     parser.add_argument("--stainroute_bootstrap_samples", default=2000, type=int)
 
     parser.add_argument(
+        "--stage1_monuseg_futility",
+        choices=["runtime_profile", "candidate_audit", "add_pilot"],
+        default="",
+        help="Run the project-lead-approved MoNuSeg futility gate; router_train only.",
+    )
+    parser.add_argument(
+        "--stainroute_futility_config",
+        default="configs/stainroute/monuseg_futility_v1.yaml",
+        type=str,
+    )
+    parser.add_argument("--stainroute_futility_pilot_manifest", default="", type=str)
+    parser.add_argument("--stainroute_futility_pilot_batch", choices=["1", "2"], default="1")
+
+    parser.add_argument(
         "--stage2_selective_refine",
         action="store_true",
         help="Run StainPQR Stage 2C selective coverage refinement and exit.",

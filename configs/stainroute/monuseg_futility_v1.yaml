@@ -18,7 +18,7 @@
     "opportunity_concentration_threshold": 0.7
   },
   "pilot": {
-    "selection_method": "add_candidate_count_quartiles_with_seed_3407_tie_break",
+    "selection_method": "seeded_permutation_within_sorted_add_count_quartiles",
     "first_batch_size": 4,
     "second_batch_size": 4,
     "action_family": "ADD",

@@ -186,6 +186,7 @@ def _subset_loader(cfgs: Any, test_dataset: Any, split_manifest_path: Path, spli
 class DecodedAction:
     candidate: ActionCandidate
     add_mask: np.ndarray | None = None
+    add_logits: np.ndarray | None = None
     child_first: np.ndarray | None = None
     child_second: np.ndarray | None = None
     child_first_logits: np.ndarray | None = None
@@ -336,7 +337,14 @@ def _base_prediction_with_cache(
     point_encoder: Any,
     texture_memory_bank_list: list,
     device: torch.device,
-) -> tuple[np.ndarray, dict[tuple[int, int, int, int], EncodedCrop], dict[int, dict[str, Any]], dict[str, float | bool | None], dict[str, int]]:
+    synchronize_for_timing: bool = False,
+) -> tuple[
+    np.ndarray,
+    dict[tuple[int, int, int, int], EncodedCrop],
+    dict[int, dict[str, Any]],
+    dict[str, float | bool | None],
+    dict[str, float | int],
+]:
     """Run the unchanged first pass once and retain every tile encoding."""
 
     height, width = _ori_hw(ori_shape)
@@ -359,7 +367,26 @@ def _base_prediction_with_cache(
     next_id = 0
     caches: dict[tuple[int, int, int, int], EncodedCrop] = {}
     equivalence: dict[str, float | bool | None] = {"max_abs_logit_error": None, "max_abs_iou_error": None, "passed": None}
-    counters = {"encoder_calls": 0, "base_decoder_actions": 0}
+    counters: dict[str, float | int] = {
+        "encoder_calls": 0,
+        "base_decoder_actions": 0,
+        "point_detection_seconds": 0.0,
+        "cached_equivalence_seconds": 0.0,
+        "first_pass_image_encoding_seconds": 0.0,
+        "base_mask_decoding_seconds": 0.0,
+        "texture_memory_seconds": 0.0,
+        "base_assembly_seconds": 0.0,
+    }
+
+    def profile_start() -> float:
+        if synchronize_for_timing and device.type == "cuda":
+            torch.cuda.synchronize(device)
+        return time.perf_counter()
+
+    def profile_elapsed(started: float) -> float:
+        if synchronize_for_timing and device.type == "cuda":
+            torch.cuda.synchronize(device)
+        return time.perf_counter() - started
 
     crop_boxes = [tuple(int(item) for item in box) for box in crop_with_overlap(image_tensor[0], cfgs.crop_size, cfgs.crop_size, cfgs.overlap, cfgs.load).tolist()]
     print(f"[stage1-base] tiles={len(crop_boxes)} image_shape={height}x{width}", flush=True)
@@ -367,6 +394,7 @@ def _base_prediction_with_cache(
         x1, y1, x2, y2 = crop_box
         crop = image_tensor[..., y1:y2, x1:x2]
         print(f"[stage1-base] tile={crop_index}/{len(crop_boxes)} box={crop_box}", flush=True)
+        point_started = profile_start()
         points, scores, classes, _, _, _, _ = predict(
             point_net,
             crop,
@@ -374,6 +402,7 @@ def _base_prediction_with_cache(
             filtering=args.test.filtering,
             nms_thr=args.test.nms_thr,
         )
+        counters["point_detection_seconds"] += profile_elapsed(point_started)
         if len(points) == 0:
             processed_boxes.append(crop_box)
             continue
@@ -420,6 +449,7 @@ def _base_prediction_with_cache(
 
         # One pre-run equivalence check on the first eligible crop only.
         if equivalence["passed"] is None:
+            equivalence_started = profile_start()
             equivalence_context = list(context_bank)
             full_pred, full_values, _, _, _ = inference(
                 net, point_encoder, crop, list(memory_bank), local_prompts, labels,
@@ -441,15 +471,21 @@ def _base_prediction_with_cache(
             }
             if not equivalence["passed"]:
                 raise RuntimeError(f"Cached decode equivalence failed: {equivalence}")
+            counters["cached_equivalence_seconds"] += profile_elapsed(equivalence_started)
 
+        encoding_started = profile_start()
         encoded = encode_crop(
             net, point_encoder, crop, memory_bank, context_bank, crop_box=crop_box,
             cfgs=cfgs, device=device,
         )
+        counters["first_pass_image_encoding_seconds"] += profile_elapsed(encoding_started)
         counters["encoder_calls"] += 1
+        decoding_started = profile_start()
         decoded = decode_prompts_from_features(net, encoded, local_prompts, labels, out_size=cfgs.out_size, device=device)
+        counters["base_mask_decoding_seconds"] += profile_elapsed(decoding_started)
         counters["base_decoder_actions"] += int(local_prompts.shape[0])
         caches[crop_box] = encoded
+        texture_started = profile_start()
         _update_texture_memory(
             net=net,
             encoded=encoded,
@@ -461,6 +497,7 @@ def _base_prediction_with_cache(
             memory_bank_list=memory_bank,
             device=device,
         )
+        counters["texture_memory_seconds"] += profile_elapsed(texture_started)
         masks = mask_process_eval(
             current_classes[keep.cpu().numpy()],
             current_indices_tensor[keep],
@@ -493,10 +530,12 @@ def _base_prediction_with_cache(
                 }
             )
 
+    assembly_started = profile_start()
     prediction, selected_records = _assemble_instance_map(
         all_boxes, all_scores, all_masks, all_inds, (height, width), args.data.post.iou_threshold,
         all_records=records, return_records=True,
     )
+    counters["base_assembly_seconds"] += profile_elapsed(assembly_started)
     selected_by_id = {int(record["final_id"]): record for record in selected_records}
     return prediction.astype(np.int32), caches, selected_by_id, equivalence, counters
 
@@ -509,6 +548,7 @@ def _decode_grouped_actions(
     cfgs: Any,
     net: Any,
     device: torch.device,
+    profile: dict[str, float] | None = None,
 ) -> tuple[dict[str, DecodedAction], int]:
     decoded: dict[str, DecodedAction] = {}
     extra_cost = 0
@@ -530,7 +570,10 @@ def _decode_grouped_actions(
                 device=device,
             )
             labels = torch.ones((len(additions), 1), dtype=torch.int, device=device)
+            decode_started = time.perf_counter()
             output = decode_prompts_from_features(net, encoded, prompts, labels, out_size=cfgs.out_size, device=device)
+            if profile is not None:
+                profile["add_decoding_seconds"] = profile.get("add_decoding_seconds", 0.0) + (time.perf_counter() - decode_started)
             extra_cost += len(additions)
             masks = mask_process_eval(
                 np.ones(len(additions), dtype=np.int64), torch.arange(len(additions), device=device), tile_box,
@@ -553,7 +596,11 @@ def _decode_grouped_actions(
                         "decoded_mask_area": int(mask.sum()),
                     },
                 )
-                decoded[action.action_id] = DecodedAction(feature_action, add_mask=mask)
+                decoded[action.action_id] = DecodedAction(
+                    feature_action,
+                    add_mask=mask,
+                    add_logits=_uncrop_logits(output.logits[index], tile_box, shape),
+                )
         splits = [action for action in tile_actions if action.action_type is ActionType.SPLIT]
         if splits:
             prompt_rows = []
@@ -564,7 +611,10 @@ def _decode_grouped_actions(
                 label_rows.extend([[1, 0], [1, 0]])
             prompts = torch.tensor(prompt_rows, dtype=torch.float32, device=device)
             labels = torch.tensor(label_rows, dtype=torch.int, device=device)
+            decode_started = time.perf_counter()
             output = decode_prompts_from_features(net, encoded, prompts, labels, out_size=cfgs.out_size, device=device)
+            if profile is not None:
+                profile["split_decoding_seconds"] = profile.get("split_decoding_seconds", 0.0) + (time.perf_counter() - decode_started)
             extra_cost += 2 * len(splits)
             masks = mask_process_eval(
                 np.ones(len(prompt_rows), dtype=np.int64), torch.arange(len(prompt_rows), device=device), tile_box,
@@ -1014,6 +1064,8 @@ def _save_decoded_action_artifact(directory: Path, decoded_action: DecodedAction
     }
     if decoded_action.add_mask is not None:
         payload["add_mask"] = decoded_action.add_mask.astype(np.uint8)
+    if decoded_action.add_logits is not None:
+        payload["add_logits"] = decoded_action.add_logits.astype(np.float16)
     if decoded_action.child_first is not None:
         payload["child_first"] = decoded_action.child_first.astype(np.uint8)
     if decoded_action.child_second is not None:

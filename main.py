@@ -307,6 +307,26 @@ def main():
 
     train_dataset, test_dataset, train_loader, test_loader = build_dataloaders(cfgs, args)
 
+    if cfgs.stage1_monuseg_futility:
+        ckpt = torch.load(cfgs.sam_ckpt, map_location="cpu")
+        if "model1" not in ckpt:
+            raise RuntimeError(f"MoNuSeg futility gates require a CA-SAM2 point-head checkpoint: {cfgs.sam_ckpt}")
+        model1.load_state_dict(ckpt["model1"])
+        texture_memory_bank_list = ckpt.get("texture_memory_bank_list", []) or []
+        from stainroute.futility import run_monuseg_futility_gate
+
+        run_monuseg_futility_gate(
+            cfgs=cfgs,
+            args=args,
+            test_dataset=test_dataset,
+            net=net,
+            point_net=model1,
+            point_encoder=model1_encoder,
+            texture_memory_bank_list=texture_memory_bank_list,
+            device=device,
+        )
+        return
+
     if cfgs.stage1_stainroute_oracle:
         ckpt = torch.load(cfgs.sam_ckpt, map_location="cpu")
         if "model1" not in ckpt:
