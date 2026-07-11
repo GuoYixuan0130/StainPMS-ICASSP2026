@@ -60,6 +60,15 @@ class PromptQProtocolTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 resolve_promptq_images(root, manifest_path, "development")
 
+    def test_frozen_baseline_scalar_record_does_not_require_quality_artifacts(self) -> None:
+        """The baseline arm has no quality head by design."""
+        import inspect
+        from promptcredit.promptq.runner import _collect_scalar_records
+
+        signature = inspect.signature(_collect_scalar_records)
+        self.assertIn("require_quality_features", signature.parameters)
+        self.assertTrue(signature.parameters["require_quality_features"].default)
+
 
 if __name__ == "__main__":
     unittest.main()

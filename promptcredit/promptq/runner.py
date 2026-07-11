@@ -192,44 +192,56 @@ def _select_scalar_smoke_crops(data_root: Path) -> list[PromptQCrop]:
     return crops[:2]
 
 
-def _collect_scalar_crop(bundle: Any, crop: PromptQCrop, context_bank: list[Any]) -> dict[str, Any]:
+def _collect_scalar_crop(
+    bundle: Any, crop: PromptQCrop, context_bank: list[Any], *, require_quality_features: bool
+) -> dict[str, Any]:
     image = crop.image.unsqueeze(0).to(bundle.device)
     centroids, masks = _crop_targets(crop, bundle.device)
     with torch.no_grad():
         output, _, _, _ = bundle.point_net(image)
-        if "quality_roi_features" not in output:
+        if require_quality_features and "quality_roi_features" not in output:
             raise RuntimeError("PromptQ requires detached exported ROI features")
         selection = gather_nearest_coordinates(output["pred_coords"].detach(), [centroids])
         image_embed, high_res = _prepare_decoder_features(bundle, image, context_bank, crop)
         decoded_logits, _ = _decode_standard(bundle, image_embed, high_res, selection.coordinates.detach())
         hard_iou = _hard_iou(decoded_logits, masks)
-        targets = build_quality_targets(output["pred_quality_logits"], selection.source_indices, hard_iou)
-    source_hard_iou = torch.zeros_like(targets.values[0])
-    for source, value in zip(
-        selection.source_indices[0].detach().cpu().tolist(), hard_iou.detach().cpu().tolist(), strict=True
-    ):
-        source_hard_iou[source] = max(source_hard_iou[source], float(value))
-    return {
+        if require_quality_features:
+            targets = build_quality_targets(output["pred_quality_logits"], selection.source_indices, hard_iou)
+    record = {
         "crop": crop,
-        "features": output["quality_roi_features"][0].detach().cpu().to(torch.float16),
-        "utility": targets.values[0].detach().cpu(),
-        "matched": targets.matched_proposals[0].detach().cpu(),
-        "hard_iou": source_hard_iou,
         "coordinates": output["pred_coords"][0].detach().cpu(),
         "point_logits": output["pred_logits"][0].detach().cpu(),
         "semantic_logits": output["pred_masks"][0, 0].detach().cpu(),
         "decoded_logits": decoded_logits.detach().cpu(),
     }
+    if not require_quality_features:
+        return record
+    source_hard_iou = torch.zeros_like(targets.values[0])
+    for source, value in zip(
+        selection.source_indices[0].detach().cpu().tolist(), hard_iou.detach().cpu().tolist(), strict=True
+    ):
+        source_hard_iou[source] = max(source_hard_iou[source], float(value))
+    record.update(
+        {
+            "features": output["quality_roi_features"][0].detach().cpu().to(torch.float16),
+            "utility": targets.values[0].detach().cpu(),
+            "matched": targets.matched_proposals[0].detach().cpu(),
+            "hard_iou": source_hard_iou,
+        }
+    )
+    return record
 
 
-def _collect_scalar_records(bundle: Any, crops: list[PromptQCrop]) -> list[dict[str, Any]]:
+def _collect_scalar_records(
+    bundle: Any, crops: list[PromptQCrop], *, require_quality_features: bool = True
+) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     context_bank: list[Any] = []
     current_image = None
     for crop in crops:
         if crop.image_id != current_image:
             context_bank, current_image = [], crop.image_id
-        records.append(_collect_scalar_crop(bundle, crop, context_bank))
+        records.append(_collect_scalar_crop(bundle, crop, context_bank, require_quality_features=require_quality_features))
     return records
 
 
@@ -350,7 +362,7 @@ def _scalar_smoke(
     promptq.point_net.eval()
     promptq.net.eval()
     initial_records = _collect_scalar_records(promptq, crops)
-    baseline_records = _collect_scalar_records(frozen_baseline, crops)
+    baseline_records = _collect_scalar_records(frozen_baseline, crops, require_quality_features=False)
     baseline_errors = {
         "pred_coords_max_abs_error": max(
             float((left["coordinates"] - right["coordinates"]).abs().max())
