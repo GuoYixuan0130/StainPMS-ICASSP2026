@@ -93,6 +93,10 @@ class DPAP2PNet(nn.Module):
             hidden_dim: int = 256,
             with_mask=False,
             enable_quality_head: bool = False,
+            quality_head_dropout: float | None = None,
+            detach_quality_features: bool = False,
+            quantize_quality_features_fp16: bool = False,
+            export_quality_features: bool = False,
     ):
         """
             Initializes the model.
@@ -105,6 +109,9 @@ class DPAP2PNet(nn.Module):
         self.hidden_dim = hidden_dim
         self.with_mask = with_mask
         self.enable_quality_head = bool(enable_quality_head)
+        self.detach_quality_features = bool(detach_quality_features)
+        self.quantize_quality_features_fp16 = bool(quantize_quality_features_fp16)
+        self.export_quality_features = bool(export_quality_features)
         self.strides = [2 ** (i + 2) for i in range(self.num_levels)]
 
         self.deform_layer = MLP(hidden_dim, hidden_dim, 2, 2, drop=dropout)
@@ -117,7 +124,8 @@ class DPAP2PNet(nn.Module):
             devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
             with torch.random.fork_rng(devices=devices):
                 torch.manual_seed(3407)
-                self.quality_head = MLP(hidden_dim, hidden_dim, 2, 1, drop=dropout)
+                quality_dropout = dropout if quality_head_dropout is None else float(quality_head_dropout)
+                self.quality_head = MLP(hidden_dim, hidden_dim, 2, 1, drop=quality_dropout)
                 # A uniform low prior makes objectness x quality exactly
                 # rank-equivalent to objectness at paired-smoke step 0.
                 final_layer = self.quality_head.layers[-1]
@@ -170,11 +178,26 @@ class DPAP2PNet(nn.Module):
                 self.mask_head(feats1), size=images.shape[2:], mode='bilinear', align_corners=True)
         }
         if self.enable_quality_head:
-            output['pred_quality_logits'] = self.quality_head(roi_features).flatten(1, 2).squeeze(-1)
+            quality_features = roi_features.detach() if self.detach_quality_features else roi_features
+            # PromptQ caches FP16 detached features.  Feeding the same quantized
+            # values online makes cache-vs-online quality logits exactly
+            # comparable without changing any point or decoder computation.
+            if self.quantize_quality_features_fp16:
+                quality_features = quality_features.to(torch.float16).to(roi_features.dtype)
+            output['pred_quality_logits'] = self.quality_head(quality_features).flatten(1, 2).squeeze(-1)
+            if self.export_quality_features:
+                output['quality_roi_features'] = quality_features.detach()
 
         return output,feats_origin,embedding,feats
 
-def build_model(cfg, enable_quality_head: bool = False):
+def build_model(
+        cfg,
+        enable_quality_head: bool = False,
+        quality_head_dropout: float | None = None,
+        detach_quality_features: bool = False,
+        quantize_quality_features_fp16: bool = False,
+        export_quality_features: bool = False,
+):
     backbone = Backbone(cfg)
     
     model = DPAP2PNet(
@@ -185,6 +208,10 @@ def build_model(cfg, enable_quality_head: bool = False):
         space=cfg.prompter.space,
         hidden_dim=cfg.prompter.hidden_dim,
         enable_quality_head=enable_quality_head,
+        quality_head_dropout=quality_head_dropout,
+        detach_quality_features=detach_quality_features,
+        quantize_quality_features_fp16=quantize_quality_features_fp16,
+        export_quality_features=export_quality_features,
     )
 
     return model,backbone

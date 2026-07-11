@@ -187,6 +187,51 @@ class PromptCreditMethodTest(unittest.TestCase):
         torch.testing.assert_close(legacy_output["pred_coords"], promptcredit_output["pred_coords"])
         torch.testing.assert_close(legacy_output["pred_logits"], promptcredit_output["pred_logits"])
 
+    def test_promptq_quality_path_detaches_quantizes_and_has_no_dropout(self) -> None:
+        from sam2_train.modeling.dpa_p2pnet import DPAP2PNet
+
+        class DummyBackbone(torch.nn.Module):
+            def forward(self, images):
+                batch = images.shape[0]
+                features = torch.ones(batch, 4, 4, 4, device=images.device, requires_grad=True)
+                return [features], features
+
+        model = DPAP2PNet(
+            DummyBackbone(),
+            num_levels=1,
+            num_classes=1,
+            hidden_dim=4,
+            dropout=0.1,
+            enable_quality_head=True,
+            quality_head_dropout=0.0,
+            detach_quality_features=True,
+            quantize_quality_features_fp16=True,
+            export_quality_features=True,
+        )
+        model.eval()
+        output, *_ = model(torch.zeros(1, 3, 16, 16))
+        features = output["quality_roi_features"]
+        self.assertFalse(features.requires_grad)
+        self.assertFalse(any(isinstance(module, torch.nn.Dropout) for module in model.quality_head.modules()))
+        cached_logits = model.quality_head(features.to(torch.float16).to(torch.float32)).flatten(1, 2).squeeze(-1)
+        torch.testing.assert_close(output["pred_quality_logits"], cached_logits, atol=1e-6, rtol=0.0)
+
+    def test_promptq_freeze_trains_only_quality_head(self) -> None:
+        from promptcredit.method.freeze import configure_promptq_trainable, module_state_sha256_excluding
+
+        class Point(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.conv = torch.nn.Linear(2, 2)
+                self.quality_head = torch.nn.Sequential(torch.nn.Linear(2, 1))
+
+        point, sam = Point(), torch.nn.Linear(2, 2)
+        before = module_state_sha256_excluding(point, ("quality_head.",))
+        manifest = configure_promptq_trainable(point, sam)
+        self.assertEqual(manifest["trainable_parameter_names"], ["quality_head.0.weight", "quality_head.0.bias"])
+        self.assertTrue(all(name.startswith("quality_head.") == parameter.requires_grad for name, parameter in point.named_parameters()))
+        self.assertEqual(before, module_state_sha256_excluding(point, ("quality_head.",)))
+
     def test_neutral_quality_keeps_point_nms_actions_identical(self) -> None:
         from promptcredit.smoke.runner import _prompt_action_source_ids
 

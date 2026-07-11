@@ -225,6 +225,10 @@ def _load_models(
     device: torch.device,
     *,
     enable_quality_head: bool = False,
+    quality_head_dropout: float | None = None,
+    detach_quality_features: bool = False,
+    quantize_quality_features_fp16: bool = False,
+    export_quality_features: bool = False,
 ) -> _ModelBundle:
     from mmengine.config import Config
     from sam2_train.build_sam import build_sam2
@@ -232,7 +236,14 @@ def _load_models(
     from promptcredit.method.checkpoint import load_point_checkpoint_compat
 
     config = Config.fromfile(str(config_path))
-    point_net, point_encoder = build_model(config, enable_quality_head=enable_quality_head)
+    point_net, point_encoder = build_model(
+        config,
+        enable_quality_head=enable_quality_head,
+        quality_head_dropout=quality_head_dropout,
+        detach_quality_features=detach_quality_features,
+        quantize_quality_features_fp16=quantize_quality_features_fp16,
+        export_quality_features=export_quality_features,
+    )
     checkpoint_payload = torch.load(checkpoint, map_location="cpu")
     if "model1" not in checkpoint_payload or "model" not in checkpoint_payload:
         raise ValueError("Frozen StainPMS checkpoint must contain both model1 and model states")
