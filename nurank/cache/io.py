@@ -48,6 +48,8 @@ def iter_groups(cache_dir: Path) -> Iterator[dict[str, Any]]:
                 raise RuntimeError(f"Invalid four-token field {key}: {path}")
         if group["mask_logits"].shape[:2] != (count, TOKEN_COUNT):
             raise RuntimeError(f"Invalid cached mask layout: {path}")
+        if "low_res_logits" in group and group["low_res_logits"].shape[:2] != (count, TOKEN_COUNT):
+            raise RuntimeError(f"Invalid cached low-resolution mask layout: {path}")
         if not np.array_equal(group.get("token_index"), np.tile(np.arange(TOKEN_COUNT, dtype=np.int64), (count, 1))):
             raise RuntimeError(f"Invalid cached token index record: {path}")
         group["_entry"] = entry

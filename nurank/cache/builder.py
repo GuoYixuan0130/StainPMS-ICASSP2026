@@ -124,6 +124,7 @@ def _cache_group(
     arrays = {
         # Logits stay float32 so token-0 replay can prove exact baseline identity; only embeddings are fp16 by protocol.
         "mask_logits": all_tokens.upsampled_logits.detach().cpu().float().numpy(),
+        "low_res_logits": all_tokens.low_res_logits.detach().cpu().float().numpy(),
         "mask_tokens": all_tokens.mask_tokens.detach().cpu().to(torch.float16).numpy(),
         "token_index": np.tile(np.arange(TOKEN_COUNT, dtype=np.int64), (len(local_points), 1)),
         "original_predicted_iou": all_tokens.predicted_iou.detach().cpu().float().numpy(),
@@ -159,6 +160,7 @@ def _cache_group(
 def build_automatic_prompt_cache(
     *, bundle: FrozenNuSetBundle, data_root: Path, split_manifest_path: Path, role: Role, cache_dir: Path,
     progress: Callable[[int, int], None] | None = None, prior_stage_seconds: float = 0.0,
+    time_limit_seconds: float = TIME_LIMIT_SECONDS,
 ) -> CacheResult:
     """Build an immutable cache from one standard automatic inference traversal."""
     if cache_dir.exists():
@@ -221,8 +223,8 @@ def build_automatic_prompt_cache(
             elapsed = time.perf_counter() - started
             if processed >= max(1, int(np.ceil(total_crops * 0.10))):
                 estimated_total = elapsed / processed * total_crops
-                if prior_stage_seconds + estimated_total > TIME_LIMIT_SECONDS:
-                    raise RuntimeError(f"NuRank stage estimate {(prior_stage_seconds + estimated_total) / 3600:.2f} GPU hours exceeds fixed 6 hour limit")
+                if prior_stage_seconds + estimated_total > time_limit_seconds:
+                    raise RuntimeError(f"Cache stage estimate {(prior_stage_seconds + estimated_total) / 3600:.2f} GPU hours exceeds configured limit")
             if progress:
                 progress(processed, total_crops)
     after = {"point_net": module_state_sha256(bundle.point_net), "point_encoder": module_state_sha256(bundle.point_encoder), "sam2": module_state_sha256(bundle.net)}
@@ -238,7 +240,7 @@ def build_automatic_prompt_cache(
         "image_manifest": [{"image_id": item.image_id, "image_sha256": item.image_sha256, "label_sha256": item.label_sha256} for item in images],
         "groups": groups, "group_count": len(groups), "prompt_count": int(sum(group["prompt_count"] for group in groups)),
         "matched_prompt_count": int(sum(group["matched_prompt_count"] for group in groups)), "unmatched_prompt_count": int(sum(group["unmatched_prompt_count"] for group in groups)),
-        "call_counts": counts.as_dict(), "elapsed_seconds": elapsed, "prior_stage_seconds": prior_stage_seconds, "estimated_total_seconds_at_10_percent": estimated_total,
+        "call_counts": counts.as_dict(), "elapsed_seconds": elapsed, "prior_stage_seconds": prior_stage_seconds, "time_limit_seconds": time_limit_seconds, "estimated_total_seconds_at_10_percent": estimated_total,
         "frozen_checksums": {"before": before, "after": after},
         "environment": {"python": platform.python_version(), "torch": torch.__version__, "device": str(bundle.device), "nms": NMS_RADIUS, "tta": False, "texture": True, "context": True, "overlap": OVERLAP},
     }
