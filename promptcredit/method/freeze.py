@@ -41,7 +41,8 @@ def module_state_sha256(module: torch.nn.Module) -> str:
         digest.update(name.encode("utf-8"))
         digest.update(str(tuple(tensor.shape)).encode("ascii"))
         digest.update(str(tensor.dtype).encode("ascii"))
-        digest.update(tensor.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes())
+        # Support scalar state buffers (for example BatchNorm counters) too.
+        digest.update(tensor.detach().cpu().contiguous().numpy().tobytes())
     return digest.hexdigest()
 
 

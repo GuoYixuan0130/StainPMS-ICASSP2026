@@ -188,7 +188,10 @@ def _state_dict_sha256(module: torch.nn.Module, *, excluded_prefixes: tuple[str,
         digest.update(name.encode("utf-8"))
         digest.update(str(tuple(tensor.shape)).encode("ascii"))
         digest.update(str(tensor.dtype).encode("ascii"))
-        digest.update(tensor.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes())
+        # ``num_batches_tracked`` is a zero-dimensional Long buffer.  NumPy
+        # exports its contiguous scalar bytes directly, unlike Tensor.view()
+        # which rejects a 0-D dtype reinterpretation.
+        digest.update(tensor.detach().cpu().contiguous().numpy().tobytes())
     return digest.hexdigest()
 
 

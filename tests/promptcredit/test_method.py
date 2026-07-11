@@ -124,6 +124,19 @@ class PromptCreditMethodTest(unittest.TestCase):
         self.assertTrue(frozen_parameters_have_no_grad(sam))
         self.assertEqual(before, module_state_sha256(sam))
 
+    def test_state_checksum_accepts_scalar_long_buffers(self) -> None:
+        from promptcredit.method.freeze import module_state_sha256
+        from promptcredit.smoke.runner import _state_dict_sha256
+
+        class WithCounter(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.register_buffer("num_batches_tracked", torch.tensor(0, dtype=torch.long))
+
+        module = WithCounter()
+        self.assertEqual(module_state_sha256(module), module_state_sha256(module))
+        self.assertEqual(_state_dict_sha256(module), _state_dict_sha256(module))
+
     def test_quality_head_initialization_is_seed_3407_deterministic_and_neutral(self) -> None:
         from sam2_train.modeling.dpa_p2pnet import DPAP2PNet
 
