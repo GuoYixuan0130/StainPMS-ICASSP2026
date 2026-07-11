@@ -50,8 +50,9 @@ call is allowed.
 - Development: the seven fixed patients-7-8 images only.  They may have been
   seen by the StainPMS initialization and are therefore explicitly not an
   independent leakage-free validation claim.
-- Patients 9-11 remain closed.  The runner resolves only direct allowed IDs;
-  it neither lists nor opens those paths.
+- Patients 9-11 remain closed.  In the frozen TNBC conversion, patients 1-8
+  reside in `train_12`; the runner resolves only direct 7-8 IDs there and
+  neither lists nor opens the closed `test/` paths.
 - MoNuSeg, StainRoute, threshold tuning, a second seed, full TNBC training,
   and directional credit are prohibited.
 

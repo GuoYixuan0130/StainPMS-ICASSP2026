@@ -38,8 +38,7 @@ class PromptQProtocolTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "tnbc"
             manifest = self._manifest()
-            self._write_paths(root, manifest["router_train"], "train_12/images", "train_12/labels")
-            self._write_paths(root, manifest["calibration"], "test/images", "test/labels")
+            self._write_paths(root, manifest["router_train"] + manifest["calibration"], "train_12/images", "train_12/labels")
             manifest_path = Path(temporary) / "split.json"
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             train = resolve_promptq_images(root, manifest_path, "train")
@@ -55,8 +54,7 @@ class PromptQProtocolTest(unittest.TestCase):
             root = Path(temporary) / "tnbc"
             manifest = self._manifest()
             manifest["calibration"][-1] = "09_1"
-            self._write_paths(root, manifest["router_train"], "train_12/images", "train_12/labels")
-            self._write_paths(root, manifest["calibration"], "test/images", "test/labels")
+            self._write_paths(root, manifest["router_train"] + manifest["calibration"], "train_12/images", "train_12/labels")
             manifest_path = Path(temporary) / "split.json"
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             with self.assertRaises(ValueError):

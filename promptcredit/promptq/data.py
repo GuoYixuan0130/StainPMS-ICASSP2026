@@ -82,8 +82,11 @@ def resolve_promptq_images(data_root: Path, split_manifest_path: Path, role: Rol
     elif role == "development":
         image_ids = list(payload["calibration"])
         allowed_patients = DEVELOPMENT_PATIENTS
-        root = data_root / payload["test_image_root_relative"]
-        label_root = data_root / "test" / "labels"
+        # The frozen TNBC conversion places patients 1--8 together under
+        # train_12; only patients 9--11 live under the closed test directory.
+        # Resolve exact 7--8 IDs here rather than touching the test root.
+        root = data_root / payload["train_image_root_relative"]
+        label_root = data_root / "train_12" / "labels"
     else:
         raise ValueError(f"Unsupported PromptQ role: {role}")
     if not root.is_dir() or not label_root.is_dir():
