@@ -42,7 +42,6 @@ from torch.utils.data import DataLoader
 
 from run.dataset.monuseg import MONUSEG
 from sam2_train.build_sam import build_sam2
-from sam2_train.modeling.criterion import build_criterion
 from sam2_train.modeling.dpa_p2pnet import build_model
 from sam2_train.modeling.stats_utils import (
     get_dice_1,
@@ -137,6 +136,7 @@ def _legacy_helpers():
             point_nms,
             predict,
         )
+        from sam2_train.modeling.criterion import build_criterion  # pylint: disable=import-outside-toplevel
     finally:
         sys.argv = original_argv
     return SimpleNamespace(
@@ -152,6 +152,7 @@ def _legacy_helpers():
         collate=collate_fn,
         point_nms=point_nms,
         predict=predict,
+        build_criterion=build_criterion,
     )
 
 
@@ -281,7 +282,7 @@ def _train_weak_teacher(
     dataset = MONUSEG(cfg, args_cfg, str(data_root), cfg.load, mode="train")
     dataset.paths = [f"{record.stem}{Path(record.image_path).suffix}" for record in labeled]
     loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=args.num_workers, pin_memory=True, collate_fn=helpers.collate)
-    criterion, _ = build_criterion(args_cfg, device)
+    criterion, _ = helpers.build_criterion(args_cfg, device)
     base_optimizer = torch.optim.AdamW(
         [parameter for module in (point_net, net) for parameter in module.parameters() if parameter.requires_grad],
         lr=1e-4,
