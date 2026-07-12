@@ -254,7 +254,10 @@ def _make_labeled_loader(
     num_workers: int,
 ) -> DataLoader:
     helpers = _legacy_helpers()
-    dataset = MONUSEG(cfg, args_cfg, str(data_root), cfg.load, mode="train")
+    # MONUSEG consumes transform dictionaries with ``pop('type')``.  Give each
+    # loader its own configuration copy so the labelled and pseudo branches
+    # cannot corrupt one another's augmentation specification.
+    dataset = MONUSEG(cfg, copy.deepcopy(args_cfg), str(data_root), cfg.load, mode="train")
     dataset.paths = [f"{record.stem}{Path(record.image_path).suffix}" for record in labeled]
     return DataLoader(dataset, batch_size=1, shuffle=False, num_workers=num_workers, pin_memory=True, collate_fn=helpers.collate)
 
@@ -476,7 +479,7 @@ class PseudoCropCursor:
         helpers = _legacy_helpers()
         pseudo_cfg = copy.copy(cfg)
         pseudo_cfg.use_pms = False
-        dataset = MONUSEG(pseudo_cfg, args_cfg, str(data_root), cfg.load, mode="train")
+        dataset = MONUSEG(pseudo_cfg, copy.deepcopy(args_cfg), str(data_root), cfg.load, mode="train")
         # MONUSEG is used only for its existing crop/augmentation mechanics.
         # Its raw TNBC label root is replaced before iteration and its paths are
         # fixed to the artifact-owned pseudo maps.
