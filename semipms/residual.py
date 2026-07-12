@@ -42,7 +42,7 @@ def residual_evidence(image: np.ndarray, teacher_instances: np.ndarray, dilation
     """H optical-density evidence outside the dilated teacher instance coverage."""
     h = compute_h_evidence(image, sigma=1.0)
     coverage = np.asarray(teacher_instances) > 0
-    dilated = binary_dilation(coverage, footprint=disk(dilation_radius)) if dilation_radius > 0 else coverage
+    dilated = binary_dilation(coverage, structure=disk(dilation_radius)) if dilation_radius > 0 else coverage
     return (h * (~dilated)).astype(np.float32)
 
 

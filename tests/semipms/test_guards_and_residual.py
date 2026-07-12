@@ -11,6 +11,7 @@ from semipms.residual import (
     inverse_geometric_mask,
     inverse_stain_mask,
     propose_residual_points,
+    residual_evidence,
     transform_points_xy,
 )
 
@@ -63,6 +64,8 @@ class SemiPMSResidualTest(unittest.TestCase):
         residual = np.zeros((32, 32), dtype=np.float32)
         residual[5, 5], residual[20, 20], residual[10, 25] = 1.0, 0.8, 0.7
         self.assertGreaterEqual(len(propose_residual_points(residual, max_candidates=3)), 2)
+        rgb = np.full((32, 32, 3), 120, dtype=np.uint8); rgb[8:12, 8:12] = 20
+        self.assertEqual(residual_evidence(rgb, np.zeros((32, 32), dtype=np.int32)).shape, (32, 32))
         original = np.zeros((12, 12), dtype=bool); original[3:8, 3:8] = True
         features = acceptance_features(original, original, original, original.astype(float), np.zeros_like(original))
         rule = {"min_view_iou": .8, "max_centroid_displacement": 2, "min_area_stability": .8, "min_h_occupancy": .5, "min_boundary_stability": .8, "max_pseudo_conflict": .1}
