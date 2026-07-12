@@ -15,8 +15,10 @@ experiment, not a paper-level conclusion or a license to access TNBC test.
 
 ## Fair schedule
 
-All methods share an exact 240-step StainPMS warm-up checkpoint, including the
-optimizer state.  They then continue to 960 total optimizer updates with the
+All methods share an exact model-only 240-step StainPMS warm-up checkpoint.
+Adam is reset at this one fixed boundary for every path, so no method receives
+a private optimizer-state advantage. They then continue to 960 total model
+updates with the
 same labelled loader, labelled augmentations, initialization, warm-up and
 standard inference/assembly:
 

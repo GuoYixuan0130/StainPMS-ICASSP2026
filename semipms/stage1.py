@@ -771,7 +771,7 @@ def _train_to_fixed_step(
                 artifact / "checkpoints" / f"{method.lower().replace('-', '_')}_final_{step}.pth",
                 point_net, net, optimizer, latest_texture, step=step, role=method,
                 initial_state_sha256=initial_state_sha256, ema=pseudo_provider.ema if pseudo_provider else None,
-                include_optimizer=(method == "Shared-Warmup"),
+                include_optimizer=False,
             ))
 
     bounded = Stage1Optimizer(
@@ -1065,8 +1065,12 @@ def run_stage1(args: argparse.Namespace) -> Path:
     interval = (args.total_steps - args.warmup_steps) // 3
     evaluation_steps = {args.warmup_steps + interval, args.warmup_steps + interval * 2, args.total_steps}
 
+    formal_equivalence: dict[str, bool] = {}
+
     def continue_from_shared(method: str, with_residual: bool) -> None:
-        loaded_cfg, point_net, point_encoder, net, optimizer, texture_memory, payload = _load_checkpoint(shared_checkpoint, args, device)
+        loaded_cfg, point_net, point_encoder, net, optimizer, texture_memory, payload = _load_checkpoint(
+            shared_checkpoint, args, device, require_optimizer=False
+        )
         metadata = payload["semipms_stage1"]
         if int(metadata["optimizer_steps"]) != args.warmup_steps or metadata["initial_state_sha256"] != initial_state_sha256:
             raise PermissionError("Continuation checkpoint does not prove the shared Stage-1 warm-up protocol.")
@@ -1079,13 +1083,16 @@ def run_stage1(args: argparse.Namespace) -> Path:
                 residual_ramp_steps=args.residual_ramp_steps, ema_decay=args.ema_decay,
                 base_weight=args.base_pseudo_weight, residual_weight=args.residual_pseudo_weight,
             )
-        if optimizer is None:
-            raise AssertionError("Shared warm-up checkpoint unexpectedly lacks its optimizer state.")
-        train_rows, current_dev, aux_rows, _, summary = _train_to_fixed_step(
+        # The model-only shared snapshot is the fixed common continuation
+        # boundary. Adam is restarted here for all three paths, so no method
+        # receives a private optimiser-state advantage.
+        optimizer = _new_optimizer(point_net, net)
+        train_rows, current_dev, aux_rows, final_texture, summary = _train_to_fixed_step(
             artifact, method, point_net, point_encoder, net, optimizer, loaded_cfg, cfg, data_root, labeled,
             development, access_guard, device, start_steps=args.warmup_steps, total_steps=args.total_steps,
             eval_steps=evaluation_steps, initial_state_sha256=initial_state_sha256,
             pseudo_provider=provider, initial_texture_memory=texture_memory, num_workers=args.num_workers,
+            save_final=False,
         )
         training_rows.extend(train_rows); dev_rows.extend(current_dev)
         checkpoint_rows.extend(row for row in aux_rows if "path" in row)
@@ -1093,6 +1100,10 @@ def run_stage1(args: argparse.Namespace) -> Path:
         method_summaries.append(summary)
         if provider is not None:
             cache_rows.extend(provider.cache_rows)
+        formal_equivalence[method] = _verify_formal_baseline_equivalence(
+            artifact / "baseline_equivalence" / method.lower().replace("-", "_"), development[0], data_root,
+            point_net, point_encoder, net, final_texture, cfg, device,
+        )
         del point_net, point_encoder, net, optimizer
         if device.type == "cuda":
             torch.cuda.empty_cache()
@@ -1103,17 +1114,6 @@ def run_stage1(args: argparse.Namespace) -> Path:
     # No hidden p1--6 annotation has been opened at this point.
     access_guard.mark_training_finished()
 
-    formal_equivalence: dict[str, bool] = {}
-    for method in ("Supervised-StainPMS-20", "MeanTeacher-PMS", "SemiPMS"):
-        final_path = artifact / "checkpoints" / f"{method.lower().replace('-', '_')}_final_{args.total_steps}.pth"
-        loaded_cfg, point_net, point_encoder, net, _, texture_memory, _ = _load_checkpoint(final_path, args, device, require_optimizer=False)
-        formal_equivalence[method] = _verify_formal_baseline_equivalence(
-            artifact / "baseline_equivalence" / method.lower().replace("-", "_"), development[0], data_root,
-            point_net, point_encoder, net, texture_memory, cfg, device,
-        )
-        del loaded_cfg, point_net, point_encoder, net
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
     if not all(formal_equivalence.values()):
         raise AssertionError("A Stage-1 final model diverged from the formal standard inference path.")
 
@@ -1152,6 +1152,7 @@ def run_stage1(args: argparse.Namespace) -> Path:
             "initial_state_sha256": initial_state_sha256, "shared_warmup_checkpoint": str(shared_checkpoint),
             "shared_warmup_checkpoint_sha256": shared_sha, "warmup_steps": args.warmup_steps,
             "total_optimizer_steps_each_path": args.total_steps,
+            "continuation_optimizer": "AdamW is reinitialized at the shared 240-step boundary for all paths",
         },
         "data_manifest": "data_manifest.json",
         "access_guard": {
