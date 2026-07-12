@@ -998,6 +998,123 @@ def _write_sha256s(artifact: Path) -> None:
             handle.write(f"{sha256_file(path)}  {path.relative_to(artifact).as_posix()}\n")
 
 
+def _read_partial_csv(path: Path) -> list[dict[str, object]]:
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing recoverable Stage-1 partial file: {path}")
+
+    def parse(value: str) -> object:
+        value = value.strip()
+        if value == "":
+            return 0.0
+        if value == "True":
+            return True
+        if value == "False":
+            return False
+        try:
+            number = float(value)
+            return int(number) if number.is_integer() else number
+        except ValueError:
+            return value
+
+    with path.open(newline="", encoding="utf-8") as handle:
+        return [{key: parse(value) for key, value in row.items()} for row in csv.DictReader(handle)]
+
+
+def finalize_existing_stage1(artifact: Path) -> Path:
+    """Finish an artifact that reached post-training audit before an audit bug.
+
+    No model, cache, acceptance parameter, or training step is changed.  This
+    is deliberately recovery-only: all three fixed-step development curves must
+    already have been durably written by ``flush_progress``.
+    """
+    artifact = artifact.resolve()
+    if (artifact / "report.json").exists():
+        raise FileExistsError(f"Artifact already has report.json: {artifact}")
+    manifest = json.loads((artifact / "data_manifest.json").read_text(encoding="utf-8"))
+    data_root = Path(manifest["data_root"])
+    train_records, _ = list_stage1_records(data_root)
+    _, unlabeled = deterministic_split(train_records)
+    training_rows = _read_partial_csv(artifact / "training_curve.partial.csv")
+    dev_rows = _read_partial_csv(artifact / "per_image_metrics.partial.csv")
+    pseudo_step_rows = _read_partial_csv(artifact / "pseudo_training_losses.partial.csv")
+    cache_rows = _read_partial_csv(artifact / "pseudo_label_statistics.partial.csv")
+    final_methods = {"Supervised-StainPMS-20", "MeanTeacher-PMS", "SemiPMS"}
+    observed_final = {
+        str(row["method"]) for row in dev_rows
+        if int(row["optimizer_steps"]) == TOTAL_STEPS
+    }
+    if observed_final != final_methods:
+        raise PermissionError("Recovery refuses to audit unless all three 960-step development paths had finished.")
+    guard = Stage1AccessGuard(); guard.freeze_training_configuration(); guard.mark_training_finished()
+    cache_audit, candidate_audit, fp_breakdown = _offline_cache_audit(artifact, unlabeled, guard)
+    if guard.hidden_train_label_reads != len(unlabeled):
+        raise AssertionError("Recovered audit did not read exactly the 24 train-side hidden labels once.")
+    cache_summary = _cache_summary(cache_audit)
+    _csv(artifact / "training_curve.csv", training_rows)
+    _csv(artifact / "pseudo_training_losses.csv", pseudo_step_rows)
+    _csv(artifact / "pseudo_label_statistics.csv", cache_rows)
+    _csv(artifact / "pseudo_cache_audit.csv", cache_audit)
+    _csv(artifact / "pseudo_cache_audit_summary.csv", cache_summary)
+    _csv(artifact / "pseudo_candidate_audit.csv", candidate_audit)
+    _csv(artifact / "fp_source_breakdown.csv", fp_breakdown)
+    _csv(artifact / "per_image_metrics.csv", dev_rows)
+    dev_aggregate = _aggregate_development(dev_rows)
+    _csv(artifact / "per_patient_metrics.csv", dev_aggregate)
+    supervised_final = _find_dev_aggregate(dev_aggregate, "Supervised-StainPMS-20", TOTAL_STEPS)
+    mean_teacher_final = _find_dev_aggregate(dev_aggregate, "MeanTeacher-PMS", TOTAL_STEPS)
+    semipms_final = _find_dev_aggregate(dev_aggregate, "SemiPMS", TOTAL_STEPS)
+    supervised_warmup = _find_dev_aggregate(dev_aggregate, "Supervised-StainPMS-20", WARMUP_STEPS)
+    undertraining = {
+        f"delta_{name}_240_to_{TOTAL_STEPS}": float(supervised_final[name]) - float(supervised_warmup[name])
+        for name in ("dice", "aji", "dq", "sq", "pq")
+    }
+    provenance = json.loads((artifact / "checkpoint_provenance.json").read_text(encoding="utf-8"))
+    frozen_rule = json.loads((artifact / "frozen_acceptance_rule.json").read_text(encoding="utf-8"))
+    shared_checkpoint = artifact / "checkpoints" / f"shared_warmup_final_{WARMUP_STEPS}.pth"
+    if not shared_checkpoint.is_file():
+        raise FileNotFoundError("Recovery requires the shared 240-step checkpoint.")
+    costs: list[dict[str, object]] = []
+    for method in sorted({str(row["method"]) for row in training_rows}):
+        subset = [row for row in training_rows if row["method"] == method]
+        costs.append({
+            "method": method, "recovered_from_partial_curve": True,
+            "epochs_logged": len(subset),
+            "optimizer_steps_completed": max(int(row["optimizer_steps_completed"]) for row in subset),
+            "seconds_logged": float(sum(float(row.get("seconds", 0.0)) for row in subset)),
+        })
+    report = {
+        "phase": "SemiPMS Stage 1 -- TNBC development fair comparison",
+        "recovery": "post-training audit finalization only; no optimizer step, cache update, threshold, or model selection was rerun",
+        "git_sha_finalizer": _git(Path(__file__).resolve().parents[1], "rev-parse", "HEAD"),
+        "canonical_baseline": CANONICAL_BASELINE,
+        "checkpoint_provenance": provenance,
+        "shared_initialization": {
+            "official_checkpoint_sha256": provenance["sha256"], "point_head": "random with seed 3407",
+            "shared_warmup_checkpoint": str(shared_checkpoint), "shared_warmup_checkpoint_sha256": sha256_file(shared_checkpoint),
+            "warmup_steps": WARMUP_STEPS, "total_optimizer_steps_each_path": TOTAL_STEPS,
+            "continuation_optimizer": "AdamW reinitialized at the shared 240-step boundary for all paths",
+        },
+        "data_manifest": "data_manifest.json",
+        "access_guard": {**guard.manifest(), "hidden_train_label_reads_after_training": guard.hidden_train_label_reads, "expected_hidden_train_images": 24},
+        "frozen_acceptance_rule": {"rule": frozen_rule.get("rule"), "sha256": sha256_file(artifact / "frozen_acceptance_rule.json"), "reused_unchanged": True},
+        "baseline_adequacy": {"supervised_240_step_development": supervised_warmup, "supervised_final_development": supervised_final, "change": undertraining},
+        "development_final": {
+            "supervised": supervised_final, "mean_teacher": mean_teacher_final, "semipms": semipms_final,
+            "semipms_minus_supervised": _comparison(semipms_final, supervised_final, "SemiPMS - Supervised-StainPMS-20"),
+            "semipms_minus_mean_teacher": _comparison(semipms_final, mean_teacher_final, "SemiPMS - MeanTeacher-PMS"),
+        },
+        "cache_post_training_diagnostics": cache_summary,
+        "training_cost": costs,
+        "formal_standard_inference_equivalence": "shared-warmup preflight completed before the recovered artifact reached all three final curves",
+        "tests": {"guard_and_residual_tests": "tests.txt", "checksum_guard": True},
+        "reference_interpretation": {"automatic_verdict": "disabled; project lead decides from complete development evidence"},
+        "stop_condition": "Recovered Stage 1 artifact finalized; do not access TNBC patients 9--11, MoNuSeg, multi-seed, or a further stage.",
+    }
+    write_json(artifact / "report.json", report)
+    _write_sha256s(artifact)
+    return artifact
+
+
 def run_stage1(args: argparse.Namespace) -> Path:
     started = time.monotonic()
     repo = Path(__file__).resolve().parents[1]
