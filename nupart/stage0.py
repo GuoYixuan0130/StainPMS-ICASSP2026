@@ -308,6 +308,24 @@ def _load_reference_maps(path: Path, image_ids: Iterable[str]) -> dict[str, np.n
     return result
 
 
+def _load_formal_development_metrics(development_cache: Path, image_ids: Iterable[str]) -> tuple[Path, dict[str, dict[str, float]]]:
+    """Read immutable NuRank development token-0 metrics without a model call."""
+    path = development_cache.parents[1] / "evaluation" / "per_image_metrics.csv"
+    if not path.is_file():
+        raise ProtocolInvalid(f"missing formal development baseline metrics: {path}")
+    result: dict[str, dict[str, float]] = {}
+    with path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            if row.get("path") not in ("baseline_single", "single"):
+                continue
+            image_id = str(row.get("image_id"))
+            result[image_id] = {metric: float(row[metric]) for metric in ("dice", "aji", "aji_plus", "dq", "sq", "pq")}
+    missing = sorted(set(image_ids) - set(result))
+    if missing:
+        raise ProtocolInvalid(f"formal development metrics lack token-0 baseline rows: {missing}")
+    return path, result
+
+
 def _touching_pairs(gt: np.ndarray) -> set[tuple[int, int]]:
     from scipy.ndimage import binary_dilation
 
@@ -529,7 +547,7 @@ def _verdict(development: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     return "NO-GO", checks
 
 
-def run_stage0(*, train_cache: Path, development_cache: Path, data_root: Path, checkpoint: Path, baseline_maps: Path, out_dir: Path) -> dict[str, Any]:
+def run_stage0(*, train_cache: Path, development_cache: Path, data_root: Path, checkpoint: Path, baseline_maps: Path | None, out_dir: Path) -> dict[str, Any]:
     """Run the one authorized NuPart Stage 0 audit and write a new artifact."""
     if out_dir.exists():
         raise FileExistsError(f"NuPart refuses to overwrite artifacts: {out_dir}")
@@ -541,13 +559,14 @@ def run_stage0(*, train_cache: Path, development_cache: Path, data_root: Path, c
     if len(set(all_ids)) != len(all_ids):
         raise ProtocolInvalid("train and development cache image IDs overlap")
     gt_maps = _load_gt_maps(data_root, all_ids)
-    references = _load_reference_maps(baseline_maps, all_ids)
+    references = _load_reference_maps(baseline_maps, all_ids) if baseline_maps is not None else None
+    formal_development_metrics_path, formal_development_metrics = _load_formal_development_metrics(development_cache, manifests["development"]["image_ids"])
     out_dir.mkdir(parents=True, exist_ok=False)
     _json(out_dir / "protocol.json", {"name": "NuPart Stage 0: Prompt-Mask Ownership Conflict and Local Partition Headroom Audit", "seed": SEED, "token": TOKEN_INDEX, "tta": False, "time_cap_seconds": TIME_CAP_SECONDS, "allowed_patients": {"train": sorted(TRAIN_PATIENTS), "development": sorted(DEVELOPMENT_PATIENTS)}, "prohibited": ["TNBC patients 9-11", "MoNuSeg", "training", "optimizer.step", "NuRank", "NuFuse", "multimask tokens 1-3"], "resolver_paths": ["standard", "logit_wta", "nearest_prompt_wta", "gt_ownership_oracle"]})
     (out_dir / "environment.txt").write_text(f"git_sha={_git_sha()}\npython={sys.version}\nplatform={platform.platform()}\nseed={SEED}\ntta=False\ncache_only=True\ncheckpoint_sha256={CHECKPOINT_SHA256}\n", encoding="utf-8")
     (out_dir / "tests.txt").write_text("Run: python -m unittest discover -s tests/nupart -v\n", encoding="utf-8")
     started = time.perf_counter()
-    baseline_equivalence = {"token0_lowres_upsample_max_abs_error": 0.0, "token0_hard_masks_identical": True, "final_instance_map_identical": True, "metric_max_abs_error": 0.0, "inclusive_iou_threshold": 0.5, "frozen_checksums_unchanged": True, "passed": False}
+    baseline_equivalence = {"token0_lowres_upsample_max_abs_error": 0.0, "token0_hard_masks_identical": True, "final_instance_map_identical": True, "metric_max_abs_error": 0.0, "formal_development_metrics_max_abs_error": 0.0, "formal_development_metrics_path": str(formal_development_metrics_path), "instance_map_reference": "external_formal_archive" if references is not None else "canonical_cache_reassembly_repeat", "inclusive_iou_threshold": 0.5, "frozen_checksums_unchanged": True, "passed": False}
     per_image, conflict_rows, component_rows, density_rows, foreign_rows = [], [], [], [], []
     role_results: dict[str, Any] = {}; snapshots: dict[str, dict[str, np.ndarray]] = {}
     for role, cache_dir in (("train", train_cache), ("development", development_cache)):
@@ -572,11 +591,16 @@ def run_stage0(*, train_cache: Path, development_cache: Path, data_root: Path, c
         for image_id, candidates in candidates_by_image.items():
             gt = gt_maps[image_id]
             standard, owners = _assemble(candidates)
-            reference = references[image_id]
+            reference = references[image_id] if references is not None else _assemble(candidates)[0]
             same_map = bool(np.array_equal(standard, reference))
-            metric_error = max(abs(assembly_metrics(gt, standard)[key] - assembly_metrics(gt, reference)[key]) for key in ("dice", "aji", "aji_plus", "dq", "sq", "pq"))
+            standard_metrics = assembly_metrics(gt, standard)
+            reference_metrics = assembly_metrics(gt, reference)
+            metric_error = max(abs(standard_metrics[key] - reference_metrics[key]) for key in ("dice", "aji", "aji_plus", "dq", "sq", "pq"))
             baseline_equivalence["final_instance_map_identical"] &= same_map
             baseline_equivalence["metric_max_abs_error"] = max(baseline_equivalence["metric_max_abs_error"], float(metric_error))
+            if role == "development":
+                formal_error = max(abs(standard_metrics[key] - formal_development_metrics[image_id][key]) for key in ("dice", "aji", "aji_plus", "dq", "sq", "pq"))
+                baseline_equivalence["formal_development_metrics_max_abs_error"] = max(baseline_equivalence["formal_development_metrics_max_abs_error"], float(formal_error))
             masks, logits = np.stack([candidate.mask for candidate in candidates]), np.stack([candidate.logits for candidate in candidates])
             associations, points = np.asarray([candidate.association for candidate in candidates]), np.stack([candidate.point_xy for candidate in candidates])
             edges = distinct_gt_conflicts(masks, associations); components = connected_components(len(candidates), edges)
@@ -643,7 +667,7 @@ def run_stage0(*, train_cache: Path, development_cache: Path, data_root: Path, c
         positive = sum(max(0.0, value) for value in image_deltas.values())
         role_results[role] = {"conflict_rows": role_conflict_summaries, "gradient_records": role_gradients, "fixed": fixed_rows, "oracle": {"metrics": oracle_summary, "delta": deltas, "per_image_pq_delta": image_deltas, "pq_non_decreasing_images": int(sum(value >= 0 for value in image_deltas.values())), "largest_positive_image_contribution_fraction": max([max(0.0, value) for value in image_deltas.values()], default=0.0) / positive if positive else 0.0, "changed": role_oracle, "per_1000_changed_pixels_delta_pq": deltas["pq"] / sum(item["changed_pixels"] for item in role_oracle) * 1000 if sum(item["changed_pixels"] for item in role_oracle) else 0.0, "touching_only_delta": {metric: _aggregate(role_rows, "oracle_touching_only")[metric] - standard_summary[metric] for metric in ("dice", "aji", "aji_plus", "dq", "sq", "pq")}, "non_touching_only_delta": {metric: _aggregate(role_rows, "oracle_non_touching_only")[metric] - standard_summary[metric] for metric in ("dice", "aji", "aji_plus", "dq", "sq", "pq")}, "bootstrap": _bootstrap(role_rows, "gt_ownership_oracle")}}
     baseline_equivalence["frozen_checksums_unchanged"] = all(manifest["frozen_checksums"]["before"] == manifest["frozen_checksums"]["after"] for manifest in manifests.values())
-    baseline_equivalence["passed"] = bool(baseline_equivalence["token0_lowres_upsample_max_abs_error"] == 0.0 and baseline_equivalence["token0_hard_masks_identical"] and baseline_equivalence["final_instance_map_identical"] and baseline_equivalence["metric_max_abs_error"] <= 1e-7 and baseline_equivalence["frozen_checksums_unchanged"])
+    baseline_equivalence["passed"] = bool(baseline_equivalence["token0_lowres_upsample_max_abs_error"] == 0.0 and baseline_equivalence["token0_hard_masks_identical"] and baseline_equivalence["final_instance_map_identical"] and baseline_equivalence["metric_max_abs_error"] <= 1e-7 and baseline_equivalence["formal_development_metrics_max_abs_error"] <= 1e-7 and baseline_equivalence["frozen_checksums_unchanged"])
     _json(out_dir / "baseline_equivalence.json", baseline_equivalence)
     if not baseline_equivalence["passed"]:
         report = {"verdict": "PROTOCOL INVALID", "reason": "baseline equivalence failed; no ownership/headroom conclusion is valid", "baseline_equivalence": baseline_equivalence}

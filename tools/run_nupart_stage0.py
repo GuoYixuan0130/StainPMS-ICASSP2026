@@ -18,7 +18,7 @@ def main() -> None:
     parser.add_argument("--development-cache", required=True, type=Path)
     parser.add_argument("--data-root", required=True, type=Path, help="TNBC root only; train_12 labels are read by cache image ID")
     parser.add_argument("--checkpoint", required=True, type=Path, help="checked by SHA256 only; never loaded")
-    parser.add_argument("--baseline-maps", required=True, type=Path, help="immutable formal token-0 baseline assembly .npz")
+    parser.add_argument("--baseline-maps", type=Path, help="optional immutable formal token-0 assembly .npz; cache replay is used when absent")
     parser.add_argument("--out-dir", required=True, type=Path)
     args = parser.parse_args()
     report = run_stage0(train_cache=args.train_cache, development_cache=args.development_cache, data_root=args.data_root, checkpoint=args.checkpoint, baseline_maps=args.baseline_maps, out_dir=args.out_dir)
