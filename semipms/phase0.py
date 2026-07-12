@@ -541,21 +541,18 @@ def _calibrate_rule(calibration_rows: Sequence[Mapping[str, Any]]) -> tuple[dict
 
 
 def _metrics(gt: np.ndarray, prediction: np.ndarray) -> tuple[dict[str, Any], set[int]]:
-    def safe_remap(value: np.ndarray) -> np.ndarray:
-        """Adapt legacy remapping to the valid all-foreground edge case.
-
-        ``stats_utils.remap_label`` assumes label 0 is present and calls
-        ``list.remove(0)``.  A pseudo map can validly cover every pixel, so add
-        a temporary zero border solely while remapping, then crop it away.
-        """
-        array = np.asarray(value, dtype=np.int32)
-        if array.size and not np.any(array == 0):
-            padded = np.zeros((array.shape[0] + 2, array.shape[1] + 2), dtype=np.int32)
-            padded[1:-1, 1:-1] = array
-            return remap_label(padded)[1:-1, 1:-1]
-        return remap_label(array)
-
-    true = safe_remap(gt); pred = safe_remap(prediction)
+    true_raw = np.asarray(gt, dtype=np.int32)
+    pred_raw = np.asarray(prediction, dtype=np.int32)
+    if true_raw.shape != pred_raw.shape:
+        raise ValueError(f"Metric map shape mismatch: {true_raw.shape} vs {pred_raw.shape}")
+    # The legacy PQ/AJI helpers assume both maps contain background label 0 and
+    # index per-instance arrays by that contiguous label ID. A decoded pseudo
+    # assembly may validly cover every pixel, so preserve a shared zero border
+    # for the complete metric calculation instead of cropping it after remap.
+    if true_raw.size and (not np.any(true_raw == 0) or not np.any(pred_raw == 0)):
+        true_raw = np.pad(true_raw, 1, constant_values=0)
+        pred_raw = np.pad(pred_raw, 1, constant_values=0)
+    true = remap_label(true_raw); pred = remap_label(pred_raw)
     pq, pairing = get_fast_pq(true, pred, match_iou=0.5)
     gt_ids = sorted(int(value) for value in np.unique(gt) if value != 0)
     missed = {gt_ids[int(index)-1] for index in pairing[2]}
