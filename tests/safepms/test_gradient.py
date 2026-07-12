@@ -14,7 +14,10 @@ except ModuleNotFoundError:
 class SafePMSGradientTest(unittest.TestCase):
     def _project(self, anchor, expansion, *, trust=1.0):
         from safepms.gradient import project_global
-        params = [(f"p{index}", torch.nn.Parameter(torch.zeros_like(value))) for index, value in enumerate(anchor)]
+        params = []
+        for index, (anchor_value, expansion_value) in enumerate(zip(anchor, expansion, strict=True)):
+            reference = anchor_value if anchor_value is not None else expansion_value
+            params.append((f"p{index}", torch.nn.Parameter(torch.zeros_like(reference) if reference is not None else torch.zeros(1))))
         return project_global(params, anchor, expansion, trust_ratio=trust)
 
     def test_loss_decomposition_exactness(self):
