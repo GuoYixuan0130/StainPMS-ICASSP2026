@@ -91,8 +91,8 @@ def deterministic_split(records: Iterable[ImageRecord], seed: int = SEED) -> tup
     unlabeled: list[ImageRecord] = []
     for patient in sorted(ALLOWED_PATIENTS):
         items = sorted(by_patient[patient], key=lambda item: item.stem)
-        if len(items) != 5:
-            raise RuntimeError(f"Patient {patient} must have exactly five Phase-0 images; found {len(items)}.")
+        if not items:
+            raise RuntimeError(f"Patient {patient} has no Phase-0 image.")
         # The hash selection is insensitive to filesystem iteration order and
         # gives every patient exactly one labeled file.
         selected = min(
@@ -102,7 +102,9 @@ def deterministic_split(records: Iterable[ImageRecord], seed: int = SEED) -> tup
         labeled.append(selected)
         unlabeled.extend(item for item in items if item != selected)
     if len(labeled) != 6 or len(unlabeled) != 24:
-        raise AssertionError("SemiPMS split cardinality contract failed.")
+        raise AssertionError(
+            f"SemiPMS requires exactly 6 labeled + 24 unlabeled images; got {len(labeled)} + {len(unlabeled)}."
+        )
     return labeled, sorted(unlabeled, key=lambda item: item.stem)
 
 

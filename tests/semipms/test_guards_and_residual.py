@@ -28,10 +28,8 @@ class SemiPMSGuardTest(unittest.TestCase):
             guard.allow_unlabeled_label_read(ImageRecord(7, "07_1", "image", "label", "b"))
 
     def test_deterministic_six_plus_twenty_four_split(self):
-        records = [
-            ImageRecord(patient, f"{patient:02d}_{index}", "image", "label", f"{patient}-{index}")
-            for patient in range(1, 7) for index in range(1, 6)
-        ]
+        counts = {1: 7, 2: 3, 3: 5, 4: 8, 5: 4, 6: 3}
+        records = [ImageRecord(patient, f"{patient:02d}_{index}", "image", "label", f"{patient}-{index}") for patient, count in counts.items() for index in range(1, count + 1)]
         first = deterministic_split(records)
         second = deterministic_split(list(reversed(records)))
         self.assertEqual([item.stem for item in first[0]], [item.stem for item in second[0]])
