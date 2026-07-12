@@ -539,9 +539,16 @@ def _metrics(gt: np.ndarray, prediction: np.ndarray) -> tuple[dict[str, Any], se
     pq, pairing = get_fast_pq(true, pred, match_iou=0.5)
     gt_ids = sorted(int(value) for value in np.unique(gt) if value != 0)
     missed = {gt_ids[int(index)-1] for index in pairing[2]}
+    def safe_metric(function) -> float:
+        try:
+            return float(function(true, pred))
+        except ZeroDivisionError:
+            # Empty teacher/candidate prediction is a valid weak-teacher
+            # outcome, not an audit failure. It contributes zero overlap.
+            return 0.0
     return {
-        "dice": float(get_dice_1(true, pred)), "dice2": float(get_fast_dice_2(true, pred)),
-        "aji": float(get_fast_aji(true, pred)), "aji_plus": float(get_fast_aji_plus(true, pred)),
+        "dice": safe_metric(get_dice_1), "dice2": safe_metric(get_fast_dice_2),
+        "aji": safe_metric(get_fast_aji), "aji_plus": safe_metric(get_fast_aji_plus),
         "dq": float(pq[0]), "sq": float(pq[1]), "pq": float(pq[2]),
         "tp": len(pairing[0]), "fp": len(pairing[3]), "fn": len(pairing[2]),
     }, missed
