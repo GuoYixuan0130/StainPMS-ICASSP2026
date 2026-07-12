@@ -178,18 +178,18 @@ def _save_checkpoint(
     path: Path,
     point_net: torch.nn.Module,
     net: torch.nn.Module,
-    optimizer: torch.optim.Optimizer,
+    optimizer: torch.optim.Optimizer | None,
     texture_memory_bank: Sequence[Any],
     *,
     step: int,
     role: str,
     initial_state_sha256: str,
     ema: ModelEMA | None = None,
+    include_optimizer: bool = False,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "model": net.state_dict(),
         "model1": point_net.state_dict(),
-        "optimizer": optimizer.state_dict(),
         "texture_memory_bank_list": list(texture_memory_bank),
         "semipms_stage1": {
             "optimizer_steps": int(step),
@@ -198,6 +198,10 @@ def _save_checkpoint(
             "selection_rule": "fixed optimizer step; no train-side hidden-GT selection",
         },
     }
+    if include_optimizer:
+        if optimizer is None:
+            raise ValueError("A resumable checkpoint requires an optimizer state.")
+        payload["optimizer"] = optimizer.state_dict()
     if ema is not None:
         payload["ema_decay"] = ema.decay
         payload["ema_state_sha256"] = _state_sha256(ema.point_net, ema.net)
@@ -209,10 +213,15 @@ def _load_checkpoint(
     checkpoint: Path,
     args: argparse.Namespace,
     device: torch.device,
-) -> tuple[Any, torch.nn.Module, torch.nn.Module, torch.nn.Module, torch.optim.Optimizer, list[Any], Mapping[str, Any]]:
+    *,
+    require_optimizer: bool = True,
+) -> tuple[Any, torch.nn.Module, torch.nn.Module, torch.nn.Module, torch.optim.Optimizer | None, list[Any], Mapping[str, Any]]:
     payload = torch.load(checkpoint, map_location="cpu")
-    if not {"model", "model1", "optimizer", "semipms_stage1"}.issubset(payload):
-        raise PermissionError("Stage-1 continuation must be the shared Stage-1 warm-up checkpoint.")
+    required = {"model", "model1", "semipms_stage1"}
+    if require_optimizer:
+        required.add("optimizer")
+    if not required.issubset(payload):
+        raise PermissionError("Stage-1 continuation must be the shared resumable warm-up checkpoint.")
     args_cfg = Config.fromfile("args.py")
     args_cfg.criterion.pms_loss_coef = 0.5
     args_cfg.criterion.pms_object_weight = 1.0
@@ -226,12 +235,14 @@ def _load_checkpoint(
     for name, parameter in net.named_parameters():
         if "image_encoder" in name and "prompt_generator" not in name:
             parameter.requires_grad_(False)
-    optimizer = _new_optimizer(point_net, net)
-    optimizer.load_state_dict(payload["optimizer"])
-    for state in optimizer.state.values():
-        for key, value in state.items():
-            if torch.is_tensor(value):
-                state[key] = value.to(device)
+    optimizer: torch.optim.Optimizer | None = None
+    if "optimizer" in payload:
+        optimizer = _new_optimizer(point_net, net)
+        optimizer.load_state_dict(payload["optimizer"])
+        for state in optimizer.state.values():
+            for key, value in state.items():
+                if torch.is_tensor(value):
+                    state[key] = value.to(device)
     return args_cfg, point_net, point_encoder, net, optimizer, list(payload.get("texture_memory_bank_list", []) or []), payload
 
 
@@ -760,6 +771,7 @@ def _train_to_fixed_step(
                 artifact / "checkpoints" / f"{method.lower().replace('-', '_')}_final_{step}.pth",
                 point_net, net, optimizer, latest_texture, step=step, role=method,
                 initial_state_sha256=initial_state_sha256, ema=pseudo_provider.ema if pseudo_provider else None,
+                include_optimizer=(method == "Shared-Warmup"),
             ))
 
     bounded = Stage1Optimizer(
@@ -1067,6 +1079,8 @@ def run_stage1(args: argparse.Namespace) -> Path:
                 residual_ramp_steps=args.residual_ramp_steps, ema_decay=args.ema_decay,
                 base_weight=args.base_pseudo_weight, residual_weight=args.residual_pseudo_weight,
             )
+        if optimizer is None:
+            raise AssertionError("Shared warm-up checkpoint unexpectedly lacks its optimizer state.")
         train_rows, current_dev, aux_rows, _, summary = _train_to_fixed_step(
             artifact, method, point_net, point_encoder, net, optimizer, loaded_cfg, cfg, data_root, labeled,
             development, access_guard, device, start_steps=args.warmup_steps, total_steps=args.total_steps,
@@ -1092,7 +1106,7 @@ def run_stage1(args: argparse.Namespace) -> Path:
     formal_equivalence: dict[str, bool] = {}
     for method in ("Supervised-StainPMS-20", "MeanTeacher-PMS", "SemiPMS"):
         final_path = artifact / "checkpoints" / f"{method.lower().replace('-', '_')}_final_{args.total_steps}.pth"
-        loaded_cfg, point_net, point_encoder, net, _, texture_memory, _ = _load_checkpoint(final_path, args, device)
+        loaded_cfg, point_net, point_encoder, net, _, texture_memory, _ = _load_checkpoint(final_path, args, device, require_optimizer=False)
         formal_equivalence[method] = _verify_formal_baseline_equivalence(
             artifact / "baseline_equivalence" / method.lower().replace("-", "_"), development[0], data_root,
             point_net, point_encoder, net, texture_memory, cfg, device,
