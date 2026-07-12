@@ -1,0 +1,26 @@
+{
+  "description": "Populate from the immutable StainPMS e156 continuation configuration; do not tune or infer values.",
+  "required_keys": [
+    "pms_loss_coef",
+    "pms_focal_weight",
+    "pms_dice_weight",
+    "pms_iou_weight",
+    "pms_object_weight",
+    "pms_residual_mask_weight",
+    "pms_preserve_loss_coef",
+    "pms_gt_match_radius",
+    "pms_baseline_prompts",
+    "pms_preserve_max_prompts",
+    "texture",
+    "context",
+    "overlap",
+    "test_nms_thr",
+    "test_filtering",
+    "load",
+    "crop_batch",
+    "clip_grad",
+    "texture_memory_bank_size",
+    "context_memory_bank_size",
+    "context_atten_k"
+  ]
+}

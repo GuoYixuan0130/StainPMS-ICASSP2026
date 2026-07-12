@@ -12,15 +12,30 @@ from stainpms.candidate import compute_b_candidates_oncrop, compute_baseline_cen
 
 
 class MONUSEG(Dataset):
-    def __init__(self, args, cfgs, data_path , load, mode = 'train'):
+    def __init__(self, args, cfgs, data_path, load, mode='train', *, image_ids=None, source_split=None):
         self.data_path = data_path
-        if mode == 'train':
+        root_mode = source_split or mode
+        if root_mode == 'train':
             self.image_root = data_path + '/train_12/images'
             self.label_root = data_path + '/train_12/labels'
-        elif mode == 'test':
+        elif root_mode == 'test':
             self.image_root = data_path + '/test/images'
             self.label_root = data_path + '/test/labels'
-        self.paths = sorted(os.listdir(self.image_root))
+        else:
+            raise ValueError(f"Unsupported MONUSEG source split: {root_mode}")
+        if image_ids is None:
+            self.paths = sorted(os.listdir(self.image_root))
+        else:
+            # Closed-split callers provide exact image IDs.  Do not enumerate
+            # the directory, which would disclose held-out patient names.
+            suffixes = ('.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp')
+            resolved = []
+            for image_id in image_ids:
+                matches = [f"{image_id}{suffix}" for suffix in suffixes if os.path.isfile(os.path.join(self.image_root, f"{image_id}{suffix}"))]
+                if len(matches) != 1:
+                    raise FileNotFoundError(f"Expected exactly one named MONUSEG image for {image_id}, got {matches}")
+                resolved.append(matches[0])
+            self.paths = resolved
         self.mode = mode
         self.crop_size = args.crop_size
         self.overlap = args.overlap

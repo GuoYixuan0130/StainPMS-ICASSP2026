@@ -184,6 +184,26 @@ def _append_metric_scores(inst_map, pred_map, score_lists):
     score_lists["aji"].append(get_fast_aji(gt, pred))
 
 
+def instance_metric_record(inst_map, pred_map):
+    """Inclusive-IoU>=0.5 per-image metrics for closed-split audits."""
+    gt, pred = remap_label(inst_map), remap_label(pred_map)
+    (dq, sq, pq), (paired_true, _, unpaired_true, unpaired_pred) = get_fast_pq(
+        gt, pred, match_iou=0.5
+    )
+    return {
+        "dice": float(get_dice_1(gt, pred)),
+        "aji": float(get_fast_aji(gt, pred)),
+        "aji_plus": float(get_fast_aji_plus(gt, pred)),
+        "dq": float(dq),
+        "sq": float(sq),
+        "pq": float(pq),
+        "tp": int(len(paired_true)),
+        "fp": int(len(unpaired_pred)),
+        "fn": int(len(unpaired_true)),
+        "matched_mean_iou": float(sq),
+    }
+
+
 def _mean_metric_tuple(score_lists):
     return (
         np.nanmean(score_lists["dice1"]),
@@ -218,9 +238,18 @@ def train_on_epoch(
     epoch,
     texture_memory_bank_list,
     device,
+    gradient_controller=None,
+    decoder_only_training=False,
 ):
     point_net.train()
     net.train()
+    if decoder_only_training:
+        # SafePMS freezes every module except the shared mask decoder.  Keep
+        # frozen buffers (notably BatchNorm running statistics) immutable too.
+        point_net.eval()
+        point_encoder.eval()
+        net.eval()
+        net.sam_mask_decoder.train()
     criterion.train()
     optimizer.zero_grad()
 
@@ -234,6 +263,8 @@ def train_on_epoch(
         for data_iter_step, batch in enumerate(
             metric_logger.log_every(train_loader, cfgs.print_freq, header)
         ):
+            if gradient_controller is not None:
+                gradient_controller.begin_outer_batch(data_iter_step)
             (
                 images_lists,
                 inst_masks_lists,
@@ -257,6 +288,8 @@ def train_on_epoch(
             k_crops = images_lists.size(0)
             cumulative_sums = np.cumsum(cell_nums_lists)
             for start_idx in range(0, k_crops, cfgs.b):
+                if gradient_controller is not None and gradient_controller.should_stop:
+                    return {key: value / max(1, len(train_loader)) for key, value in log_info.items()}
                 end_idx = min(start_idx + cfgs.b, k_crops)
                 start_cell = 0 if start_idx == 0 else cumulative_sums[start_idx - 1]
                 end_cell = cumulative_sums[end_idx - 1]
@@ -641,11 +674,20 @@ def train_on_epoch(
                     log_info[key] = log_info.get(key, 0) + value.item()
 
                 optimizer.zero_grad()
-                losses.backward()
-
-                trainable_params = [
-                    p for group in optimizer.param_groups for p in group["params"] if p.requires_grad
-                ]
+                if gradient_controller is None:
+                    losses.backward()
+                    trainable_params = [
+                        p for group in optimizer.param_groups for p in group["params"] if p.requires_grad
+                    ]
+                    controller_step = True
+                else:
+                    decision = gradient_controller.consume(loss_dict)
+                    if decision.get("stop", False):
+                        return {key: value / max(1, len(train_loader)) for key, value in log_info.items()}
+                    if decision.get("skip", False):
+                        continue
+                    trainable_params = gradient_controller.trainable_params
+                    controller_step = bool(decision.get("optimizer_step", False))
                 has_bad_grad = any(
                     p.grad is not None and not torch.isfinite(p.grad).all()
                     for p in trainable_params
@@ -655,9 +697,11 @@ def train_on_epoch(
                     optimizer.zero_grad()
                     continue
 
-                if cfgs.clip_grad > 0 and trainable_params:
+                if controller_step and cfgs.clip_grad > 0 and trainable_params:
                     torch.nn.utils.clip_grad_norm_(trainable_params, cfgs.clip_grad)
-                optimizer.step()
+                if controller_step:
+                    optimizer.step()
+                    optimizer._safepms_step_count = int(getattr(optimizer, "_safepms_step_count", 0)) + 1
                 metric_logger.update(loss=losses_reduced, **loss_dict_reduced)
 
             pbar.update()
@@ -677,6 +721,7 @@ def validation_on_epoch(
     iou_threshold,
     memory_bank_list,
     device,
+    per_image_records=None,
 ):
     point_net.eval()
     net.eval()
@@ -977,6 +1022,10 @@ def validation_on_epoch(
                 )
 
             _append_metric_scores(inst_maps[0], pred_inst_map, score_lists)
+            if per_image_records is not None:
+                per_image_records.append(
+                    {"image_id": _safe_image_name(name), **instance_metric_record(inst_maps[0], pred_inst_map)}
+                )
 
             if cfgs.vis:
                 namecat = "Test_" + "_".join(str(item) for item in name) + "_"
