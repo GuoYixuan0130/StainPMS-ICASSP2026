@@ -259,12 +259,17 @@ def _build_models(args: argparse.Namespace, checkpoint_payload: Mapping[str, Any
     point_net, point_encoder = build_model(args_cfg)
     net = build_sam2(args.sam_config, None, device=device)
     missing, unexpected = net.load_state_dict(checkpoint_payload["model"], strict=False)
-    if missing or unexpected:
-        raise RuntimeError(f"Official SAM2 load mismatch: missing={len(missing)} unexpected={len(unexpected)}")
+    # This exactly mirrors CA-SAM2's official SAM2 initialization: the public
+    # backbone weights do not contain every project-specific prompt/memory
+    # module. Unexpected checkpoint tensors would indicate the wrong model,
+    # whereas missing project modules are randomly initialized by design.
+    if unexpected:
+        raise RuntimeError(f"Official SAM2 contains incompatible unexpected keys: {len(unexpected)}")
     point_net.to(device)
     point_encoder.to(device)
     net.to(device)
     _freeze_encoder(net)
+    args_cfg.semipms_init_load = {"missing_keys": len(missing), "unexpected_keys": len(unexpected), "strict": False}
     return args_cfg, point_net, point_encoder, net
 
 
@@ -333,6 +338,7 @@ def _train_weak_teacher(
         "checkpoint": str(checkpoint),
         "checkpoint_sha256": sha256_file(checkpoint),
         "selection_rule": "final fixed optimizer step; no hidden-GT evaluation, early stopping, or model selection",
+        "official_sam2_load": dict(args_cfg.semipms_init_load),
     }
 
 
