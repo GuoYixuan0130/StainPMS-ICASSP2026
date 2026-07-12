@@ -547,23 +547,49 @@ def _metrics(gt: np.ndarray, prediction: np.ndarray) -> tuple[dict[str, Any], se
     }, missed
 
 
-def _add_masks(base: np.ndarray, candidates: Sequence[Mapping[str, Any]], *, oracle: bool, missed: set[int], gt: np.ndarray) -> tuple[np.ndarray, dict[str, int]]:
+def _add_masks(base: np.ndarray, candidates: Sequence[Mapping[str, Any]], *, oracle: bool, missed: set[int], gt: np.ndarray | None) -> tuple[np.ndarray, dict[str, Any]]:
+    """Add decoded masks without GT unless this is the explicit oracle arm."""
+    if oracle and gt is None:
+        raise ValueError("Oracle addition requires GT only for the declared oracle decision.")
     out = np.asarray(base, dtype=np.int32).copy(); next_id = int(out.max()) + 1
     seen_targets: set[int] = set(); info = Counter()
+    used_indices: list[int] = []
     rows = sorted(candidates, key=lambda row: (-float(row["evidence"]), int(row["candidate_index"])))
     for row in rows:
-        target = int(gt[int(row["y"]), int(row["x"])]) if 0 <= int(row["y"]) < gt.shape[0] and 0 <= int(row["x"]) < gt.shape[1] else 0
-        if oracle and target not in missed: continue
+        target = 0
+        if oracle:
+            assert gt is not None
+            target = int(gt[int(row["y"]), int(row["x"])]) if 0 <= int(row["y"]) < gt.shape[0] and 0 <= int(row["x"]) < gt.shape[1] else 0
+            if target not in missed: continue
         mask = np.asarray(row["mask"], dtype=bool)
         if not mask.any(): continue
-        overlaps = set(int(value) for value in np.unique(gt[mask]) if value != 0)
-        if len(overlaps) > 1: info["merge"] += 1
-        if target and target in seen_targets: info["duplicate"] += 1; continue
+        if oracle:
+            assert gt is not None
+            overlaps = set(int(value) for value in np.unique(gt[mask]) if value != 0)
+            if len(overlaps) > 1: info["merge"] += 1
+            if target and target in seen_targets: info["duplicate"] += 1; continue
         uncovered = mask & (out == 0)
         if uncovered.sum() < 8: info["conflict_rejected"] += 1; continue
         out[uncovered] = next_id; next_id += 1; info["added"] += 1
         if target: seen_targets.add(target)
+        used_indices.append(int(row["candidate_index"]))
+    info["used_candidate_indices"] = used_indices
     return out, dict(info)
+
+
+def _posthoc_addition_errors(candidates: Sequence[Mapping[str, Any]], used_indices: Iterable[int], gt: np.ndarray) -> dict[str, int]:
+    """GT audit labels only; these values never alter the selected assembly."""
+    by_index = {int(row["candidate_index"]): row for row in candidates}
+    seen: set[int] = set(); duplicate = 0; merge = 0
+    for index in used_indices:
+        row = by_index[int(index)]
+        y, x = int(row["y"]), int(row["x"])
+        target = int(gt[y, x]) if 0 <= y < gt.shape[0] and 0 <= x < gt.shape[1] else 0
+        if target and target in seen: duplicate += 1
+        if target: seen.add(target)
+        overlaps = set(int(value) for value in np.unique(gt[np.asarray(row["mask"], dtype=bool)]) if value != 0)
+        if len(overlaps) > 1: merge += 1
+    return {"merge": merge, "duplicate": duplicate}
 
 
 def _aggregate(rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -691,7 +717,10 @@ def run_phase0(args: argparse.Namespace) -> Path:
             top = rows[:budget]; hits = {int(row["target_gt_id"]) for row in top if row["hits_teacher_fn"]}
             candidate_curve.append({"image": record.stem, "patient": record.patient, "budget": budget, "proposals": len(top), "teacher_fn": len(missed), "fn_recall": len(hits)/len(missed) if missed else 0.0, "proposal_precision": sum(bool(row["hits_teacher_fn"]) for row in top)/len(top) if top else 0.0})
         oracle_map, oracle_info = _add_masks(teacher, rows, oracle=True, missed=missed, gt=gt)
-        selected_map, selected_info = _add_masks(teacher, [row for row in rows if row["accepted"]], oracle=False, missed=missed, gt=gt)
+        selected_map, selected_info = _add_masks(teacher, [row for row in rows if row["accepted"]], oracle=False, missed=set(), gt=None)
+        selected_errors = _posthoc_addition_errors(rows, selected_info.pop("used_candidate_indices"), gt)
+        oracle_info.pop("used_candidate_indices", None)
+        selected_info.update(selected_errors)
         oracle_metrics, _ = _metrics(gt, oracle_map); selected_metrics, _ = _metrics(gt, selected_map)
         contributions.append(max(0.0, selected_metrics["pq"] - baseline_metrics["pq"]))
         per_image.append({
