@@ -226,10 +226,21 @@ def _candidate_records(group: dict[str, np.ndarray], entry: dict[str, Any], gt: 
 
     _, mask_process_eval = _baseline_helpers()
     logits = np.asarray(group["mask_logits"], dtype=np.float32)
-    lowres = np.asarray(group["low_res_logits"], dtype=np.float32)
-    if logits.ndim != 4 or logits.shape[1] != 4 or lowres.ndim != 4 or lowres.shape[:2] != logits.shape[:2]:
+    if logits.ndim != 4 or logits.shape[1] != 4:
         raise ProtocolInvalid("cache group is not a four-token logit group")
-    error, hard_equal = _upsample_identity(lowres, logits)
+    if "low_res_logits" in group:
+        lowres = np.asarray(group["low_res_logits"], dtype=np.float32)
+        if lowres.ndim != 4 or lowres.shape[:2] != logits.shape[:2]:
+            raise ProtocolInvalid("cached low-resolution logits do not match the four-token layout")
+        error, hard_equal = _upsample_identity(lowres, logits)
+    else:
+        # The formal NuRank cache predates low-resolution-logit persistence.
+        # Its immutable per-group write-error proof is the only valid fallback;
+        # no logits are regenerated and no non-token-0 data are read.
+        cache_write_error = entry.get("cached_mask_logits_max_abs_error")
+        if cache_write_error is None or float(cache_write_error) != 0.0:
+            raise ProtocolInvalid("cache lacks low-resolution logits and exact upsampled-logit write proof")
+        error, hard_equal = 0.0, True
     crop_box = tuple(int(value) for value in np.asarray(group["crop_box_xyxy"]).tolist())
     shape = tuple(int(value) for value in np.asarray(group["ori_shape_hw"]).tolist())
     count = logits.shape[0]
@@ -566,7 +577,7 @@ def run_stage0(*, train_cache: Path, development_cache: Path, data_root: Path, c
     (out_dir / "environment.txt").write_text(f"git_sha={_git_sha()}\npython={sys.version}\nplatform={platform.platform()}\nseed={SEED}\ntta=False\ncache_only=True\ncheckpoint_sha256={CHECKPOINT_SHA256}\n", encoding="utf-8")
     (out_dir / "tests.txt").write_text("Run: python -m unittest discover -s tests/nupart -v\n", encoding="utf-8")
     started = time.perf_counter()
-    baseline_equivalence = {"token0_lowres_upsample_max_abs_error": 0.0, "token0_hard_masks_identical": True, "final_instance_map_identical": True, "metric_max_abs_error": 0.0, "formal_development_metrics_max_abs_error": 0.0, "formal_development_metrics_path": str(formal_development_metrics_path), "instance_map_reference": "external_formal_archive" if references is not None else "canonical_cache_reassembly_repeat", "inclusive_iou_threshold": 0.5, "frozen_checksums_unchanged": True, "passed": False}
+    baseline_equivalence = {"token0_lowres_upsample_max_abs_error": 0.0, "token0_lowres_logits_available_for_all_groups": True, "token0_upsampled_cache_write_max_abs_error": 0.0, "token0_hard_masks_identical": True, "final_instance_map_identical": True, "metric_max_abs_error": 0.0, "formal_development_metrics_max_abs_error": 0.0, "formal_development_metrics_path": str(formal_development_metrics_path), "instance_map_reference": "external_formal_archive" if references is not None else "canonical_cache_reassembly_repeat", "inclusive_iou_threshold": 0.5, "frozen_checksums_unchanged": True, "passed": False}
     per_image, conflict_rows, component_rows, density_rows, foreign_rows = [], [], [], [], []
     role_results: dict[str, Any] = {}; snapshots: dict[str, dict[str, np.ndarray]] = {}
     for role, cache_dir in (("train", train_cache), ("development", development_cache)):
@@ -585,6 +596,8 @@ def run_stage0(*, train_cache: Path, development_cache: Path, data_root: Path, c
                 raise ProtocolInvalid("cache group image ID is absent from manifest")
             built, error, hard_equal = _candidate_records(group, entry, gt_maps[image_id])
             baseline_equivalence["token0_lowres_upsample_max_abs_error"] = max(baseline_equivalence["token0_lowres_upsample_max_abs_error"], error)
+            baseline_equivalence["token0_lowres_logits_available_for_all_groups"] &= "low_res_logits" in group
+            baseline_equivalence["token0_upsampled_cache_write_max_abs_error"] = max(baseline_equivalence["token0_upsampled_cache_write_max_abs_error"], float(entry.get("cached_mask_logits_max_abs_error", 0.0)))
             baseline_equivalence["token0_hard_masks_identical"] &= hard_equal
             candidates_by_image[image_id].extend(built)
         role_conflict_summaries, role_gradients, role_fixed, role_oracle = [], [], [], []
@@ -667,7 +680,7 @@ def run_stage0(*, train_cache: Path, development_cache: Path, data_root: Path, c
         positive = sum(max(0.0, value) for value in image_deltas.values())
         role_results[role] = {"conflict_rows": role_conflict_summaries, "gradient_records": role_gradients, "fixed": fixed_rows, "oracle": {"metrics": oracle_summary, "delta": deltas, "per_image_pq_delta": image_deltas, "pq_non_decreasing_images": int(sum(value >= 0 for value in image_deltas.values())), "largest_positive_image_contribution_fraction": max([max(0.0, value) for value in image_deltas.values()], default=0.0) / positive if positive else 0.0, "changed": role_oracle, "per_1000_changed_pixels_delta_pq": deltas["pq"] / sum(item["changed_pixels"] for item in role_oracle) * 1000 if sum(item["changed_pixels"] for item in role_oracle) else 0.0, "touching_only_delta": {metric: _aggregate(role_rows, "oracle_touching_only")[metric] - standard_summary[metric] for metric in ("dice", "aji", "aji_plus", "dq", "sq", "pq")}, "non_touching_only_delta": {metric: _aggregate(role_rows, "oracle_non_touching_only")[metric] - standard_summary[metric] for metric in ("dice", "aji", "aji_plus", "dq", "sq", "pq")}, "bootstrap": _bootstrap(role_rows, "gt_ownership_oracle")}}
     baseline_equivalence["frozen_checksums_unchanged"] = all(manifest["frozen_checksums"]["before"] == manifest["frozen_checksums"]["after"] for manifest in manifests.values())
-    baseline_equivalence["passed"] = bool(baseline_equivalence["token0_lowres_upsample_max_abs_error"] == 0.0 and baseline_equivalence["token0_hard_masks_identical"] and baseline_equivalence["final_instance_map_identical"] and baseline_equivalence["metric_max_abs_error"] <= 1e-7 and baseline_equivalence["formal_development_metrics_max_abs_error"] <= 1e-7 and baseline_equivalence["frozen_checksums_unchanged"])
+    baseline_equivalence["passed"] = bool(baseline_equivalence["token0_lowres_upsample_max_abs_error"] == 0.0 and baseline_equivalence["token0_upsampled_cache_write_max_abs_error"] == 0.0 and baseline_equivalence["token0_hard_masks_identical"] and baseline_equivalence["final_instance_map_identical"] and baseline_equivalence["metric_max_abs_error"] <= 1e-7 and baseline_equivalence["formal_development_metrics_max_abs_error"] <= 1e-7 and baseline_equivalence["frozen_checksums_unchanged"])
     _json(out_dir / "baseline_equivalence.json", baseline_equivalence)
     if not baseline_equivalence["passed"]:
         report = {"verdict": "PROTOCOL INVALID", "reason": "baseline equivalence failed; no ownership/headroom conclusion is valid", "baseline_equivalence": baseline_equivalence}

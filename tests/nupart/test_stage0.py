@@ -24,6 +24,8 @@ class NuPartCoreTest(unittest.TestCase):
         source = self._stage_source()
         self.assertIn("TOKEN_INDEX = 0", source)
         self.assertIn("logits[:, TOKEN_INDEX]", source)
+        self.assertIn('"low_res_logits" in group', source)
+        self.assertIn("cached_mask_logits_max_abs_error", source)
 
     def test_development_seven_image_guard(self) -> None:
         from nupart.stage0 import REQUIRED_DEVELOPMENT_IMAGES

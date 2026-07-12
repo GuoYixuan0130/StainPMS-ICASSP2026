@@ -2,7 +2,7 @@
 
 This is a read-only, cache-first ownership-conflict audit. It uses only token-0 cached logits and automatic prompts from the frozen StainPMS baseline, with TNBC patients 1–6 for train diagnosis and patients 7–8 for development diagnosis. It never reads patients 9–11 or MoNuSeg, never loads the checkpoint weights, and never performs training or an optimizer step.
 
-The runner requires the immutable formal cache directories. Before any ownership conclusion it verifies the checkpoint hash, cache checksums, frozen point/SAM2 checksums, token-0 low-resolution-to-upsampling equality, deterministic repeat equality for the canonical final assembly, and the recorded formal development token-0 metrics within `1e-7`. An external formal token-0 instance-map archive can additionally be supplied with `--baseline-maps`. A failed check writes `PROTOCOL INVALID` and stops.
+The runner requires the immutable formal cache directories. Before any ownership conclusion it verifies the checkpoint hash, cache checksums, frozen point/SAM2 checksums, token-0 low-resolution-to-upsampling equality when low-resolution logits exist (otherwise the immutable exact upsampled-logit cache-write proof), deterministic repeat equality for the canonical final assembly, and the recorded formal development token-0 metrics within `1e-7`. An external formal token-0 instance-map archive can additionally be supplied with `--baseline-maps`. A failed check writes `PROTOCOL INVALID` and stops.
 
 Run on AutoDL Bash from the repository root (not on this CPU-only workstation):
 
