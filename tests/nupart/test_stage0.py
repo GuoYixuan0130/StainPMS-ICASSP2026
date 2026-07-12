@@ -94,6 +94,7 @@ class NuPartCoreTest(unittest.TestCase):
         source = self._stage_source()
         self.assertIn("target[index] =", source)
         self.assertIn("else 0", source)
+        self.assertIn("wrong_winner_requires_defined_owner_and_competitor", source)
 
     def test_no_point_or_mask_deletion_contract(self) -> None:
         self.assertIn("resolver deleted a point or mask", self._stage_source())
