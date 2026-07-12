@@ -542,9 +542,11 @@ def _metrics(gt: np.ndarray, prediction: np.ndarray) -> tuple[dict[str, Any], se
     def safe_metric(function) -> float:
         try:
             return float(function(true, pred))
-        except ZeroDivisionError:
+        except (ZeroDivisionError, ValueError):
             # Empty teacher/candidate prediction is a valid weak-teacher
-            # outcome, not an audit failure. It contributes zero overlap.
+            # outcome, not an audit failure. Some AJI implementations raise
+            # ValueError (argmax over an empty pairing matrix) rather than
+            # ZeroDivisionError for that same defined-zero case.
             return 0.0
     return {
         "dice": safe_metric(get_dice_1), "dice2": safe_metric(get_fast_dice_2),
