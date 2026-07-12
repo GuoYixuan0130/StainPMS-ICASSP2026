@@ -25,6 +25,7 @@ import platform
 import subprocess
 import sys
 import time
+import shutil
 from collections import Counter, defaultdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -491,6 +492,10 @@ def _verify_formal_baseline_equivalence(
     replay = _infer_standard(image.to(device), point_net, point_encoder, net, seed_memory, cfg, device)
     args_cfg = Config.fromfile("args.py")
     dataset = MONUSEG(cfg, args_cfg, str(data_root), cfg.load, mode="test")
+    # Phase 0 deliberately has no access to TNBC test/images (patients 9--11).
+    # The equivalence fixture is one of the six labeled train_12 files.
+    dataset.image_root = str(data_root / "train_12" / "images")
+    dataset.label_root = str(data_root / "train_12" / "labels")
     dataset.paths = [f"{record.stem}{Path(record.image_path).suffix}"]
     loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
     formal_dir = artifact / "baseline_equivalence"
@@ -577,6 +582,35 @@ def _run_tests(artifact: Path) -> str:
     return text
 
 
+def _resume_weak_teacher(artifact: Path, resume_from: Path, args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
+    """Reuse a completed fixed-step weak teacher after a post-training failure.
+
+    This does not alter the interrupted artifact and never executes an
+    optimiser step. It is intentionally narrow: only a checkpoint explicitly
+    marked as the required final fixed-step SemiPMS teacher is accepted.
+    """
+    source = resume_from.resolve()
+    checkpoint = source / "weak_teacher_final_fixed_step.pth"
+    curve = source / "training_curve.csv"
+    if not checkpoint.is_file() or not curve.is_file():
+        raise FileNotFoundError("--resume-from must contain weak_teacher_final_fixed_step.pth and training_curve.csv")
+    payload = torch.load(checkpoint, map_location="cpu")
+    training_meta = payload.get("semipms_training", {})
+    if int(training_meta.get("fixed_optimizer_steps", -1)) != int(args.train_steps):
+        raise PermissionError("Resume checkpoint does not prove the preregistered fixed-step weak-teacher protocol.")
+    if not {"model", "model1"}.issubset(payload):
+        raise PermissionError("Resume checkpoint lacks frozen weak-teacher model state.")
+    shutil.copy2(curve, artifact / "training_curve.csv")
+    return checkpoint, {
+        "resumed_without_optimizer_steps": True,
+        "source_artifact": str(source),
+        "checkpoint": str(checkpoint),
+        "checkpoint_sha256": sha256_file(checkpoint),
+        "steps": int(training_meta["fixed_optimizer_steps"]),
+        "selection_rule": "reused final fixed-step checkpoint after post-training infrastructure failure",
+    }
+
+
 def run_phase0(args: argparse.Namespace) -> Path:
     started = time.monotonic()
     repo = Path(__file__).resolve().parents[1]; _assert_baseline(repo)
@@ -603,7 +637,10 @@ def run_phase0(args: argparse.Namespace) -> Path:
         torch.backends.cudnn.deterministic = True; torch.backends.cudnn.benchmark = False
     device = torch.device(f"cuda:{args.gpu_device}" if torch.cuda.is_available() else "cpu")
     torch.cuda.reset_peak_memory_stats(device) if device.type == "cuda" else None
-    weak_checkpoint, training = _train_weak_teacher(artifact, labeled, data_root, args, official_payload, device)
+    if args.resume_from:
+        weak_checkpoint, training = _resume_weak_teacher(artifact, Path(args.resume_from), args)
+    else:
+        weak_checkpoint, training = _train_weak_teacher(artifact, labeled, data_root, args, official_payload, device)
     del official_payload
     point_net, point_encoder, net, seed_memory = _load_weak_teacher(weak_checkpoint, args, device)
     cfg = _runtime_config(args); guard = HiddenGTGuard()
@@ -742,6 +779,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--train-steps", type=int, default=TRAIN_STEPS)
     parser.add_argument("--max-candidates", type=int, default=64)
+    parser.add_argument("--resume-from", default="", help="Read-only interrupted SemiPMS artifact with completed fixed-step weak teacher")
     parser.add_argument("--ema-student", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--monuseg", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--allow-closed-patients", action="store_true", help=argparse.SUPPRESS)
