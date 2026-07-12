@@ -488,25 +488,31 @@ def _verify_formal_baseline_equivalence(
     deployment filtering/NMS/assembly implementation.
     """
     helpers = _legacy_helpers()
-    raw, image = _read_image(record)
-    del raw
-    replay = _infer_standard(image.to(device), point_net, point_encoder, net, seed_memory, cfg, device)
-    args_cfg = Config.fromfile("args.py")
-    dataset = MONUSEG(cfg, args_cfg, str(data_root), cfg.load, mode="test")
-    # Phase 0 deliberately has no access to TNBC test/images (patients 9--11).
-    # The equivalence fixture is one of the six labeled train_12 files.
-    dataset.image_root = str(data_root / "train_12" / "images")
-    dataset.label_root = str(data_root / "train_12" / "labels")
-    dataset.paths = [f"{record.stem}{Path(record.image_path).suffix}"]
-    loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
-    formal_dir = artifact / "baseline_equivalence"
-    cfg.dump_eval_artifacts_dir = str(formal_dir)
+    modules = (point_net, point_encoder, net)
+    training_states = [module.training for module in modules]
+    for module in modules:
+        module.eval()
     try:
+        raw, image = _read_image(record)
+        del raw
+        replay = _infer_standard(image.to(device), point_net, point_encoder, net, seed_memory, cfg, device)
+        args_cfg = Config.fromfile("args.py")
+        dataset = MONUSEG(cfg, args_cfg, str(data_root), cfg.load, mode="test")
+        # Phase 0 deliberately has no access to TNBC test/images (patients 9--11).
+        # The equivalence fixture is one of the six labeled train_12 files.
+        dataset.image_root = str(data_root / "train_12" / "images")
+        dataset.label_root = str(data_root / "train_12" / "labels")
+        dataset.paths = [f"{record.stem}{Path(record.image_path).suffix}"]
+        loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0, pin_memory=True)
+        formal_dir = artifact / "baseline_equivalence"
+        cfg.dump_eval_artifacts_dir = str(formal_dir)
         helpers.validate(cfg, args_cfg, loader, 0, point_net, point_encoder, net, cfg.load, args_cfg.data.post.iou_threshold, list(seed_memory), device)
+        formal = np.load(formal_dir / f"{record.stem}_pred.npy")
+        return bool(np.array_equal(replay, formal))
     finally:
         cfg.dump_eval_artifacts_dir = ""
-    formal = np.load(formal_dir / f"{record.stem}_pred.npy")
-    return bool(np.array_equal(replay, formal))
+        for module, was_training in zip(modules, training_states):
+            module.train(was_training)
 
 
 def _base_rule() -> dict[str, float]:

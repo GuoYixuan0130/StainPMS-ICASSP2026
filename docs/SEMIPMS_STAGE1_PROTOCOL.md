@@ -30,6 +30,12 @@ Development measurements are reported at steps 240, 480, 720 and 960.  The
 step-960 checkpoint is fixed for every method; development curves do not cause
 early stopping.
 
+The standard-deployment replay is compared with the repository validation path
+at the shared 240-step checkpoint in explicit evaluation mode, before the
+three long continuations. Since no path changes inference code afterwards, this
+is the retained inference-equivalence preflight rather than a late training
+termination condition.
+
 ## Pseudo labels
 
 EMA teacher inference uses the unchanged CA-SAM2/StainPMS deployment replay.

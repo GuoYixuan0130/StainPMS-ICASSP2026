@@ -1043,7 +1043,7 @@ def run_stage1(args: argparse.Namespace) -> Path:
     del official_payload
     initial_state_sha256 = _state_sha256(warm_point, warm_net)
     warm_optimizer = _new_optimizer(warm_point, warm_net)
-    warm_training, warm_dev, warm_aux, _, warm_summary = _train_to_fixed_step(
+    warm_training, warm_dev, warm_aux, warm_texture, warm_summary = _train_to_fixed_step(
         artifact, "Shared-Warmup", warm_point, warm_encoder, warm_net, warm_optimizer, args_cfg, cfg,
         data_root, labeled, development, access_guard, device,
         start_steps=0, total_steps=args.warmup_steps, eval_steps={args.warmup_steps},
@@ -1053,6 +1053,15 @@ def run_stage1(args: argparse.Namespace) -> Path:
     if not shared_checkpoint.is_file():
         raise AssertionError("Shared 240-step checkpoint was not written.")
     shared_sha = sha256_file(shared_checkpoint)
+    # The deployment replay is code-identical for every path. Verify it once at
+    # the shared checkpoint in explicit eval mode, before any expensive 720-step
+    # continuation. This is an engineering preflight, not a late model verdict.
+    shared_formal_equivalence = _verify_formal_baseline_equivalence(
+        artifact / "baseline_equivalence" / "shared_warmup", development[0], data_root,
+        warm_point, warm_encoder, warm_net, warm_texture, cfg, device,
+    )
+    if not shared_formal_equivalence:
+        raise AssertionError("Shared warm-up standard-inference equivalence failed before Stage-1 continuation.")
 
     dev_rows: list[dict[str, object]] = []
     for method in ("Supervised-StainPMS-20", "MeanTeacher-PMS", "SemiPMS"):
@@ -1068,7 +1077,21 @@ def run_stage1(args: argparse.Namespace) -> Path:
     interval = (args.total_steps - args.warmup_steps) // 3
     evaluation_steps = {args.warmup_steps + interval, args.warmup_steps + interval * 2, args.total_steps}
 
-    formal_equivalence: dict[str, bool] = {}
+    formal_equivalence: dict[str, bool] = {
+        "Shared-Warmup": shared_formal_equivalence,
+        "Supervised-StainPMS-20": shared_formal_equivalence,
+        "MeanTeacher-PMS": shared_formal_equivalence,
+        "SemiPMS": shared_formal_equivalence,
+    }
+
+    def flush_progress() -> None:
+        """Persist completed work before launching the next long path."""
+        _csv(artifact / "training_curve.partial.csv", training_rows)
+        _csv(artifact / "per_image_metrics.partial.csv", dev_rows)
+        _csv(artifact / "pseudo_training_losses.partial.csv", pseudo_step_rows)
+        _csv(artifact / "pseudo_label_statistics.partial.csv", cache_rows)
+
+    flush_progress()
 
     def continue_from_shared(method: str, with_residual: bool) -> None:
         loaded_cfg, point_net, point_encoder, net, optimizer, texture_memory, payload = _load_checkpoint(
@@ -1103,10 +1126,8 @@ def run_stage1(args: argparse.Namespace) -> Path:
         method_summaries.append(summary)
         if provider is not None:
             cache_rows.extend(provider.cache_rows)
-        formal_equivalence[method] = _verify_formal_baseline_equivalence(
-            artifact / "baseline_equivalence" / method.lower().replace("-", "_"), development[0], data_root,
-            point_net, point_encoder, net, final_texture, cfg, device,
-        )
+        del final_texture
+        flush_progress()
         del point_net, point_encoder, net, optimizer
         if device.type == "cuda":
             torch.cuda.empty_cache()
@@ -1116,9 +1137,6 @@ def run_stage1(args: argparse.Namespace) -> Path:
     continue_from_shared("SemiPMS", True)
     # No hidden p1--6 annotation has been opened at this point.
     access_guard.mark_training_finished()
-
-    if not all(formal_equivalence.values()):
-        raise AssertionError("A Stage-1 final model diverged from the formal standard inference path.")
 
     cache_audit, candidate_audit, fp_breakdown = _offline_cache_audit(artifact, unlabeled, access_guard)
     if access_guard.hidden_train_label_reads != len(unlabeled):
