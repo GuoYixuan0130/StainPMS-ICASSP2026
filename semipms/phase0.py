@@ -238,6 +238,7 @@ def _runtime_config(args: argparse.Namespace) -> SimpleNamespace:
         context_memory_bank_size=100,
         context_atten_k=1,
         tta=False,
+        vis=False,
         use_pms=True,
         pms_loss_coef=0.5,
     )
