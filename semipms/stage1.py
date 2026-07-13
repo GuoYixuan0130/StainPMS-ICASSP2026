@@ -351,7 +351,12 @@ def _resolve_residual_masks(
         item["residual_max_iou"] = max((_mask_iou(mask, other) for other in accepted_masks), default=0.0)
         item["assembly_overlap_pixels"] = int(np.logical_and(mask, (base_instances > 0) | (residual > 0)).sum())
         if not item["cross_view_accepted"]:
-            item["status"] = "cross_view_rejected"; stats[item["status"]] += 1
+            # Stage-1B may already have assigned a more specific GT-free
+            # rejection (same H component, one-to-one view conflict, or
+            # centroid suppression).  Preserve it for its mandatory duplicate
+            # accounting; legacy Stage-1 rows have no status and retain the
+            # original cross_view_rejected label.
+            item["status"] = item.get("status", "cross_view_rejected"); stats[item["status"]] += 1
         elif not mask.any():
             item["status"] = "empty_decoder_mask"; stats[item["status"]] += 1
         elif item["base_max_iou"] >= duplicate_iou:

@@ -473,6 +473,12 @@ def _candidate_feature_records(raw, normal, teacher_map, candidates, point_net, 
             "candidate_index": index,
             "x": candidate.x, "y": candidate.y, "evidence": candidate.evidence, "source": candidate.source,
             "mask": original[index]["mask"], "predicted_iou": original[index]["predicted_iou"],
+            # Kept in memory for the Stage-1B static-cache builder.  They
+            # are deliberately not written to the compact Phase-0 archive;
+            # this lets Stage-1B enforce one-to-one matching across the three
+            # decoded views before a residual centre is accepted.
+            "stain_mask": stain[index]["mask"],
+            "geometry_mask": geometry[index]["mask"],
             "features": features,
         })
     return rows
