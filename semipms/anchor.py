@@ -238,7 +238,7 @@ def run_anchor(args: argparse.Namespace) -> Path:
     checkpoints = artifact / "checkpoints"; checkpoints.mkdir(parents=True)
     _seed_everything(SEED)
     device = torch.device(f"cuda:{args.gpu_device}" if torch.cuda.is_available() else "cpu")
-    if device.type == "cuda": torch.cuda.reset_peak_memory_stats(args.gpu_device)
+    if device.type == "cuda": torch.cuda.reset_peak_memory_stats()
     args_cfg, point_net, point_encoder, net = _build_models(args, official_payload, device)
     del official_payload
     budget = _checkpoint_budget_bytes(point_net, net)
