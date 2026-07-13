@@ -40,7 +40,7 @@ def _run(args: argparse.Namespace) -> None:
         raise ProtocolError(f"fixed manifest missing; run prepare first: {out}")
     repo_root = Path(__file__).resolve().parents[1]
     tests = subprocess.run(
-        [sys.executable, "-m", "unittest", "tests.test_staincfpms_phase0", "-v"],
+        [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", "test_staincfpms_phase0.py", "-v"],
         cwd=repo_root, capture_output=True, text=True, check=False,
     )
     (out / "tests.txt").write_text(tests.stdout + tests.stderr, encoding="utf-8")
