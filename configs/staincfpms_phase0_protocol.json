@@ -1,0 +1,27 @@
+{
+  "method": "StainCF-PMS Phase 0: Counterfactual Stain Sensitivity and Prompt-Mask Consistency Audit",
+  "base_sha": "2a1348cb7a1158a6f77aae2f92c168f9552d8068",
+  "execution": {
+    "training": false,
+    "optimizer": false,
+    "backward": false,
+    "batch_size": 1,
+    "tta": false,
+    "seed": 3407,
+    "standard_nms_and_assembly": true
+  },
+  "data_isolation": {
+    "tnbc_calibration_patients": [1, 2, 3, 4, 5, 6],
+    "tnbc_audit_patients": [7, 8],
+    "tnbc_closed_patients": [9, 10, 11],
+    "monuseg": "train only; calibration source images and audit crop parent images disjoint"
+  },
+  "views": ["V0", "V1", "V2", "V3", "V4", "V5"],
+  "co_primary_gap_metrics": ["paired delta AJI", "paired delta AJI+", "paired delta PQ"],
+  "interpretation": {
+    "strong": "For a real stain view, stable |delta AJI| >= 0.020 OR stable |delta PQ| >= 0.020; then inspect AJI+, DQ, SQ, TP/FP/FN and sample consistency.",
+    "composite": "Stable AJI and PQ changes around 0.010 or more are valuable composite evidence.",
+    "authority": "No automatic GO/NO-GO. The PI adjudicates the complete artifact."
+  },
+  "stop_after_phase0": ["no adapter", "no student", "no consistency loss", "no training", "no extra seed", "no TNBC test", "no MoNuSeg test"]
+}
