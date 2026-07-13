@@ -65,6 +65,14 @@ def _rng_state() -> dict[str, Any]:
     }
 
 
+def _restore_rng(state: Mapping[str, Any]) -> None:
+    random.setstate(state["python"])
+    np.random.set_state(state["numpy"])
+    torch.set_rng_state(state["torch_cpu"])
+    if torch.cuda.is_available() and state.get("torch_cuda") is not None:
+        torch.cuda.set_rng_state_all(state["torch_cuda"])
+
+
 def _tensor_bytes(value: Any) -> int:
     if torch.is_tensor(value):
         return int(value.numel() * value.element_size())
@@ -231,15 +239,28 @@ def run_anchor(args: argparse.Namespace) -> Path:
     init_checkpoint = Path(args.init_checkpoint).resolve(); validate_clean_checkpoint_name(init_checkpoint)
     official_payload = torch.load(init_checkpoint, map_location="cpu")
     provenance = inspect_clean_initialization(init_checkpoint, official_payload)
-    run_id = args.run_id or f"semipms_anchor_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}_{_git(repo, 'rev-parse', '--short', 'HEAD')}"
-    artifact = Path(args.output_root).resolve() / run_id
-    if artifact.exists():
-        raise FileExistsError(f"Refusing to overwrite {artifact}")
-    checkpoints = artifact / "checkpoints"; checkpoints.mkdir(parents=True)
+    resume_artifact = Path(args.resume_artifact).resolve() if args.resume_artifact else None
+    if resume_artifact:
+        artifact = resume_artifact
+        checkpoints = artifact / "checkpoints"
+        checkpoint_240 = checkpoints / "supervised_stainpms20_step_0240.pth"
+        if (artifact / "report.json").exists() or not checkpoint_240.is_file():
+            raise PermissionError("--resume-artifact requires an unfinished anchor artifact with its complete 240-step checkpoint.")
+    else:
+        run_id = args.run_id or f"semipms_anchor_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}_{_git(repo, 'rev-parse', '--short', 'HEAD')}"
+        artifact = Path(args.output_root).resolve() / run_id
+        if artifact.exists():
+            raise FileExistsError(f"Refusing to overwrite {artifact}")
+        checkpoints = artifact / "checkpoints"; checkpoints.mkdir(parents=True)
     _seed_everything(SEED)
     device = torch.device(f"cuda:{args.gpu_device}" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda": torch.cuda.reset_peak_memory_stats()
-    args_cfg, point_net, point_encoder, net = _build_models(args, official_payload, device)
+    if resume_artifact:
+        resume_payload = torch.load(checkpoint_240, map_location="cpu", weights_only=False)
+        _restore_rng(resume_payload["rng_state"])
+        args_cfg, point_net, point_encoder, net, _, _, _ = _load_checkpoint(checkpoint_240, args, device, require_optimizer=False)
+    else:
+        args_cfg, point_net, point_encoder, net = _build_models(args, official_payload, device)
     del official_payload
     budget = _checkpoint_budget_bytes(point_net, net)
     free = shutil.disk_usage(artifact).free
@@ -250,8 +271,15 @@ def run_anchor(args: argparse.Namespace) -> Path:
     loader = _make_labeled_loader(cfg, args_cfg, data_root, labeled, args.num_workers)
     criterion, _ = helpers.build_criterion(args_cfg, device)
     optimizer = _new_optimizer(point_net, net)
-    training_rows: list[dict[str, Any]] = []
+    training_path = artifact / "training_curve.json"
+    training_rows: list[dict[str, Any]] = json.loads(training_path.read_text(encoding="utf-8")) if resume_artifact and training_path.is_file() else []
     checkpoint_rows: list[dict[str, Any]] = []
+    if resume_artifact:
+        for step in (0, 240):
+            path = checkpoints / f"supervised_stainpms20_step_{step:04d}.pth"
+            if not path.is_file():
+                raise FileNotFoundError(f"Resume artifact is missing required {step}-step checkpoint.")
+            checkpoint_rows.append({"step": step, "role": "recovered_pre_failure", "path": str(path), "sha256": sha256_file(path)})
     latest_texture: list[Any] = []
     command = list(sys.argv)
 
@@ -260,10 +288,11 @@ def run_anchor(args: argparse.Namespace) -> Path:
         _atomic_torch_save(_checkpoint_payload(point_net, net, optimizer, texture_memory, step=step, official_provenance=provenance, command=command), path)
         checkpoint_rows.append({"step": step, "role": role, "path": str(path), "sha256": sha256_file(path), "model_state_sha256": _state_hash(point_net, net)})
 
-    save_step(0, [], "official_initialization_plus_random_point_head")
+    if not resume_artifact:
+        save_step(0, [], "official_initialization_plus_random_point_head")
     phase_endpoints = {240, 480, 720}
-    global_step = 0
-    epoch = 0
+    global_step = 240 if resume_artifact else 0
+    epoch = len(training_rows)
     while global_step < args.steps:
         current_phase_end = 240 if global_step < 240 else (480 if global_step < 480 else 720)
         def after_step(step: int, texture: Sequence[Any]) -> None:
@@ -342,6 +371,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gpu-device", type=int, default=0)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--steps", type=int, default=720)
+    parser.add_argument("--resume-artifact", default="", help="Resume only an unfinished local anchor artifact from its saved 240-step checkpoint")
     return parser
 
 
