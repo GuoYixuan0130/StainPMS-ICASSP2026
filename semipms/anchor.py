@@ -191,7 +191,7 @@ def _compare_240(
     device,
 ) -> dict[str, Any]:
     _, ref_point, ref_encoder, ref_net, _, ref_texture, _ = _load_checkpoint(reference_checkpoint, args, device, require_optimizer=False)
-    payload = torch.load(anchor_checkpoint, map_location="cpu")
+    payload = torch.load(anchor_checkpoint, map_location="cpu", weights_only=False)
     _, anchor_point, anchor_encoder, anchor_net, _, anchor_texture, _ = _load_checkpoint(anchor_checkpoint, args, device, require_optimizer=False)
     guard = Stage1AccessGuard()
     ref_metrics = _evaluate_development(development, guard, ref_point, ref_encoder, ref_net, ref_texture, cfg, device, method="reference_240", step=240)

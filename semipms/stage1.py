@@ -216,7 +216,11 @@ def _load_checkpoint(
     *,
     require_optimizer: bool = True,
 ) -> tuple[Any, torch.nn.Module, torch.nn.Module, torch.nn.Module, torch.optim.Optimizer | None, list[Any], Mapping[str, Any]]:
-    payload = torch.load(checkpoint, map_location="cpu")
+    # Stage-1B anchor checkpoints intentionally contain Python/NumPy/CUDA RNG
+    # state in addition to tensors. They are created in this local artifact and
+    # verified by SHA256; PyTorch 2.6 therefore needs the explicit trusted
+    # payload opt-out from its tensor-only default.
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     required = {"model", "model1", "semipms_stage1"}
     if require_optimizer:
         required.add("optimizer")
