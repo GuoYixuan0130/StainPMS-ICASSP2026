@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import csv
 import json
-import os
 import platform
-import subprocess
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -27,8 +25,8 @@ from .metrics import (
 from .prepare import _read_label, _read_rgb
 from .protocol import (
     BOOTSTRAP_REPLICATES, POINT_MATCH_DIAGONAL_FRACTION, RESIDUAL_PEAK_MIN_DISTANCE,
-    RESIDUAL_PEAK_THRESHOLD, SEED, ProtocolError, VIEW_NAMES, VIEWS, baseline_selection_payload,
-    require_exact_sha256, sha256_file, write_json,
+    RESIDUAL_PEAK_THRESHOLD, SEED, ProtocolError, VIEW_NAMES, VIEWS,
+    require_exact_sha256, selection_payload_with_implementation_sha, sha256_file, write_json,
 )
 from .transforms import decompose
 
@@ -311,7 +309,7 @@ def run_audit(out_dir: str | Path, tnbc_checkpoint: str | Path, monuseg_checkpoi
                     payload[f"{metric}_decline_sample_fraction"] = float(np.mean([float(row[f"delta_{metric}"]) < 0 for row in rows]))
             summaries.append(payload)
     mechanisms = _mechanism_summary(point_rows, fixed_rows, coverage_rows)
-    report = {"protocol": baseline_selection_payload(), "evidence_interpretation": _evidence_label(end_rows), "important": "AJI, AJI+, and PQ are co-primary evidence; no automatic GO/NO-GO is issued.", "dataset_summaries": summaries, "mechanism_proxy_summary": mechanisms}
+    report = {"protocol": selection_payload_with_implementation_sha(Path(__file__).resolve().parents[1]), "evidence_interpretation": _evidence_label(end_rows), "important": "AJI, AJI+, and PQ are co-primary evidence; no automatic GO/NO-GO is issued.", "dataset_summaries": summaries, "mechanism_proxy_summary": mechanisms}
     write_json(out_dir / "dataset_summary.json", {"summaries": summaries}); write_json(out_dir / "report.json", report)
     runtime.update({"checkpoint_sha256_before": before_files, "checkpoint_sha256_after": after_files, "model_parameter_sha256_before": before_models, "model_parameter_sha256_after": after_models})
     write_json(out_dir / "checkpoint_manifest.json", {"files": before_files, "expected": {"tnbc": TNBC_SHA256, "monuseg": MONUSEG_SHA256}})

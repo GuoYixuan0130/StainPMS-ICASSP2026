@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -130,6 +131,17 @@ def baseline_selection_payload() -> dict[str, Any]:
             "primary_metrics": ["AJI", "AJI+", "PQ"],
         },
     }
+
+
+def selection_payload_with_implementation_sha(repo_root: str | Path) -> dict[str, Any]:
+    payload = baseline_selection_payload()
+    try:
+        payload["implementation_git_sha"] = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=Path(repo_root), text=True
+        ).strip()
+    except (OSError, subprocess.CalledProcessError):
+        payload["implementation_git_sha"] = "unavailable"
+    return payload
 
 
 @dataclass(frozen=True)

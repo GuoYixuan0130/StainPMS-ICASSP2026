@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from .prepare import freeze_audit
-from .protocol import BASE_SHA, ProtocolError, baseline_selection_payload, write_json
+from .protocol import BASE_SHA, ProtocolError, selection_payload_with_implementation_sha, write_json
 
 
 def _default_out() -> Path:
@@ -20,7 +20,7 @@ def _default_out() -> Path:
 def _prepare(args: argparse.Namespace) -> None:
     out = Path(args.out).resolve() if args.out else _default_out().resolve()
     out.mkdir(parents=True, exist_ok=False)
-    write_json(out / "baseline_selection.json", baseline_selection_payload())
+    write_json(out / "baseline_selection.json", selection_payload_with_implementation_sha(Path(__file__).resolve().parents[1]))
     try:
         manifest = freeze_audit(
             out, args.tnbc_audit_manifest, args.tnbc_calibration_manifest,
