@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from sam2_train.modeling.stats_utils import get_fast_pq
+from setpms.checkpoints import compact_continuation_checkpoint
 from setpms import compute_setpms_loss, select_set_queries, unbalanced_sinkhorn_log
 
 
@@ -213,6 +214,25 @@ def test_inclusive_iou_half_threshold_matches_canonical_metric():
     assert paired_pred == [1]
     assert unpaired_true == []
     assert unpaired_pred == []
+
+
+def test_archival_checkpoint_keeps_weights_and_drops_optimizer_state():
+    payload = {
+        "model": {"weight": torch.tensor([1.0, 2.0]), "steps": torch.tensor([3])},
+        "model1": {"weight": torch.tensor([4.0])},
+        "epoch": 4,
+        "optimizer": {"state": "redundant archival payload"},
+        "scheduler": {"last_epoch": 4},
+        "texture_memory_bank_list": [(torch.tensor([5.0]),)],
+    }
+    compact = compact_continuation_checkpoint(payload)
+    assert compact["epoch"] == 4
+    assert compact["checkpoint_kind"] == "continuation_model_weights_fp16_archive"
+    assert compact["optimizer_state_included"] is False
+    assert "optimizer" not in compact and "scheduler" not in compact
+    assert compact["model"]["weight"].dtype == torch.float16
+    assert compact["model"]["steps"].dtype == torch.int64
+    assert compact["texture_memory_bank_list"][0][0].dtype == torch.float16
 
 
 def load_tests(loader, tests, pattern):

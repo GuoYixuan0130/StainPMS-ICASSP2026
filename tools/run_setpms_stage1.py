@@ -598,6 +598,20 @@ def _assert_required_epochs(rows: list[dict], expected: set[int], label: str) ->
         raise RuntimeError(f"{label} evaluated epochs {sorted(found)}, expected {sorted(expected)}")
 
 
+def _completed_child_rows(child_root: Path, label: str, expected: set[int]) -> list[dict] | None:
+    """Return rows only when a child already completed every required node."""
+
+    metrics_path = child_root / "metrics" / "metrics.csv"
+    if not metrics_path.is_file():
+        return None
+    try:
+        rows = _metric_rows_for_label(_child_rows(child_root, "metrics.csv"), label)
+        _assert_required_epochs(rows, expected, label)
+    except (KeyError, ValueError, RuntimeError):
+        return None
+    return rows
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tnbc-data", default="data/tnbc")
@@ -680,7 +694,7 @@ def main() -> None:
                 "source_checkpoint": "tnbc_control/Model/continuation_epoch_4.pth",
                 "resume_completed_epoch": 4,
                 "replayed_epoch_indices": [4, 5],
-                "checkpoint_storage": "model weights plus texture-memory state at every required epoch node",
+                "checkpoint_storage": "CPU FP16 model weights plus texture-memory state at every required epoch node",
             },
         )
     else:
@@ -720,7 +734,7 @@ def main() -> None:
                 "lr_min": 1e-6,
                 "weight_decay": 1e-4,
                 "scheduler": "cosine",
-                "checkpoint_storage": "model weights plus texture-memory state at every required epoch node",
+                "checkpoint_storage": "CPU FP16 model weights plus texture-memory state at every required epoch node",
                 "tnbc": {"overlap": 32, "save_epochs": [0, 2, 4, 6, 8, 10], "eval_epochs": [0, 2, 4, 6, 8, 10]},
                 "monuseg_lite": {"overlap": 92, "save_epochs": [0, 2, 4, 5, 6, 8, 10], "eval_epochs": [0, 5, 10], "max_train_crops_per_image": 4},
                 "prohibited": [
@@ -802,86 +816,171 @@ def main() -> None:
         return child_root, metrics
 
     # TNBC control must prove canonical step-0 before any continuation update.
+    tnbc_expected_epochs = {0, 2, 4, 6, 8, 10}
     tnbc_control_dir, tnbc_control_metrics = child("tnbc_control")
     tnbc_control_label = "tnbc_control"
-    tnbc_control_command = _base_command(
-        sys.executable, tnbc_data, tnbc_checkpoint, tnbc_manifest_path, tnbc_manifest_path,
-        tnbc_control_dir, tnbc_control_metrics, tnbc_control_label, 32, "0,2,4,6,8,10", "0,2,4,6,8,10", setpms=False,
+    tnbc_control_rows = (
+        _completed_child_rows(tnbc_control_dir, tnbc_control_label, tnbc_expected_epochs)
+        if resuming
+        else None
     )
-    tnbc_control_command.extend([
-        "--baseline_reference_aji", str(TNBC_REFERENCE_AJI),
-        "--baseline_reference_pq", str(TNBC_REFERENCE_PQ),
-        "--baseline_reference_tolerance", str(TNBC_REFERENCE_TOLERANCE),
-    ])
-    if resuming:
-        recovery_checkpoint = tnbc_control_dir / "Model" / "continuation_epoch_4.pth"
-        if not recovery_checkpoint.is_file():
-            raise FileNotFoundError(
-                "TNBC Control recovery requires the completed epoch-4 full-state checkpoint: "
-                f"{recovery_checkpoint}"
-            )
+    if tnbc_control_rows is None:
+        tnbc_control_command = _base_command(
+            sys.executable, tnbc_data, tnbc_checkpoint, tnbc_manifest_path, tnbc_manifest_path,
+            tnbc_control_dir, tnbc_control_metrics, tnbc_control_label, 32, "0,2,4,6,8,10", "0,2,4,6,8,10", setpms=False,
+        )
         tnbc_control_command.extend([
-            "--continuation_resume_checkpoint", str(recovery_checkpoint),
+            "--baseline_reference_aji", str(TNBC_REFERENCE_AJI),
+            "--baseline_reference_pq", str(TNBC_REFERENCE_PQ),
+            "--baseline_reference_tolerance", str(TNBC_REFERENCE_TOLERANCE),
         ])
-        runtime["tnbc_control_recovery"] = _run(
-            root,
-            tnbc_control_command,
-            artifact_root / "commands" / "tnbc_control_recovery.log",
+        if resuming:
+            recovery_checkpoint = tnbc_control_dir / "Model" / "continuation_epoch_4.pth"
+            if not recovery_checkpoint.is_file():
+                raise FileNotFoundError(
+                    "TNBC Control recovery requires the completed epoch-4 full-state checkpoint: "
+                    f"{recovery_checkpoint}"
+                )
+            tnbc_control_command.extend([
+                "--continuation_resume_checkpoint", str(recovery_checkpoint),
+            ])
+            runtime["tnbc_control_recovery"] = _run(
+                root,
+                tnbc_control_command,
+                artifact_root / "commands" / "tnbc_control_recovery.log",
+            )
+        else:
+            runtime["tnbc_control"] = _run(
+                root,
+                tnbc_control_command,
+                artifact_root / "commands" / "tnbc_control.log",
+            )
+        tnbc_control_rows = _metric_rows_for_label(
+            _child_rows(tnbc_control_dir, "metrics.csv"), tnbc_control_label
         )
+        _assert_required_epochs(tnbc_control_rows, tnbc_expected_epochs, tnbc_control_label)
     else:
-        runtime["tnbc_control"] = _run(
-            root,
-            tnbc_control_command,
-            artifact_root / "commands" / "tnbc_control.log",
-        )
-    tnbc_control_rows = _metric_rows_for_label(_child_rows(tnbc_control_dir, "metrics.csv"), tnbc_control_label)
-    _assert_required_epochs(tnbc_control_rows, {0, 2, 4, 6, 8, 10}, tnbc_control_label)
+        runtime["tnbc_control_existing"] = 0.0
     tnbc_control_zero = _by_epoch(tnbc_control_rows, 0)
 
     tnbc_set_dir, tnbc_set_metrics = child("tnbc_setpms")
     tnbc_set_label = "tnbc_setpms"
-    tnbc_set_command = _base_command(
-        sys.executable, tnbc_data, tnbc_checkpoint, tnbc_manifest_path, tnbc_manifest_path,
-        tnbc_set_dir, tnbc_set_metrics, tnbc_set_label, 32, "0,2,4,6,8,10", "0,2,4,6,8,10", setpms=True,
+    tnbc_set_rows = (
+        _completed_child_rows(tnbc_set_dir, tnbc_set_label, tnbc_expected_epochs)
+        if resuming
+        else None
     )
-    tnbc_set_command.extend([
-        "--baseline_reference_aji", str(tnbc_control_zero["aji"]),
-        "--baseline_reference_pq", str(tnbc_control_zero["pq"]),
-        "--baseline_reference_tolerance", "1e-10",
-    ])
-    runtime["tnbc_setpms"] = _run(root, tnbc_set_command, artifact_root / "commands" / "tnbc_setpms.log")
-    tnbc_set_rows = _metric_rows_for_label(_child_rows(tnbc_set_dir, "metrics.csv"), tnbc_set_label)
-    _assert_required_epochs(tnbc_set_rows, {0, 2, 4, 6, 8, 10}, tnbc_set_label)
+    if tnbc_set_rows is None:
+        tnbc_set_command = _base_command(
+            sys.executable, tnbc_data, tnbc_checkpoint, tnbc_manifest_path, tnbc_manifest_path,
+            tnbc_set_dir, tnbc_set_metrics, tnbc_set_label, 32, "0,2,4,6,8,10", "0,2,4,6,8,10", setpms=True,
+        )
+        tnbc_set_command.extend([
+            "--baseline_reference_aji", str(tnbc_control_zero["aji"]),
+            "--baseline_reference_pq", str(tnbc_control_zero["pq"]),
+            "--baseline_reference_tolerance", "1e-10",
+        ])
+        runtime["tnbc_setpms"] = _run(
+            root, tnbc_set_command, artifact_root / "commands" / "tnbc_setpms.log"
+        )
+        tnbc_set_rows = _metric_rows_for_label(
+            _child_rows(tnbc_set_dir, "metrics.csv"), tnbc_set_label
+        )
+        _assert_required_epochs(tnbc_set_rows, tnbc_expected_epochs, tnbc_set_label)
+    else:
+        runtime["tnbc_setpms_existing"] = 0.0
     _assert_step0_equivalence(tnbc_control_rows, tnbc_set_rows, "TNBC")
 
-    monu_control_dir, monu_control_metrics = child("monuseg_lite_control")
+    monu_expected_epochs = {0, 5, 10}
     monu_control_label = "monuseg_lite_control"
-    monu_control_command = _base_command(
-        sys.executable, monuseg_data, monuseg_checkpoint, monu_manifest_path, monu_manifest_path,
-        monu_control_dir, monu_control_metrics, monu_control_label, 92, "0,2,4,5,6,8,10", "0,5,10", setpms=False,
-        crop_manifest=monu_manifest_path, patch_manifest=patch_manifest_path,
+    monu_control_dir, monu_control_metrics = child("monuseg_lite_control")
+    monu_control_rows = (
+        _completed_child_rows(monu_control_dir, monu_control_label, monu_expected_epochs)
+        if resuming
+        else None
     )
-    runtime["monuseg_lite_control"] = _run(root, monu_control_command, artifact_root / "commands" / "monuseg_lite_control.log")
-    monu_control_rows = _metric_rows_for_label(_child_rows(monu_control_dir, "metrics.csv"), monu_control_label)
-    _assert_required_epochs(monu_control_rows, {0, 5, 10}, monu_control_label)
+    if monu_control_rows is None and resuming:
+        recovery_control_dir, recovery_control_metrics = child("monuseg_lite_control_recovery")
+        recovered_rows = _completed_child_rows(
+            recovery_control_dir, monu_control_label, monu_expected_epochs
+        )
+        if recovered_rows is not None:
+            monu_control_dir, monu_control_metrics, monu_control_rows = (
+                recovery_control_dir,
+                recovery_control_metrics,
+                recovered_rows,
+            )
+        else:
+            if recovery_control_dir.exists():
+                raise RuntimeError(
+                    "MoNuSeg-Lite recovery directory is incomplete; preserve it and inspect "
+                    "its command log before another recovery attempt."
+                )
+            monu_control_dir, monu_control_metrics = recovery_control_dir, recovery_control_metrics
+            recovery_manifest_path = artifact_root / "recovery_manifest.json"
+            recovery_manifest = json.loads(recovery_manifest_path.read_text(encoding="utf-8"))
+            recovery_manifest["monuseg_lite_control"] = {
+                "reason": "external data-disk exhaustion while writing epoch-6 checkpoint",
+                "action": "restart fixed Control continuation from the original checkpoint",
+                "preserved_partial_child": "monuseg_lite_control",
+                "recovery_child": "monuseg_lite_control_recovery",
+            }
+            _json_dump(recovery_manifest_path, recovery_manifest)
+    if monu_control_rows is None:
+        monu_control_command = _base_command(
+            sys.executable, monuseg_data, monuseg_checkpoint, monu_manifest_path, monu_manifest_path,
+            monu_control_dir, monu_control_metrics, monu_control_label, 92, "0,2,4,5,6,8,10", "0,5,10", setpms=False,
+            crop_manifest=monu_manifest_path, patch_manifest=patch_manifest_path,
+        )
+        control_log_name = (
+            "monuseg_lite_control_recovery.log" if resuming else "monuseg_lite_control.log"
+        )
+        runtime["monuseg_lite_control"] = _run(
+            root, monu_control_command, artifact_root / "commands" / control_log_name
+        )
+        monu_control_rows = _metric_rows_for_label(
+            _child_rows(monu_control_dir, "metrics.csv"), monu_control_label
+        )
+        _assert_required_epochs(monu_control_rows, monu_expected_epochs, monu_control_label)
+    else:
+        runtime["monuseg_lite_control_existing"] = 0.0
     monu_control_zero = _by_epoch(monu_control_rows, 0)
 
     monu_set_dir, monu_set_metrics = child("monuseg_lite_setpms")
     monu_set_label = "monuseg_lite_setpms"
-    monu_set_command = _base_command(
-        sys.executable, monuseg_data, monuseg_checkpoint, monu_manifest_path, monu_manifest_path,
-        monu_set_dir, monu_set_metrics, monu_set_label, 92, "0,2,4,5,6,8,10", "0,5,10", setpms=True,
-        crop_manifest=monu_manifest_path, patch_manifest=patch_manifest_path,
+    monu_set_rows = (
+        _completed_child_rows(monu_set_dir, monu_set_label, monu_expected_epochs)
+        if resuming
+        else None
     )
-    monu_set_command.extend([
-        "--baseline_reference_aji", str(monu_control_zero["aji"]),
-        "--baseline_reference_pq", str(monu_control_zero["pq"]),
-        "--baseline_reference_tolerance", "1e-10",
-    ])
-    runtime["monuseg_lite_setpms"] = _run(root, monu_set_command, artifact_root / "commands" / "monuseg_lite_setpms.log")
-    monu_set_rows = _metric_rows_for_label(_child_rows(monu_set_dir, "metrics.csv"), monu_set_label)
-    _assert_required_epochs(monu_set_rows, {0, 5, 10}, monu_set_label)
+    if monu_set_rows is None:
+        monu_set_command = _base_command(
+            sys.executable, monuseg_data, monuseg_checkpoint, monu_manifest_path, monu_manifest_path,
+            monu_set_dir, monu_set_metrics, monu_set_label, 92, "0,2,4,5,6,8,10", "0,5,10", setpms=True,
+            crop_manifest=monu_manifest_path, patch_manifest=patch_manifest_path,
+        )
+        monu_set_command.extend([
+            "--baseline_reference_aji", str(monu_control_zero["aji"]),
+            "--baseline_reference_pq", str(monu_control_zero["pq"]),
+            "--baseline_reference_tolerance", "1e-10",
+        ])
+        runtime["monuseg_lite_setpms"] = _run(
+            root, monu_set_command, artifact_root / "commands" / "monuseg_lite_setpms.log"
+        )
+        monu_set_rows = _metric_rows_for_label(
+            _child_rows(monu_set_dir, "metrics.csv"), monu_set_label
+        )
+        _assert_required_epochs(monu_set_rows, monu_expected_epochs, monu_set_label)
+    else:
+        runtime["monuseg_lite_setpms_existing"] = 0.0
     _assert_step0_equivalence(monu_control_rows, monu_set_rows, "MoNuSeg-Lite")
+
+    continuation_runtime_dirs = {
+        "tnbc_control": tnbc_control_dir,
+        "tnbc_setpms": tnbc_set_dir,
+        "monuseg_lite_control": monu_control_dir,
+        "monuseg_lite_setpms": monu_set_dir,
+    }
 
     # Required aggregate artifacts.
     tnbc_metric_rows = _child_rows(tnbc_control_dir, "metrics.csv") + _child_rows(tnbc_set_dir, "metrics.csv")
@@ -982,13 +1081,8 @@ def main() -> None:
             "command_seconds": runtime,
             "smoke": json.loads((artifact_root / "smoke_report.json").read_text(encoding="utf-8")),
             "continuations": {
-                name: json.loads((artifact_root / name / "metrics" / "runtime_memory.json").read_text(encoding="utf-8"))
-                for name in (
-                    "tnbc_control",
-                    "tnbc_setpms",
-                    "monuseg_lite_control",
-                    "monuseg_lite_setpms",
-                )
+                name: json.loads((child_root / "metrics" / "runtime_memory.json").read_text(encoding="utf-8"))
+                for name, child_root in continuation_runtime_dirs.items()
             },
         },
     )

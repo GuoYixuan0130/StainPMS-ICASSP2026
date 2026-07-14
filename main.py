@@ -23,6 +23,7 @@ from sam2_train.modeling.criterion import build_criterion
 from sam2_train.modeling.dpa_p2pnet import build_model
 from sam2_train.modeling.utils import collate_fn, set_seed
 from setpms import L2SPAnchor
+from setpms.checkpoints import compact_continuation_checkpoint
 
 
 def count_trainable_params(*modules):
@@ -285,7 +286,7 @@ def _save_continuation_checkpoint(
     *,
     filename=None,
 ):
-    """Save an archival continuation checkpoint without duplicating AdamW state.
+    """Save an FP16 archival continuation checkpoint without AdamW duplication.
 
     The required epoch nodes retain both learned model state dicts and the
     texture-memory state used by the continuation.  Optimizer and scheduler
@@ -297,14 +298,14 @@ def _save_continuation_checkpoint(
     filename = filename or f"continuation_epoch_{int(epoch)}.pth"
     path = os.path.join(cfgs.path_helper["ckpt_path"], filename)
     torch.save(
-        {
-            "model": net.state_dict(),
-            "model1": model1.state_dict(),
-            "epoch": int(epoch),
-            "texture_memory_bank_list": texture_memory_bank_list,
-            "checkpoint_kind": "continuation_model_weights",
-            "optimizer_state_included": False,
-        },
+        compact_continuation_checkpoint(
+            {
+                "model": net.state_dict(),
+                "model1": model1.state_dict(),
+                "epoch": int(epoch),
+                "texture_memory_bank_list": texture_memory_bank_list,
+            }
+        ),
         path,
     )
     return path
