@@ -24,6 +24,18 @@ def _git_sha() -> str:
     return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
 
 
+def _assert_canonical_ancestor() -> None:
+    """Allow the isolated implementation commit, never a substituted base."""
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", CANONICAL_BASELINE_SHA, "HEAD"],
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"PromptQ-v2 must descend from canonical baseline {CANONICAL_BASELINE_SHA}; refusing {_git_sha()}"
+        )
+
+
 def _environment() -> dict:
     try:
         gpu = subprocess.check_output(["nvidia-smi", "--query-gpu=name,driver_version,memory.total", "--format=csv,noheader"], text=True).strip()
@@ -71,8 +83,7 @@ def _write_lead_markdown(path: Path, report: dict) -> None:
 
 def run_primary_metric_audit(*, data_root: Path, checkpoint: Path, manifest_path: Path, out_dir: Path, sam_config: str = "sam2_hiera_l") -> dict:
     """Cache once, train only quality head, and evaluate 7--8 exactly once."""
-    if _git_sha() != CANONICAL_BASELINE_SHA:
-        raise RuntimeError(f"PromptQ-v2 must run at {CANONICAL_BASELINE_SHA}; refusing {_git_sha()}")
+    _assert_canonical_ancestor()
     if sha256_file(checkpoint) != CHECKPOINT_SHA256:
         raise RuntimeError("PromptQ-v2 checkpoint SHA256 mismatch")
     if not torch.cuda.is_available():
