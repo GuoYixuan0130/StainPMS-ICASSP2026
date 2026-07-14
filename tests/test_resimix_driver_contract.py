@@ -24,5 +24,20 @@ class FormalDriverContractTest(unittest.TestCase):
         self.assertIn("--artifact-root", result.stderr)
 
 
+class SmokeCLIContractTest(unittest.TestCase):
+    def test_omitted_crop_manifests_remain_none(self):
+        from tools.resimix_smoke import _parse_options
+
+        options = _parse_options([
+            "--dataset", "tnbc", "--data-path", "data", "--train-manifest", "train.json",
+            "--test-manifest", "dev.json", "--coverage-manifest", "coverage.json",
+            "--resimix-config", "resimix.json", "--output-dir", "out", "--overlap", "32",
+            "--train-image-root", "images", "--train-label-root", "labels",
+            "--test-image-root", "images", "--test-label-root", "labels",
+        ])
+        self.assertIsNone(options.train_crop_manifest)
+        self.assertIsNone(options.eval_crop_manifest)
+
+
 if __name__ == "__main__":
     unittest.main()

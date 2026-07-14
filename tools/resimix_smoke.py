@@ -203,7 +203,7 @@ def _deterministic_replay(options):
     }
 
 
-def main():
+def _argument_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True, choices=("tnbc", "monuseg_lite"))
     parser.add_argument("--data-path", required=True, type=Path)
@@ -214,13 +214,23 @@ def main():
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--overlap", required=True, type=int)
     parser.add_argument("--load", default="unclockwise")
-    parser.add_argument("--train-crop-manifest", default="", type=Path)
-    parser.add_argument("--eval-crop-manifest", default="", type=Path)
+    # ``Path(\"\")`` is ``.`` and would incorrectly be treated as a supplied
+    # manifest.  TNBC has no crop manifests; retain None until one is passed.
+    parser.add_argument("--train-crop-manifest", default=None, type=Path)
+    parser.add_argument("--eval-crop-manifest", default=None, type=Path)
     parser.add_argument("--train-image-root", required=True, type=Path)
     parser.add_argument("--train-label-root", required=True, type=Path)
     parser.add_argument("--test-image-root", required=True, type=Path)
     parser.add_argument("--test-label-root", required=True, type=Path)
-    options = parser.parse_args()
+    return parser
+
+
+def _parse_options(argv=None):
+    return _argument_parser().parse_args(argv)
+
+
+def main():
+    options = _parse_options()
     options.output_dir.mkdir(parents=True, exist_ok=False)
     _set_seed(3407)
     dataset = _build_dataset(options, resimix_enabled=True)
