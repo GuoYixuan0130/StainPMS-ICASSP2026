@@ -7,6 +7,7 @@ import torch
 
 from promptq_v2.model import ModelBundle, assert_frozen_without_grads, configure_quality_only, update_texture_memory
 from promptq_v2.assembly import combine_mask, crop_with_overlap
+from promptq_v2.cache import _decode_partitioned
 from promptq_v2.protocol import (
     INCLUSIVE_IOU_THRESHOLD,
     NMS_RADIUS,
@@ -96,6 +97,13 @@ class PromptQV2ProtocolTests(unittest.TestCase):
         bundle = ModelBundle(_Point(), None, _MemoryNet(), bank, torch.device("cpu"), {})
         update_texture_memory(bundle, [torch.ones(1)], np.zeros((4, 4), dtype=np.float32), 0.7, torch.ones(1, 1), texture=True)
         self.assertEqual(len(bundle.texture_bank), 64)
+
+    def test_empty_visible_crop_never_invokes_decoder_or_stacks(self):
+        ids, logits, ious, calls = _decode_partitioned(None, None, [], np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64), [])
+        self.assertEqual(ids.size, 0)
+        self.assertEqual(logits.shape, (0, 256, 256))
+        self.assertEqual(ious.size, 0)
+        self.assertEqual(calls, 0)
 
 
 if __name__ == "__main__":

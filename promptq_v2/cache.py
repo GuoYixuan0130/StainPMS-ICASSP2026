@@ -69,6 +69,8 @@ def _decode_partitioned(bundle: ModelBundle, image_embed: torch.Tensor, high_res
     have the canonical prompt-batch shape.
     """
     ordered = np.asarray(all_ids, dtype=np.int64)
+    if not len(ordered):
+        return ordered, np.empty((0, 256, 256), dtype=np.float32), np.empty(0, dtype=np.float32), 0
     base = np.asarray(baseline_ids, dtype=np.int64)
     extras = np.asarray([item for item in ordered.tolist() if item not in set(base.tolist())], dtype=np.int64)
     logits_by_id: dict[int, np.ndarray] = {}
@@ -127,6 +129,11 @@ def _cache_image(bundle: ModelBundle, image_id: str, patient: int, image_tensor:
         base_indices = point_nms_indices(points, np.asarray([row["objectness"] for row in candidates]), NMS_RADIUS)
         visible = np.flatnonzero(_inside(points, box)).astype(np.int64)
         baseline_visible = base_indices[_inside(points[base_indices], box)]
+        # Exact canonical validation behavior: no prompt in this crop means
+        # no SAM2 image/prompt/decoder call and no context/texture update.
+        if not len(visible):
+            crop_records.append({"crop_id": crop_id, "box": box, "decode_source_ids": np.empty(0, dtype=np.int64), "logits": np.empty((0, 256, 256), dtype=np.float32), "decoded_iou": np.empty(0, dtype=np.float32)})
+            continue
         # Point coordinates are local to this decoder crop even when they were
         # proposed by an earlier overlapping crop.
         for source_id in visible.tolist():
