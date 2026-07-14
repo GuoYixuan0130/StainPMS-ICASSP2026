@@ -56,8 +56,57 @@ def parse_args():
     parser.add_argument("--sam_ckpt", default="./checkpoints/sam2_hiera_large.pt", type=str)
     parser.add_argument("--sam_config", default="sam2_hiera_l", type=str)
 
+    # Explicit split/crop manifests are deliberately supported at the loader
+    # boundary.  In particular, a test directory may contain inaccessible
+    # patients, so the dataset must not enumerate it when a manifest is given.
+    parser.add_argument("--train_manifest", default="", type=str)
+    parser.add_argument("--test_manifest", default="", type=str)
+    parser.add_argument("--train_crop_manifest", default="", type=str)
+    parser.add_argument("--eval_crop_manifest", default="", type=str)
+    # Formal ResiMix runs never infer development roots from ``data_path``:
+    # TNBC 7--8 and the MoNuSeg-Lite holdout both live in explicitly admitted
+    # roots, so the official test directory is never opened by accident.
+    parser.add_argument("--train_image_root", default="", type=str)
+    parser.add_argument("--train_label_root", default="", type=str)
+    parser.add_argument("--test_image_root", default="", type=str)
+    parser.add_argument("--test_label_root", default="", type=str)
+    parser.add_argument(
+        "--train_only_eval",
+        action="store_true",
+        help="Construct only a test-transform view of the admitted train split (static coverage only).",
+    )
+    parser.add_argument("--coverage_manifest", default="", type=str)
+    parser.add_argument(
+        "--data_identity",
+        default="",
+        choices=["", "tnbc", "monuseg_lite"],
+        help="Activates fail-closed ResiMix split checks for the named formal dataset.",
+    )
+    parser.add_argument("--allowed_patient_ids", default="", type=str)
+    parser.add_argument("--train_allowed_patient_ids", default="", type=str)
+    parser.add_argument("--test_allowed_patient_ids", default="", type=str)
+    parser.add_argument("--forbidden_patient_ids", default="9,10,11", type=str)
+
     parser.add_argument("--test_nms_thr", default=-1, type=int)
     parser.add_argument("--test_filtering", default="", choices=["", "true", "false"])
+
+    # Reproducible experiment plumbing.  These switches are inert for the
+    # historical CA-SAM2/StainPMS commands unless explicitly supplied.
+    parser.add_argument("--artifact_dir", default="", type=str)
+    parser.add_argument(
+        "--evaluation_epochs",
+        default="",
+        type=str,
+        help="Comma-separated post-initialization evaluation checkpoints, e.g. 0,2,4,6,8,10.",
+    )
+    parser.add_argument("--save_eval_checkpoints", action="store_true")
+    parser.add_argument("--per_image_metrics_path", default="", type=str)
+
+    # ResiMix-PMS is a training-time augmentation only.  Its implementation is
+    # activated exclusively by an explicit JSON config; this keeps the default
+    # StainPMS pixel path unchanged.
+    parser.add_argument("--resimix_config", default="", type=str)
+    parser.add_argument("--resimix_enabled", action="store_true")
 
     parser.add_argument("--use_pms", action="store_true")
     parser.add_argument("--pms_loss_coef", default=-1.0, type=float)

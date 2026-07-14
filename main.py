@@ -1,9 +1,11 @@
 import copy
+import csv
 import json
 import math
 import os
 import sys
 import time
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -16,6 +18,7 @@ from conf import settings
 from run.dataset.monuseg import MONUSEG
 from run.run_on_epoch import train_on_epoch, validation_on_epoch
 from run.utils import create_logger, get_network, set_log_dir
+from resimixpms.experiment import EvaluationSchedule, append_csv, write_json
 from sam2_train.modeling.criterion import build_criterion
 from sam2_train.modeling.dpa_p2pnet import build_model
 from sam2_train.modeling.utils import collate_fn, set_seed
@@ -62,6 +65,67 @@ def _train_split_paths(cfgs):
     raise ValueError(f"Unsupported dataset: {cfgs.dataset}")
 
 
+def _train_evaluation_dataset(test_dataset):
+    """Create the manifest-filtered train view used by static coverage/audits."""
+    dataset = copy.copy(test_dataset)
+    if not hasattr(dataset, "use_train_split_for_evaluation"):
+        raise TypeError("dataset lacks a manifest-safe train evaluation view")
+    dataset.use_train_split_for_evaluation()
+    return dataset
+
+
+def _set_explicit_log_dir(prefix):
+    """Create the historical log layout under one pre-registered artifact dir."""
+    prefix = os.path.abspath(prefix)
+    os.makedirs(prefix, exist_ok=False)
+    path_dict = {"prefix": prefix}
+    for key, name in (("ckpt_path", "Model"), ("log_path", "Log"), ("sample_path", "Samples")):
+        path = os.path.join(prefix, name)
+        os.makedirs(path, exist_ok=False)
+        path_dict[key] = path
+    return path_dict
+
+
+def _save_full_eval_checkpoint(path, net, model1, epoch, texture_memory_bank_list):
+    """Persist every pre-registered evaluation state; never replace another node."""
+    torch.save(
+        {
+            "model": net.state_dict(),
+            "model1": model1.state_dict(),
+            "parameter": net._parameters,
+            "epoch": int(epoch),
+            "texture_memory_bank_list": list(texture_memory_bank_list),
+        },
+        path,
+    )
+
+
+def _metric_payload(metrics):
+    names = ("dice1", "dice2", "aji", "aji_p", "dq", "sq", "pq")
+    return {name: float(value) for name, value in zip(names, metrics, strict=True)}
+
+
+_RESIMIX_EVENT_FIELDS = (
+    "epoch", "sample_key", "status", "donor_id", "donor_category", "donor_source_id", "donor_patient_id", "requested_host_mode",
+    "host_mode", "host_fallback", "context_distance", "nearest_gt_distance", "proposal_ranked_count",
+    "coverage_overlap_pixels", "source_area", "placed_area", "area_ratio", "clip_fraction", "seam_gradient",
+    "synthetic_instance_id", "instance_count_before", "instance_count_after", "synthetic_prompt_added", "reason",
+)
+
+
+def record_resimix_events(cfgs, train_dataset):
+    """Persist dataset-local deterministic transplant telemetry after each epoch."""
+    if not hasattr(train_dataset, "consume_resimix_events"):
+        return []
+    events = train_dataset.consume_resimix_events()
+    if not events:
+        return events
+    target = os.path.join(cfgs.path_helper["prefix"], "synthetic_acceptance.csv")
+    for event in events:
+        append_csv(target, event, _RESIMIX_EVENT_FIELDS)
+    return events
+
+
 def refresh_baseline_masks_inplace(
     cfgs,
     args,
@@ -80,11 +144,7 @@ def refresh_baseline_masks_inplace(
         return None
 
     saved_dump_dir = getattr(cfgs, "dump_baseline_masks_dir", "") or ""
-    train_img_root, train_lbl_root = _train_split_paths(cfgs)
-    refresh_dataset = copy.copy(test_dataset)
-    refresh_dataset.image_root = train_img_root
-    refresh_dataset.label_root = train_lbl_root
-    refresh_dataset.paths = sorted(os.listdir(train_img_root))
+    refresh_dataset = _train_evaluation_dataset(test_dataset)
     cfgs.dump_baseline_masks_dir = cfgs.baseline_masks_dir
 
     temp_loader = DataLoader(
@@ -171,13 +231,69 @@ def build_dataloaders(cfgs, args):
     if cfgs.dataset != "monuseg":
         raise ValueError(f"Unsupported dataset: {cfgs.dataset}")
 
+    if cfgs.train_only_eval and not (cfgs.eval and cfgs.eval_on_train):
+        raise ValueError("--train_only_eval is valid only with --eval --eval_on_train")
+
+    # Static-PMS Control is a formal arm in its own right.  Keep its protocol
+    # gate independent of the ResiMix switch so invoking ``main.py`` directly
+    # cannot silently turn the matched control into a self-bootstrapped or
+    # refreshed-coverage variant.  Coverage construction itself does not set
+    # --use_pms and is intentionally outside this training-arm gate.
+    formal_static_pms = cfgs.data_identity in ("tnbc", "monuseg_lite") and cfgs.use_pms
+    if formal_static_pms:
+        if not cfgs.train_manifest or not cfgs.test_manifest:
+            raise ValueError("formal Static-PMS requires explicit immutable train/test manifests")
+        if int(cfgs.seed) != 3407 or int(cfgs.b) != 1:
+            raise ValueError("formal Static-PMS fixes seed=3407 and batch size=1")
+        if cfgs.tta or not cfgs.texture or not cfgs.context or int(cfgs.test_nms_thr) != 12:
+            raise ValueError("formal Static-PMS fixes TTA off, texture/context on, and NMS=12")
+        if int(cfgs.crop_size) != 256:
+            raise ValueError("formal Static-PMS fixes crop_size=256")
+        fixed_weights = {
+            "pms_loss_coef": (cfgs.pms_loss_coef, 0.5),
+            "pms_residual_mask_weight": (cfgs.pms_residual_mask_weight, 0.3),
+            "pms_preserve_loss_coef": (cfgs.pms_preserve_loss_coef, 1.0),
+            "pms_object_weight": (cfgs.pms_object_weight, 1.0),
+        }
+        for name, (actual, expected) in fixed_weights.items():
+            if abs(float(actual) - expected) > 1e-12:
+                raise ValueError(f"formal Static-PMS fixes {name}={expected}")
+        if cfgs.pms_self_bootstrap or int(cfgs.iterative_baseline_refresh_every or 0) != 0:
+            raise ValueError("formal Static-PMS requires one static coverage cache; refresh is forbidden")
+        if bool(cfgs.coverage_accumulate):
+            raise ValueError("formal Static-PMS forbids coverage accumulation")
+        if not cfgs.baseline_masks_dir:
+            raise ValueError("formal Static-PMS requires an explicit static --baseline_masks_dir")
+        if not cfgs.coverage_manifest:
+            raise ValueError("formal Static-PMS requires --coverage_manifest")
+        if Path(cfgs.baseline_masks_dir).resolve() != Path(cfgs.coverage_manifest).resolve().parent:
+            raise ValueError("baseline_masks_dir must be the exact parent of the sealed coverage manifest")
+
+    if cfgs.resimix_enabled:
+        if not cfgs.resimix_config:
+            raise ValueError("--resimix_enabled requires --resimix_config")
+        if not formal_static_pms:
+            raise ValueError("ResiMix-PMS requires an explicit formal Static-PMS configuration")
+
     train_dataset = MONUSEG(cfgs, args, cfgs.data_path, cfgs.load, mode="train")
-    test_dataset = MONUSEG(cfgs, args, cfgs.data_path, cfgs.load, mode="test")
+    test_dataset = MONUSEG(
+        cfgs,
+        args,
+        cfgs.data_path,
+        cfgs.load,
+        mode="test",
+        source_split="train" if cfgs.train_only_eval else "test",
+    )
+    # Dataset-side ResiMix telemetry is deliberately process-local so every
+    # accepted/rejected transplant can be recorded deterministically.
+    num_workers = 0 if cfgs.resimix_enabled else cfgs.num_workers
+    if cfgs.resimix_enabled and cfgs.num_workers != 0:
+        print("[resimix] forcing num_workers=0 for deterministic event accounting")
     train_loader = DataLoader(
         train_dataset,
         batch_size=1,
         shuffle=False,
-        num_workers=cfgs.num_workers,
+        num_workers=num_workers,
         pin_memory=True,
         collate_fn=collate_fn,
     )
@@ -185,7 +301,7 @@ def build_dataloaders(cfgs, args):
         test_dataset,
         batch_size=1,
         shuffle=False,
-        num_workers=cfgs.num_workers,
+        num_workers=num_workers,
         pin_memory=True,
     )
     return train_dataset, test_dataset, train_loader, test_loader
@@ -239,6 +355,71 @@ def write_eval_metric_artifact(cfgs, eval_split, metrics):
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
     print(f"Wrote unrounded evaluation metrics: {path}")
+
+
+def run_registered_evaluation(
+    cfgs,
+    args,
+    test_loader,
+    completed_epochs,
+    model1,
+    model1_encoder,
+    net,
+    val_texture_bank_template,
+    fallback_texture_bank,
+    device,
+):
+    """Evaluate/save one pre-registered node without choosing by dev results."""
+    val_texture_bank = (
+        list(val_texture_bank_template)
+        if val_texture_bank_template is not None
+        else list(fallback_texture_bank)
+    )
+    print(
+        f"[registered-eval] completed_epochs={completed_epochs}; "
+        f"n={len(test_loader.dataset)}"
+    )
+    # Per-image rows, when requested, must not collide across evaluation nodes.
+    original_per_image = str(getattr(cfgs, "per_image_metrics_path", "") or "")
+    if original_per_image:
+        root, ext = os.path.splitext(original_per_image)
+        cfgs.per_image_metrics_path = f"{root}_epoch_{int(completed_epochs):02d}{ext or '.csv'}"
+    try:
+        metrics = validation_on_epoch(
+            cfgs,
+            args,
+            test_loader,
+            int(completed_epochs),
+            model1,
+            model1_encoder,
+            net,
+            cfgs.load,
+            args.data.post.iou_threshold,
+            val_texture_bank,
+            device,
+        )
+    finally:
+        cfgs.per_image_metrics_path = original_per_image
+
+    payload = {"completed_epochs": int(completed_epochs), **_metric_payload(metrics)}
+    csv_path = os.path.join(cfgs.path_helper["prefix"], "training_curves.csv")
+    append_csv(csv_path, {"record_type": "evaluation", **payload}, [
+        "record_type", "completed_epochs", "loss_total", "loss_detect", "loss_segment",
+        "dice1", "dice2", "aji", "aji_p", "dq", "sq", "pq",
+    ])
+    write_json(
+        os.path.join(cfgs.path_helper["prefix"], f"evaluation_epoch_{int(completed_epochs):02d}.json"),
+        payload,
+    )
+    if cfgs.save_eval_checkpoints:
+        _save_full_eval_checkpoint(
+            os.path.join(cfgs.path_helper["ckpt_path"], f"epoch_{int(completed_epochs):02d}.pth"),
+            net,
+            model1,
+            completed_epochs,
+            val_texture_bank,
+        )
+    return metrics
 
 
 def main():
@@ -301,9 +482,21 @@ def main():
         f"(image encoder frozen except prompt_generator)"
     )
 
-    cfgs.path_helper = set_log_dir("logs", cfgs.exp_name)
+    cfgs.path_helper = (
+        _set_explicit_log_dir(cfgs.artifact_dir)
+        if cfgs.artifact_dir
+        else set_log_dir("logs", cfgs.exp_name)
+    )
     logger = create_logger(cfgs.path_helper["log_path"])
     logger.info(cfgs)
+
+    if cfgs.resimix_enabled:
+        with open(cfgs.resimix_config, "r", encoding="utf-8") as handle:
+            resimix_config_payload = json.load(handle)
+        write_json(
+            os.path.join(cfgs.path_helper["prefix"], "resimix_config.json"),
+            resimix_config_payload,
+        )
 
     train_dataset, test_dataset, train_loader, test_loader = build_dataloaders(cfgs, args)
 
@@ -317,11 +510,7 @@ def main():
 
         oracle_loader = test_loader
         if cfgs.oracle_split == "train":
-            train_img_root, train_lbl_root = _train_split_paths(cfgs)
-            oracle_dataset = copy.copy(test_dataset)
-            oracle_dataset.image_root = train_img_root
-            oracle_dataset.label_root = train_lbl_root
-            oracle_dataset.paths = sorted(os.listdir(train_img_root))
+            oracle_dataset = _train_evaluation_dataset(test_dataset)
             oracle_loader = DataLoader(
                 oracle_dataset,
                 batch_size=1,
@@ -329,7 +518,7 @@ def main():
                 num_workers=cfgs.num_workers,
                 pin_memory=True,
             )
-            print(f"[stage1-oracle] train split; n={len(oracle_dataset.paths)} from {train_img_root}")
+            print(f"[stage1-oracle] train split; n={len(oracle_dataset)} from manifest")
         else:
             print(f"[stage1-oracle] test split; n={len(test_loader.dataset)}")
 
@@ -355,11 +544,7 @@ def main():
 
         selective_loader = test_loader
         if cfgs.selective_split == "train":
-            train_img_root, train_lbl_root = _train_split_paths(cfgs)
-            selective_dataset = copy.copy(test_dataset)
-            selective_dataset.image_root = train_img_root
-            selective_dataset.label_root = train_lbl_root
-            selective_dataset.paths = sorted(os.listdir(train_img_root))
+            selective_dataset = _train_evaluation_dataset(test_dataset)
             selective_loader = DataLoader(
                 selective_dataset,
                 batch_size=1,
@@ -367,7 +552,7 @@ def main():
                 num_workers=cfgs.num_workers,
                 pin_memory=True,
             )
-            print(f"[stage2-selective] train split; n={len(selective_dataset.paths)} from {train_img_root}")
+            print(f"[stage2-selective] train split; n={len(selective_dataset)} from manifest")
         else:
             print(f"[stage2-selective] test split; n={len(test_loader.dataset)}")
 
@@ -394,20 +579,19 @@ def main():
         eval_loader = test_loader
         eval_split = "test"
         if cfgs.eval_on_train:
-            train_img_root, train_lbl_root = _train_split_paths(cfgs)
-            eval_dataset = copy.copy(test_dataset)
-            eval_dataset.image_root = train_img_root
-            eval_dataset.label_root = train_lbl_root
-            eval_dataset.paths = sorted(os.listdir(train_img_root))
-            eval_loader = DataLoader(
-                eval_dataset,
-                batch_size=1,
-                shuffle=False,
-                num_workers=cfgs.num_workers,
-                pin_memory=True,
-            )
+            if cfgs.train_only_eval:
+                eval_dataset, eval_loader = test_dataset, test_loader
+            else:
+                eval_dataset = _train_evaluation_dataset(test_dataset)
+                eval_loader = DataLoader(
+                    eval_dataset,
+                    batch_size=1,
+                    shuffle=False,
+                    num_workers=cfgs.num_workers,
+                    pin_memory=True,
+                )
             eval_split = "train"
-            print(f"[eval] train split; n={len(eval_dataset.paths)} from {train_img_root}")
+            print(f"[eval] train split; n={len(eval_dataset)} from manifest")
 
         metrics = validation_on_epoch(
             cfgs,
@@ -477,6 +661,22 @@ def main():
     best_aji = 0.0
 
     settings.EPOCH = cfgs.epochs
+    evaluation_schedule = EvaluationSchedule.from_cli(cfgs.epochs, cfgs.evaluation_epochs)
+    registered_evaluation = bool(evaluation_schedule.evaluation_epochs)
+    if registered_evaluation and 0 in evaluation_schedule.evaluation_epochs:
+        run_registered_evaluation(
+            cfgs,
+            args,
+            test_loader,
+            0,
+            model1,
+            model1_encoder,
+            net,
+            val_texture_bank_template,
+            [],
+            device,
+        )
+
     if pms_self_bootstrap and iter_refresh_every > 0 and pms_start_epoch <= 0:
         print("[pms-self-bootstrap] generating initial coverage maps before epoch 0.")
         refresh_baseline_masks_inplace(
@@ -493,6 +693,8 @@ def main():
         )
 
     for epoch in range(settings.EPOCH):
+        if hasattr(train_dataset, "set_epoch"):
+            train_dataset.set_epoch(epoch)
         deferred_c0 = (
             pms_self_bootstrap
             and iter_refresh_every > 0
@@ -549,6 +751,8 @@ def main():
             texture_memory_bank_list,
             device,
         )
+        if cfgs.resimix_enabled:
+            record_resimix_events(cfgs, train_dataset)
         logger.info(f"Train loss: {log_info} || epoch {epoch}.")
         print("time_for_training", time.time() - start)
 
@@ -567,8 +771,41 @@ def main():
         segment_loss.append(segment_loss_tmp)
         all_loss.append(all_loss_tmp)
 
+        if registered_evaluation:
+            append_csv(
+                os.path.join(cfgs.path_helper["prefix"], "training_curves.csv"),
+                {
+                    "record_type": "train",
+                    "completed_epochs": int(epoch + 1),
+                    "loss_total": float(all_loss_tmp),
+                    "loss_detect": float(detect_loss_tmp),
+                    "loss_segment": float(segment_loss_tmp),
+                },
+                [
+                    "record_type", "completed_epochs", "loss_total", "loss_detect", "loss_segment",
+                    "dice1", "dice2", "aji", "aji_p", "dq", "sq", "pq",
+                ],
+            )
+
         scheduler.step()
         net.eval()
+        completed_epochs = int(epoch + 1)
+        if registered_evaluation:
+            if evaluation_schedule.should_evaluate(completed_epochs):
+                run_registered_evaluation(
+                    cfgs,
+                    args,
+                    test_loader,
+                    completed_epochs,
+                    model1,
+                    model1_encoder,
+                    net,
+                    val_texture_bank_template,
+                    texture_memory_bank_list,
+                    device,
+                )
+            continue
+
         should_validate = (
             epoch > cfgs.val_start_epoch
             and (epoch % cfgs.val_freq == 0 or epoch == settings.EPOCH - 1)

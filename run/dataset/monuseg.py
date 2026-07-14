@@ -1,4 +1,6 @@
 import os
+from collections import defaultdict
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -9,29 +11,110 @@ from skimage import io
 import scipy.io as sio
 
 from stainpms.candidate import compute_b_candidates_oncrop, compute_baseline_center_candidates
+from resimixpms.manifests import (
+    ManifestPreflightError,
+    load_allowed_image_names,
+    load_crop_records,
+    validate_manifest_patient_isolation,
+)
+from resimixpms.runtime import ResiMixAugmentor
+from resimixpms.transplant import mask_medoid
+from resimixpms.coverage import StaticCoverageCache
+
+
+def _parse_int_set(value):
+    if not value:
+        return set()
+    return {int(item.strip()) for item in str(value).split(",") if item.strip()}
+
+
+def _safe_relative_name(name):
+    candidate = Path(str(name).replace("\\", "/"))
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise ManifestPreflightError(f"unsafe manifest image name: {name}")
+    return candidate
+
+
+def _resolve_manifest_image_name(image_root, name):
+    """Resolve only the one manifest-named image, never enumerate a directory."""
+    root = Path(image_root).resolve()
+    relative = _safe_relative_name(name)
+    candidates = [relative]
+    if not relative.suffix:
+        candidates.extend(relative.with_suffix(ext) for ext in (".png", ".tif", ".tiff", ".jpg", ".jpeg"))
+    existing = []
+    for candidate in candidates:
+        resolved = (root / candidate).resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError as exc:
+            raise ManifestPreflightError(f"manifest image escapes image root: {name}") from exc
+        if resolved.is_file():
+            existing.append(resolved)
+    if len(existing) != 1:
+        raise ManifestPreflightError(
+            f"manifest image must resolve to exactly one file ({name}); found {len(existing)}"
+        )
+    return str(existing[0].relative_to(root)).replace("\\", "/")
+
+
+def _path_stem(path):
+    return Path(path).stem
 
 
 class MONUSEG(Dataset):
-    def __init__(self, args, cfgs, data_path , load, mode = 'train'):
+    def __init__(self, args, cfgs, data_path, load, mode='train', source_split=None):
         self.data_path = data_path
-        if mode == 'train':
-            self.image_root = data_path + '/train_12/images'
-            self.label_root = data_path + '/train_12/labels'
-        elif mode == 'test':
-            self.image_root = data_path + '/test/images'
-            self.label_root = data_path + '/test/labels'
-        self.paths = sorted(os.listdir(self.image_root))
         self.mode = mode
+        self.source_split = source_split or mode
+        if self.source_split not in ("train", "test"):
+            raise ValueError(f"unsupported MONUSEG source split: {self.source_split}")
+        self._runtime_args = args
+        self._mm_args = cfgs
+        self.data_identity = str(getattr(args, "data_identity", "") or "")
+        self._enforce_formal_root_isolation()
         self.crop_size = args.crop_size
         self.overlap = args.overlap
         self.load = load
+        self.image_root, self.label_root = self._split_roots(self.source_split)
+        self.paths = self._load_manifest_paths(self.source_split)
+
+        self._train_crop_records_by_stem = self._crop_records_by_stem(
+            str(getattr(args, "train_crop_manifest", "") or ""),
+            self.paths if self.source_split == "train" else None,
+        )
+        self._eval_crop_records_by_stem = self._crop_records_by_stem(
+            str(getattr(args, "eval_crop_manifest", "") or ""),
+            self.paths if self.source_split == "test" else None,
+        )
+        self._active_eval_crop_records = None
+        self._test_patch_records = []
+        if mode == "test" and self.source_split == "test" and self._eval_crop_records_by_stem:
+            by_stem = {_path_stem(path): path for path in self.paths}
+            self._test_patch_records = []
+            for records in self._eval_crop_records_by_stem.values():
+                for record in records:
+                    stem = _path_stem(record["image_name"])
+                    if stem not in by_stem:
+                        raise ManifestPreflightError(
+                            f"evaluation crop references image outside test manifest: {record['image_name']}"
+                        )
+                    sample = dict(record)
+                    sample["path"] = by_stem[stem]
+                    self._test_patch_records.append(sample)
+        elif mode == "test" and self.source_split == "train":
+            # Static coverage must use test-time transforms while touching only
+            # manifest-admitted training files and, for MoNuSeg-Lite, only the
+            # frozen training crops.
+            self._active_eval_crop_records = self._train_crop_records_by_stem
 
         self.num_mask_per_img = 150
         self.num_classes = 1
 
-        self.transform = A.Compose(
-          [getattr(A, tf_dict.pop('type'))(**tf_dict) for tf_dict in cfgs.data.get(mode).transform]
-          + [ToTensorV2()], p=1)
+        self.resimix_enabled = bool(
+            mode == "train" and getattr(args, "resimix_enabled", False)
+        )
+        self._build_transforms(cfgs)
 
         # PMS fine-tune support.
         # NOTE the parameter naming inversion: in this class `args` = the
@@ -59,22 +142,228 @@ class MONUSEG(Dataset):
         self.pms_preserve_max_prompts = int(getattr(stain_cfg, "pms_preserve_max_prompts", 0))
         self._need_b = self.pms_enabled
         self.baseline_masks_dir = getattr(args, "baseline_masks_dir", "") or ""
+        self.coverage_manifest_path = str(getattr(args, "coverage_manifest", "") or "")
+        self._static_coverage_cache = None
         self._baseline_cache = {}
         if self._need_b and self.baseline_masks_dir:
-            for p in self.paths:
-                name = p.split(".")[0]
-                npy_path = os.path.join(self.baseline_masks_dir, name + ".npy")
-                if os.path.exists(npy_path):
+            if self.coverage_manifest_path:
+                manifest_path = Path(self.coverage_manifest_path)
+                if manifest_path.name != "coverage_manifest.json":
+                    raise ValueError("--coverage_manifest must name coverage_manifest.json")
+                self._static_coverage_cache = StaticCoverageCache.open(manifest_path.parent)
+                expected_ids = {_path_stem(path) for path in self.paths}
+                if set(self._static_coverage_cache.image_ids) != expected_ids:
+                    raise RuntimeError("static coverage image set does not exactly match the training manifest")
+                for name in sorted(expected_ids):
+                    self._baseline_cache[name] = self._static_coverage_cache.load(name)
+            else:
+                for p in self.paths:
+                    name = _path_stem(p)
+                    npy_path = os.path.join(self.baseline_masks_dir, name + ".npy")
+                    if not os.path.isfile(npy_path):
+                        if not self.pms_self_bootstrap:
+                            raise FileNotFoundError(
+                                f"missing immutable static coverage cache for manifest image {p}: {npy_path}"
+                            )
+                        continue
                     self._baseline_cache[name] = np.load(npy_path).astype(np.int32)
             if self.pms_enabled and self.pms_self_bootstrap:
                 print("[MONUSEG PMS] self-bootstrap coverage cache active; "
                       "the initial online cache will be populated before epoch 0.")
             else:
+                if len(self._baseline_cache) != len(self.paths):
+                    raise RuntimeError("static coverage cache is incomplete; refusing partial-cache training")
                 print(f"[MONUSEG PMS] loaded {len(self._baseline_cache)}/{len(self.paths)} "
                       f"precomputed baseline masks from {self.baseline_masks_dir}")
             if self.pms_enabled and self.pms_baseline_prompts:
                 max_msg = "all" if self.pms_preserve_max_prompts <= 0 else str(self.pms_preserve_max_prompts)
                 print(f"[MONUSEG PMS] coverage-preservation prompts enabled; max_per_crop={max_msg}")
+
+        self._resimix_epoch = 0
+        self._resimix_augmentor = None
+        if self.resimix_enabled:
+            config_path = str(getattr(args, "resimix_config", "") or "")
+            if not config_path:
+                raise ValueError("ResiMix dataset requires --resimix_config")
+            self._resimix_augmentor = ResiMixAugmentor(config_path)
+            if not self.coverage_manifest_path:
+                raise ValueError("ResiMix dataset requires a sealed coverage manifest")
+            self._resimix_augmentor.validate_formal_bindings(
+                dataset=self.data_identity,
+                train_manifest=str(getattr(args, "train_manifest", "") or ""),
+                train_crop_manifest=str(getattr(args, "train_crop_manifest", "") or "") or None,
+                coverage_manifest=self.coverage_manifest_path,
+            )
+
+    def _enforce_formal_root_isolation(self):
+        """Keep MoNuSeg-Lite on frozen train material even outside the driver."""
+        if self.data_identity != "monuseg_lite":
+            return
+        train_image = str(getattr(self._runtime_args, "train_image_root", "") or "")
+        train_label = str(getattr(self._runtime_args, "train_label_root", "") or "")
+        if not train_image or not train_label:
+            raise ManifestPreflightError("MoNuSeg-Lite requires explicit admitted train image/label roots")
+        if not str(getattr(self._runtime_args, "train_manifest", "") or ""):
+            raise ManifestPreflightError("MoNuSeg-Lite requires its frozen train manifest")
+        if not str(getattr(self._runtime_args, "train_crop_manifest", "") or ""):
+            raise ManifestPreflightError("MoNuSeg-Lite requires its frozen training-crop manifest")
+        if self.source_split != "test":
+            return
+        test_image = str(getattr(self._runtime_args, "test_image_root", "") or "")
+        test_label = str(getattr(self._runtime_args, "test_label_root", "") or "")
+        if not test_image or not test_label:
+            raise ManifestPreflightError("MoNuSeg-Lite development roots must be explicit train roots")
+        if Path(train_image).resolve() != Path(test_image).resolve() or Path(train_label).resolve() != Path(test_label).resolve():
+            raise ManifestPreflightError("MoNuSeg-Lite may not use an official-test root")
+        if not str(getattr(self._runtime_args, "test_manifest", "") or ""):
+            raise ManifestPreflightError("MoNuSeg-Lite requires its frozen six-image development manifest")
+        if not str(getattr(self._runtime_args, "eval_crop_manifest", "") or ""):
+            raise ManifestPreflightError("MoNuSeg-Lite requires its frozen twelve-patch evaluation manifest")
+
+    def _split_roots(self, split):
+        image_root = str(getattr(self._runtime_args, f"{split}_image_root", "") or "")
+        label_root = str(getattr(self._runtime_args, f"{split}_label_root", "") or "")
+        if bool(image_root) != bool(label_root):
+            raise ManifestPreflightError(
+                f"{split}_image_root and {split}_label_root must be supplied together"
+            )
+        if image_root:
+            return image_root, label_root
+        if split == "train":
+            return self.data_path + "/train_12/images", self.data_path + "/train_12/labels"
+        if split == "test":
+            return self.data_path + "/test/images", self.data_path + "/test/labels"
+        raise ValueError(f"unsupported MONUSEG source split: {split}")
+
+    def _manifest_for_mode(self, split):
+        return str(getattr(self._runtime_args, f"{split}_manifest", "") or "")
+
+    def _load_manifest_paths(self, split):
+        image_root, label_root = self._split_roots(split)
+        manifest = self._manifest_for_mode(split)
+        if self.data_identity and not manifest:
+            raise ManifestPreflightError(
+                f"{self.data_identity} requires an explicit {split}_manifest; directory enumeration is forbidden"
+            )
+        if manifest:
+            if self.data_identity == "tnbc":
+                allowed_value = getattr(self._runtime_args, f"{split}_allowed_patient_ids", "")
+                if not allowed_value:
+                    allowed_value = getattr(self._runtime_args, "allowed_patient_ids", "")
+                allowed = _parse_int_set(allowed_value)
+                forbidden = _parse_int_set(getattr(self._runtime_args, "forbidden_patient_ids", "9,10,11"))
+                validate_manifest_patient_isolation(manifest, allowed, forbidden)
+            names = load_allowed_image_names(manifest)
+            paths = [_resolve_manifest_image_name(image_root, name) for name in names]
+        else:
+            paths = sorted(os.listdir(image_root))
+        stems = [_path_stem(path) for path in paths]
+        if len(stems) != len(set(stems)):
+            raise ManifestPreflightError("manifest image names must have unique filename stems")
+        for path in paths:
+            label_path = Path(label_root) / Path(path).with_suffix(".mat")
+            if not label_path.is_file():
+                raise ManifestPreflightError(f"missing label for manifest image {path}: {label_path}")
+        return paths
+
+    def _crop_records_by_stem(self, manifest, allowed_paths):
+        if not manifest:
+            return defaultdict(list)
+        records = load_crop_records(manifest)
+        result = defaultdict(list)
+        allowed_stems = {_path_stem(path) for path in allowed_paths} if allowed_paths else None
+        for record in records:
+            stem = _path_stem(record["image_name"])
+            if allowed_stems is not None and stem not in allowed_stems:
+                raise ManifestPreflightError(
+                    f"crop manifest references image outside the corresponding image manifest: {record['image_name']}"
+                )
+            result[stem].append(record)
+        return result
+
+    def _build_transforms(self, cfgs):
+        specs = [dict(item) for item in cfgs.data.get(self.mode).transform]
+
+        def make(spec_list):
+            built = []
+            for spec in spec_list:
+                params = dict(spec)
+                transform_type = params.pop("type")
+                built.append(getattr(A, transform_type)(**params))
+            return built
+
+        # Keep the original one-Compose path for every normal crop.  This is
+        # essential for pixel-exact Static-PMS / ResiMix warm-up equivalence:
+        # splitting Albumentations would consume random state differently even
+        # before the epoch-2 augmentation is allowed to run.
+        self.transform = A.Compose(make(specs) + [ToTensorV2()], p=1)
+        self._resimix_post_transform = None
+        self._resimix_normalize_mean = None
+        self._resimix_normalize_std = None
+        self._resimix_normalize_scale = None
+        if not self.resimix_enabled:
+            return
+        normalize_specs = [spec for spec in specs if spec.get("type") == "Normalize"]
+        if len(normalize_specs) != 1:
+            raise ValueError("ResiMix requires exactly one terminal Normalize transform")
+        self._resimix_post_transform = A.Compose(make(normalize_specs) + [ToTensorV2()], p=1)
+        normalize = normalize_specs[0]
+        self._resimix_normalize_mean = np.asarray(normalize.get("mean", (0.485, 0.456, 0.406)), dtype=np.float32)
+        self._resimix_normalize_std = np.asarray(normalize.get("std", (0.229, 0.224, 0.225)), dtype=np.float32)
+        self._resimix_normalize_scale = float(normalize.get("max_pixel_value", 255.0))
+
+    def set_epoch(self, epoch):
+        self._resimix_epoch = int(epoch)
+
+    def consume_resimix_events(self):
+        if self._resimix_augmentor is None:
+            return []
+        return self._resimix_augmentor.consume_events()
+
+    def use_train_split_for_evaluation(self):
+        """Switch a test-transform view to train records without enumerating directories."""
+        self.source_split = "train"
+        self.image_root, self.label_root = self._split_roots("train")
+        self.paths = self._load_manifest_paths("train")
+        self._test_patch_records = []
+        self._active_eval_crop_records = self._crop_records_by_stem(
+            str(getattr(self._runtime_args, "train_crop_manifest", "") or ""), self.paths
+        )
+
+    def _resimix_restore_rgb(self, normalized_image):
+        """Invert the formal terminal Normalize solely for a successful transplant.
+
+        The original composed output is retained unchanged when no synthetic
+        nucleus is accepted, preserving the canonical Static-PMS tensor path.
+        """
+        if self._resimix_normalize_mean is None:
+            raise RuntimeError("ResiMix normalization metadata is unavailable")
+        if torch.is_tensor(normalized_image):
+            values = normalized_image.detach().cpu().numpy()
+        else:
+            values = np.asarray(normalized_image)
+        if values.ndim != 3 or values.shape[0] != 3:
+            raise ValueError("ResiMix expects a CHW normalized image tensor")
+        rgb = values.transpose(1, 2, 0) * self._resimix_normalize_std + self._resimix_normalize_mean
+        return np.rint(np.clip(rgb * self._resimix_normalize_scale, 0.0, self._resimix_normalize_scale)).astype(np.uint8)
+
+    def evaluation_crop_boxes(self, image_name, image_shape, default_boxes):
+        records = self._active_eval_crop_records
+        if not records:
+            return default_boxes
+        stem = _path_stem(image_name)
+        selected = records.get(stem, [])
+        if not selected:
+            raise ManifestPreflightError(f"no frozen training crop for {image_name}")
+        height, width = int(image_shape[0]), int(image_shape[1])
+        boxes = []
+        for record in selected:
+            x, y = int(record["x"]), int(record["y"])
+            crop_w, crop_h = int(record["width"]), int(record["height"])
+            if x + crop_w > width or y + crop_h > height:
+                raise ManifestPreflightError(f"frozen crop lies outside {image_name}")
+            boxes.append([x, y, x + crop_w, y + crop_h])
+        return boxes
 
     def reload_baseline_masks(self):
         """Re-read baseline_masks_dir/*.npy into _baseline_cache in place.
@@ -84,37 +373,55 @@ class MONUSEG(Dataset):
         """
         if not (self._need_b and self.baseline_masks_dir):
             return 0
+        if self._static_coverage_cache is not None:
+            raise RuntimeError("immutable static coverage cannot be refreshed")
         n_old = len(self._baseline_cache)
         self._baseline_cache.clear()
         for p in self.paths:
-            name = p.split(".")[0]
+            name = _path_stem(p)
             npy_path = os.path.join(self.baseline_masks_dir, name + ".npy")
-            if os.path.exists(npy_path):
-                self._baseline_cache[name] = np.load(npy_path).astype(np.int32)
+            if not os.path.isfile(npy_path):
+                raise FileNotFoundError(f"missing refreshed coverage map for {p}: {npy_path}")
+            self._baseline_cache[name] = np.load(npy_path).astype(np.int32)
         n_new = len(self._baseline_cache)
         print(f"[MONUSEG PMS] reloaded {n_new}/{len(self.paths)} baseline masks "
               f"from {self.baseline_masks_dir} (was {n_old})")
         return n_new
 
     def __len__(self):
-        return len(self.paths)
+        return len(self._test_patch_records) if self._test_patch_records else len(self.paths)
 
     def __getitem__(self, index):
 
         """Get the images"""
-        path = self.paths[index]
+        patch_record = None
+        if self.mode == "test" and self._test_patch_records:
+            patch_record = self._test_patch_records[index]
+            path = patch_record["path"]
+        else:
+            path = self.paths[index]
 
         image_path = os.path.join(self.image_root, path)
-        mask_path = os.path.join(self.label_root, path.split('.')[0] + '.mat')
+        mask_path = os.path.join(self.label_root, str(Path(path).with_suffix('.mat')))
 
         img = io.imread(image_path)[..., :3]
         mask = load_maskfile(mask_path)
+
+        output_name = _path_stem(path)
+        if patch_record is not None:
+            x, y = int(patch_record["x"]), int(patch_record["y"])
+            width, height = int(patch_record["width"]), int(patch_record["height"])
+            if x + width > img.shape[1] or y + height > img.shape[0]:
+                raise ManifestPreflightError(f"evaluation patch lies outside {path}")
+            img = img[y:y + height, x:x + width]
+            mask = mask[y:y + height, x:x + width]
+            output_name = f"{output_name}__x{x}_y{y}_w{width}_h{height}"
 
         # PMS: stack precomputed baseline mask as 3rd mask channel so
         # albumentations augments it together with image + GT (keeps alignment).
         baseline_attached = False
         if self.mode == 'train' and self._need_b and self._baseline_cache:
-            name_no_ext = path.split('.')[0]
+            name_no_ext = _path_stem(path)
             baseline = self._baseline_cache.get(name_no_ext)
             if baseline is not None:
                 if baseline.shape != mask.shape[:2]:
@@ -152,16 +459,63 @@ class MONUSEG(Dataset):
                 self.overlap,
                 self.load,
             ).tolist()
+            frozen_crops = self._train_crop_records_by_stem.get(_path_stem(path), [])
+            if frozen_crops:
+                crop_boxes = []
+                for record in frozen_crops:
+                    x, y = int(record["x"]), int(record["y"])
+                    width, height = int(record["width"]), int(record["height"])
+                    if width != self.crop_size or height != self.crop_size:
+                        raise ManifestPreflightError(
+                            f"training crop must be {self.crop_size}x{self.crop_size}: {record}"
+                        )
+                    if x + width > img.shape[2] or y + height > img.shape[1]:
+                        raise ManifestPreflightError(f"frozen training crop lies outside {path}: {record}")
+                    crop_boxes.append([x, y, x + width, y + height])
             for idx, crop_box in enumerate(crop_boxes):
                 x1, y1, x2, y2 = crop_box
                 img_c = img[..., y1:y2, x1:x2].transpose(1, 2, 0)
                 mask_c = mask[..., y1:y2, x1:x2].transpose(1, 2, 0)
 
+                synthetic_instance_id = None
+                synthetic_event_index = None
+                # Always execute the historical Compose exactly once.  During
+                # warm-up (epochs 0--1), non-selected attempts, and rejected
+                # proposals, its output is returned untouched, so ResiMix is
+                # not an accidental change to the natural augmentation path.
                 res = self.transform(image=img_c, mask=mask_c)
                 img_c, mask_c = list(res.values())
+                if self.resimix_enabled and self._resimix_augmentor.enabled_for_epoch(self._resimix_epoch):
+                    raw_mask_c = mask_c.detach().cpu().numpy() if torch.is_tensor(mask_c) else np.asarray(mask_c)
+                    if raw_mask_c.ndim != 3 or raw_mask_c.shape[-1] != 3:
+                        raise ValueError("ResiMix requires instance/type/static-coverage mask channels")
+                    augmentation = self._resimix_augmentor.augment(
+                        self._resimix_restore_rgb(img_c),
+                        raw_mask_c[..., 0],
+                        raw_mask_c[..., 1],
+                        raw_mask_c[..., 2],
+                        epoch=self._resimix_epoch,
+                        sample_key=f"{_path_stem(path)}:{idx}:{x1}:{y1}",
+                    )
+                    synthetic_instance_id = augmentation.synthetic_instance_id
+                    synthetic_event_index = augmentation.event_index
+                    if synthetic_instance_id is not None:
+                        raw_mask_c = np.stack(
+                            [augmentation.instance_map, augmentation.type_map, augmentation.coverage_map], axis=-1
+                        )
+                        res = self._resimix_post_transform(image=augmentation.image, mask=raw_mask_c)
+                        img_c, mask_c = list(res.values())
 
                 ori_shape = mask_c.shape[:2]
                 inst_map, type_map = mask_c[..., 0], mask_c[..., 1]
+                synthetic_medoid_xy = None
+                if synthetic_instance_id is not None:
+                    inst_np = inst_map.detach().cpu().numpy() if torch.is_tensor(inst_map) else np.asarray(inst_map)
+                    synthetic_mask = inst_np == int(synthetic_instance_id)
+                    if not synthetic_mask.any():
+                        raise RuntimeError("synthetic instance disappeared after ResiMix post-transform")
+                    medoid_y, medoid_x = mask_medoid(synthetic_mask)
+                    synthetic_medoid_xy = np.asarray([medoid_x, medoid_y], dtype=np.float32)
                 unique_pids = np.unique(inst_map)[1:]  # remove zero
 
                 cell_num = len(unique_pids)
@@ -248,6 +602,27 @@ class MONUSEG(Dataset):
                     pos_inst_ids = inst_ids_np[pos_mask_np]
                     neg_coords = coords_np[~pos_mask_np]
                     preserve_count = 0
+
+                    # A successful synthetic transplant is deliberately an
+                    # uncovered residual positive.  De-duplicate only natural
+                    # residual H-peak prompts within six pixels, then retain
+                    # the synthetic medoid before any preserve prompts.
+                    if synthetic_medoid_xy is not None:
+                        if len(pos_coords):
+                            distances = np.linalg.norm(pos_coords - synthetic_medoid_xy[None, :], axis=1)
+                            keep_natural = distances > 6.0
+                            pos_coords = pos_coords[keep_natural]
+                            pos_inst_ids = pos_inst_ids[keep_natural]
+                        pos_coords = np.concatenate(
+                            [pos_coords, synthetic_medoid_xy.reshape(1, 2)], axis=0
+                        ).astype(np.float32, copy=False)
+                        pos_inst_ids = np.concatenate(
+                            [pos_inst_ids, np.asarray([synthetic_instance_id], dtype=np.int32)], axis=0
+                        )
+                        pos_weights = np.full(
+                            len(pos_coords), 1.0 / max(1, len(pos_coords)), dtype=np.float32
+                        )
+                        self._resimix_augmentor.mark_prompt_added(synthetic_event_index)
 
                     if (self.pms_baseline_prompts
                             and self.pms_enabled
@@ -346,7 +721,7 @@ class MONUSEG(Dataset):
             binary_tensor = (inst_map_all).to(torch.uint8)
             binary_mask = torch.any(binary_tensor, dim=0).to(torch.uint8)
             
-            return img.to(torch.float32),inst_map, type_map.squeeze(0),prompt_points_all.squeeze(1), prompt_labels_all, binary_mask ,torch.as_tensor(ori_shape),index,path.split('.')[0]
+            return img.to(torch.float32),inst_map, type_map.squeeze(0),prompt_points_all.squeeze(1), prompt_labels_all, binary_mask ,torch.as_tensor(ori_shape),index,output_name
 
 def load_maskfile(mask_path: str):
     inst_map = sio.loadmat(mask_path)['inst_map']

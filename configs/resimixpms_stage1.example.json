@@ -1,0 +1,37 @@
+{
+  "canonical_sha": "2a1348cb7a1158a6f77aae2f92c168f9552d8068",
+  "seed": 3407,
+  "datasets": {
+    "tnbc": {
+      "data_path": "__REPLACE_TNBC_DATA_ROOT__",
+      "train_image_root": "__REPLACE_TNBC_TRAIN_IMAGES_ROOT__",
+      "train_label_root": "__REPLACE_TNBC_TRAIN_LABELS_ROOT__",
+      "test_image_root": "__REPLACE_TNBC_DEV_7_8_IMAGES_ROOT__",
+      "test_label_root": "__REPLACE_TNBC_DEV_7_8_LABELS_ROOT__",
+      "train_manifest": "__REPLACE_TNBC_PATIENTS_1_6_TRAIN_MANIFEST__",
+      "test_manifest": "__REPLACE_TNBC_PATIENTS_7_8_DEV_MANIFEST__",
+      "checkpoint_path": "/root/autodl-tmp/projects/CA-SAM2-HRC/deliver_ckpts/tnbc_pms_best_e156.pth",
+      "checkpoint_sha256": "44a3cb3e93051301d789e44f93769588abfa727d7a174b0270f55305ef023781",
+      "sam_config": "sam2_hiera_l",
+      "overlap": 32
+    },
+    "monuseg_lite": {
+      "data_path": "__REPLACE_MONUSEG_DATA_ROOT__",
+      "train_image_root": "__REPLACE_MONUSEG_TRAIN_IMAGES_ROOT__",
+      "train_label_root": "__REPLACE_MONUSEG_TRAIN_LABELS_ROOT__",
+      "test_image_root": "__REPLACE_MONUSEG_TRAIN_IMAGES_ROOT__",
+      "test_label_root": "__REPLACE_MONUSEG_TRAIN_LABELS_ROOT__",
+      "checkpoint_path": "/root/autodl-tmp/projects/CA-SAM2-HRC/deliver_ckpts/monuseg_pms_best_pq.pth",
+      "checkpoint_sha256": "6616c24626a162580d79aa7035d0b6c1a4ae6240a6c2f4599960dd4efac95db1",
+      "sam_config": "sam2_hiera_l",
+      "overlap": 92,
+      "frozen_bundle": "/root/autodl-tmp/projects/StainPMS-ICASSP2026/.setpms/logs/setpms/stage1_dual_dev/20260714_172429_6a40ce194788",
+      "frozen_protocol": {
+        "train_images": "monuseg_lite_manifest.json#/__REPLACE_TRAIN_IMAGE_LIST_POINTER__",
+        "development_images": "monuseg_lite_manifest.json#/__REPLACE_6_IMAGE_HOLDOUT_POINTER__",
+        "train_crops": "monuseg_lite_manifest.json#/__REPLACE_TRAIN_CROP_POINTER__",
+        "evaluation_patches": "monuseg_lite_patches.json#/__REPLACE_12_PATCH_POINTER__"
+      }
+    }
+  }
+}

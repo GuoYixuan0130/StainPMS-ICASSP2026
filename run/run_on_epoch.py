@@ -1,3 +1,4 @@
+import csv
 import json
 import math
 import os
@@ -163,25 +164,54 @@ def _accumulate_coverage(prev_map, new_map, overlap_thr=0.5):
 
 
 def _append_metric_scores(inst_map, pred_map, score_lists):
-    if (
-        len(np.unique(inst_map)) == 1
-        or len(pred_map) == 1
-        or len(pred_map) == 0
-        or len(np.unique(inst_map)) == 0
-        or len(np.unique(pred_map)) == 1
-    ):
-        return
+    # Formal ResiMix overall metrics are the mean over *every* admitted
+    # Full-Dev image/patch.  The historical code skipped empty predictions,
+    # which could make the reported aggregate disagree with its per-item CSV.
+    row = _per_image_metric_row("aggregate", inst_map, pred_map)
+    for metric in ("dq", "sq", "pq", "dice2", "dice1", "aji_p", "aji"):
+        score_lists[metric].append(float(row[metric]))
 
-    gt = remap_label(inst_map)
-    pred = remap_label(pred_map)
-    [dq_tmp, sq_tmp, pq_tmp], _ = get_fast_pq(gt, pred)
-    score_lists["dq"].append(dq_tmp)
-    score_lists["sq"].append(sq_tmp)
-    score_lists["pq"].append(pq_tmp)
-    score_lists["dice2"].append(get_fast_dice_2(gt, pred))
-    score_lists["dice1"].append(get_dice_1(gt, pred))
-    score_lists["aji_p"].append(get_fast_aji_plus(gt, pred))
-    score_lists["aji"].append(get_fast_aji(gt, pred))
+
+def _per_image_metric_row(image_name, inst_map, pred_map):
+    """Return the formal all-item, inclusive-IoU metric row."""
+    gt = remap_label(np.asarray(inst_map).astype(np.int32))
+    pred = remap_label(np.asarray(pred_map).astype(np.int32))
+    gt_count = int(np.unique(gt).size - 1)
+    pred_count = int(np.unique(pred).size - 1)
+    if gt_count == 0 and pred_count == 0:
+        return {
+            "image": str(image_name), "dice1": 1.0, "dice2": 1.0,
+            "aji": 1.0, "aji_p": 1.0, "dq": 1.0, "sq": 1.0, "pq": 1.0,
+            "tp": 0, "fp": 0, "fn": 0,
+        }
+    if gt_count == 0 or pred_count == 0:
+        return {
+            "image": str(image_name), "dice1": 0.0, "dice2": 0.0,
+            "aji": 0.0, "aji_p": 0.0, "dq": 0.0, "sq": 0.0, "pq": 0.0,
+            "tp": 0, "fp": pred_count, "fn": gt_count,
+        }
+    (dq, sq, pq), pairing = get_fast_pq(gt, pred, match_iou=0.5)
+    _, _, unpaired_true, unpaired_pred = pairing
+    return {
+        "image": str(image_name),
+        "dice1": float(get_dice_1(gt, pred)),
+        "dice2": float(get_fast_dice_2(gt, pred)),
+        "aji": float(get_fast_aji(gt, pred)),
+        "aji_p": float(get_fast_aji_plus(gt, pred)),
+        "dq": float(dq), "sq": float(sq), "pq": float(pq),
+        "tp": int(len(pairing[0])), "fp": int(len(unpaired_pred)), "fn": int(len(unpaired_true)),
+    }
+
+
+def _write_per_image_metrics(path, rows):
+    if not path:
+        return
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    fields = ["image", "dice1", "dice2", "aji", "aji_p", "dq", "sq", "pq", "tp", "fp", "fn"]
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def _mean_metric_tuple(score_lists):
@@ -691,6 +721,7 @@ def validation_on_epoch(
         "dice2": [],
         "dice1": [],
     }
+    per_image_rows = []
     margin = 7
 
     with tqdm(total=len(val_loader), desc="Validation round", unit="batch", leave=False) as pbar:
@@ -718,6 +749,11 @@ def validation_on_epoch(
                 cfgs.overlap,
                 load,
             ).tolist()
+            dataset = getattr(val_loader, "dataset", None)
+            if dataset is not None and hasattr(dataset, "evaluation_crop_boxes"):
+                crop_boxes = dataset.evaluation_crop_boxes(
+                    _safe_image_name(name), inst_maps[0].shape, crop_boxes
+                )
 
             for crop_box in crop_boxes:
                 x1, y1, x2, y2 = crop_box
@@ -977,6 +1013,10 @@ def validation_on_epoch(
                 )
 
             _append_metric_scores(inst_maps[0], pred_inst_map, score_lists)
+            if getattr(cfgs, "per_image_metrics_path", ""):
+                per_image_rows.append(
+                    _per_image_metric_row(_safe_image_name(name), inst_maps[0], pred_inst_map)
+                )
 
             if cfgs.vis:
                 namecat = "Test_" + "_".join(str(item) for item in name) + "_"
@@ -991,6 +1031,7 @@ def validation_on_epoch(
 
             pbar.update()
 
+    _write_per_image_metrics(getattr(cfgs, "per_image_metrics_path", ""), per_image_rows)
     return _mean_metric_tuple(score_lists)
 
 
