@@ -182,7 +182,10 @@ def update_texture_memory(bundle: ModelBundle, vision_feats: list[torch.Tensor],
         return
     # This is the same replacement rule as validation_on_epoch.
     for index in range(features.size(0)):
-        bank_flat = torch.stack([entry[0].reshape(-1) for entry in bundle.texture_bank])
+        # The e156 checkpoint is loaded on CPU to protect the immutable
+        # artifact.  The canonical replacement comparison is GPU math, so
+        # transfer every persisted bank entry explicitly before stacking.
+        bank_flat = torch.stack([entry[0].to(bundle.device, non_blocking=True).reshape(-1) for entry in bundle.texture_bank])
         bank_norm = F.normalize(bank_flat, p=2, dim=1)
         similar = torch.mm(bank_norm, bank_norm.t())
         no_diag = similar.clone()
@@ -192,6 +195,7 @@ def update_texture_memory(bundle: ModelBundle, vision_feats: list[torch.Tensor],
         scores = torch.mm(bank_norm, current).squeeze()
         low = torch.argmin(scores)
         closest = torch.argmax(no_diag[low])
-        if scores[low] < no_diag[low][closest] and float(mean_iou) > float(bundle.texture_bank[int(closest)][2]) - 0.1:
+        old_iou = float(torch.as_tensor(bundle.texture_bank[int(closest)][2]).detach().cpu())
+        if scores[low] < no_diag[low][closest] and float(mean_iou) > old_iou - 0.1:
             bundle.texture_bank.pop(int(closest))
             bundle.texture_bank.append([features[index].unsqueeze(0).detach(), positions[index].unsqueeze(0).detach(), float(mean_iou), image_embed[index].reshape(-1).detach()])
