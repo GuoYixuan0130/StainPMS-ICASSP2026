@@ -290,42 +290,6 @@ def _compute_setpms_training_loss(
         ],
         dim=0,
     )
-
-
-def _per_image_metric_record(inst_map, pred_map, image_name):
-    """Metric/TP-FP-FN detail for authorised continuation artifacts only."""
-
-    gt = remap_label(inst_map)
-    pred = remap_label(pred_map)
-    gt_count = max(0, len(np.unique(gt)) - 1)
-    pred_count = max(0, len(np.unique(pred)) - 1)
-    if gt_count == 0 and pred_count == 0:
-        return {
-            "image": str(image_name), "dice": 1.0, "dice2": 1.0,
-            "aji": 1.0, "aji_plus": 1.0, "dq": 1.0, "sq": 1.0,
-            "pq": 1.0, "tp": 0, "fp": 0, "fn": 0,
-        }
-    if gt_count == 0 or pred_count == 0:
-        return {
-            "image": str(image_name), "dice": 0.0, "dice2": 0.0,
-            "aji": 0.0, "aji_plus": 0.0, "dq": 0.0, "sq": 0.0,
-            "pq": 0.0, "tp": 0, "fp": pred_count, "fn": gt_count,
-        }
-    (dq, sq, pq), (_, _, unpaired_true, unpaired_pred) = get_fast_pq(gt, pred)
-    tp = gt_count - len(unpaired_true)
-    return {
-        "image": str(image_name),
-        "dice": float(get_dice_1(gt, pred)),
-        "dice2": float(get_fast_dice_2(gt, pred)),
-        "aji": float(get_fast_aji(gt, pred)),
-        "aji_plus": float(get_fast_aji_plus(gt, pred)),
-        "dq": float(dq),
-        "sq": float(sq),
-        "pq": float(pq),
-        "tp": int(tp),
-        "fp": int(len(unpaired_pred)),
-        "fn": int(len(unpaired_true)),
-    }
     prompt_coords = gathered_coords.detach().unsqueeze(1)
     # Automatic inference prompts use the canonical positive SAM prompt label.
     prompt_labels = torch.ones(
@@ -377,6 +341,42 @@ def _per_image_metric_record(inst_map, pred_map, image_name):
     if gt_offset != int(gt_inst_masks.shape[0]) or pred_offset != total_set_prompts:
         raise ValueError("SetPMS flat mask accounting mismatch")
     return torch.stack(losses).mean()
+
+
+def _per_image_metric_record(inst_map, pred_map, image_name):
+    """Metric/TP-FP-FN detail for authorised continuation artifacts only."""
+
+    gt = remap_label(inst_map)
+    pred = remap_label(pred_map)
+    gt_count = max(0, len(np.unique(gt)) - 1)
+    pred_count = max(0, len(np.unique(pred)) - 1)
+    if gt_count == 0 and pred_count == 0:
+        return {
+            "image": str(image_name), "dice": 1.0, "dice2": 1.0,
+            "aji": 1.0, "aji_plus": 1.0, "dq": 1.0, "sq": 1.0,
+            "pq": 1.0, "tp": 0, "fp": 0, "fn": 0,
+        }
+    if gt_count == 0 or pred_count == 0:
+        return {
+            "image": str(image_name), "dice": 0.0, "dice2": 0.0,
+            "aji": 0.0, "aji_plus": 0.0, "dq": 0.0, "sq": 0.0,
+            "pq": 0.0, "tp": 0, "fp": pred_count, "fn": gt_count,
+        }
+    (dq, sq, pq), (_, _, unpaired_true, unpaired_pred) = get_fast_pq(gt, pred)
+    tp = gt_count - len(unpaired_true)
+    return {
+        "image": str(image_name),
+        "dice": float(get_dice_1(gt, pred)),
+        "dice2": float(get_fast_dice_2(gt, pred)),
+        "aji": float(get_fast_aji(gt, pred)),
+        "aji_plus": float(get_fast_aji_plus(gt, pred)),
+        "dq": float(dq),
+        "sq": float(sq),
+        "pq": float(pq),
+        "tp": int(tp),
+        "fp": int(len(unpaired_pred)),
+        "fn": int(len(unpaired_true)),
+    }
 
 
 def train_on_epoch(
