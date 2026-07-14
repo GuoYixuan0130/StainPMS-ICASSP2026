@@ -23,6 +23,12 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+# ``python tools/run_setpms_stage1.py`` otherwise places only ``tools/`` on
+# sys.path.  Make the repository root explicit before importing project code.
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+if str(REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPOSITORY_ROOT))
+
 import numpy as np
 from scipy.io import loadmat
 from skimage import io
