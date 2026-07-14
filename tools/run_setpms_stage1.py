@@ -605,6 +605,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tnbc-checkpoint", default="deliver_ckpts/tnbc_pms_best_e156.pth")
     parser.add_argument("--monuseg-checkpoint", default="deliver_ckpts/monuseg_pms_best_pq.pth")
     parser.add_argument("--artifact-root", default="")
+    parser.add_argument("--resume-artifact-root", default="")
     parser.add_argument("--skip-unit-tests", action="store_true")
     return parser.parse_args()
 
@@ -620,14 +621,22 @@ def main() -> None:
     if dirty:
         raise RuntimeError(f"Refusing formal run with a dirty SetPMS worktree:\n{dirty}")
 
+    if options.artifact_root and options.resume_artifact_root:
+        raise ValueError("Use either --artifact-root or --resume-artifact-root, not both")
     head = _git(root, "rev-parse", "HEAD")
-    default_artifact = root / "logs" / "setpms" / "stage1_dual_dev" / (
-        datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + head[:12]
-    )
-    artifact_root = Path(options.artifact_root).resolve() if options.artifact_root else default_artifact
-    if artifact_root.exists():
-        raise FileExistsError(f"Artifact directory already exists: {artifact_root}")
-    artifact_root.mkdir(parents=True)
+    resuming = bool(options.resume_artifact_root)
+    if resuming:
+        artifact_root = Path(options.resume_artifact_root).resolve()
+        if not artifact_root.is_dir():
+            raise FileNotFoundError(f"Interrupted artifact directory is absent: {artifact_root}")
+    else:
+        default_artifact = root / "logs" / "setpms" / "stage1_dual_dev" / (
+            datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + head[:12]
+        )
+        artifact_root = Path(options.artifact_root).resolve() if options.artifact_root else default_artifact
+        if artifact_root.exists():
+            raise FileExistsError(f"Artifact directory already exists: {artifact_root}")
+        artifact_root.mkdir(parents=True)
 
     tnbc_data = (root / options.tnbc_data).resolve()
     monuseg_data = (root / options.monuseg_data).resolve()
@@ -645,112 +654,147 @@ def main() -> None:
 
     tnbc_manifest_path = artifact_root / "tnbc_data_manifest.json"
     monu_manifest_path = artifact_root / "monuseg_lite_manifest.json"
-    tnbc_manifest = _make_tnbc_manifest(tnbc_data, tnbc_manifest_path)
-    monu_manifest = _make_monuseg_lite_manifest(monuseg_data, monu_manifest_path)
     patch_manifest_path = artifact_root / "monuseg_lite_patches.json"
-    _json_dump(patch_manifest_path, {"patches": monu_manifest["patches"]})
+    if resuming:
+        for required in (
+            tnbc_manifest_path,
+            monu_manifest_path,
+            patch_manifest_path,
+            artifact_root / "unit_tests.txt",
+            artifact_root / "smoke_report.json",
+            artifact_root / "baseline_equivalence.json",
+        ):
+            if not required.is_file():
+                raise FileNotFoundError(
+                    f"Interrupted artifact lacks required pre-recovery gate output: {required}"
+                )
+        with tnbc_manifest_path.open(encoding="utf-8") as handle:
+            tnbc_manifest = json.load(handle)
+        with monu_manifest_path.open(encoding="utf-8") as handle:
+            monu_manifest = json.load(handle)
+        _json_dump(
+            artifact_root / "recovery_manifest.json",
+            {
+                "reason": "external data-disk exhaustion while writing TNBC Control epoch-6 checkpoint",
+                "recovery_head_sha": head,
+                "source_checkpoint": "tnbc_control/Model/continuation_epoch_4.pth",
+                "resume_completed_epoch": 4,
+                "replayed_epoch_indices": [4, 5],
+                "checkpoint_storage": "model weights plus texture-memory state at every required epoch node",
+            },
+        )
+    else:
+        tnbc_manifest = _make_tnbc_manifest(tnbc_data, tnbc_manifest_path)
+        monu_manifest = _make_monuseg_lite_manifest(monuseg_data, monu_manifest_path)
+        _json_dump(patch_manifest_path, {"patches": monu_manifest["patches"]})
 
-    git_manifest = {
-        "canonical_baseline_sha": CANONICAL_SHA,
-        "head_sha": head,
-        "branch": "research/setpms",
-        "worktree": str(root),
-        "status_short": dirty,
-    }
-    _json_dump(artifact_root / "git_manifest.json", git_manifest)
-    _json_dump(
-        artifact_root / "checkpoint_manifest.json",
-        {
-            "tnbc": {"path": str(tnbc_checkpoint), "sha256": TNBC_CHECKPOINT_SHA256},
-            "monuseg": {"path": str(monuseg_checkpoint), "sha256": MONUSEG_CHECKPOINT_SHA256},
-            "official_sam2": "/root/autodl-tmp/projects/CA-SAM2-HRC/checkpoints/sam2_hiera_large.pt",
-        },
-    )
-    _json_dump(
-        artifact_root / "training_config.json",
-        {
-            "seed": SEED,
-            "tta": False,
-            "batch_size": 1,
-            "nms": 12,
-            "inclusive_iou_threshold": 0.5,
-            "texture": True,
-            "context": True,
-            "epochs": 10,
-            "optimizer": "AdamW",
-            "lr": 1e-5,
-            "lr_min": 1e-6,
-            "weight_decay": 1e-4,
-            "scheduler": "cosine",
-            "tnbc": {"overlap": 32, "save_epochs": [0, 2, 4, 6, 8, 10], "eval_epochs": [0, 2, 4, 6, 8, 10]},
-            "monuseg_lite": {"overlap": 92, "save_epochs": [0, 2, 4, 5, 6, 8, 10], "eval_epochs": [0, 5, 10], "max_train_crops_per_image": 4},
-            "prohibited": [
-                "TNBC patients 9-11",
-                "MoNuSeg official test",
-                "TTA",
-                "coverage refresh",
-                "dynamic PMS mining",
-                "pseudo prompts",
-                "second seed",
-                "inference modules",
-            ],
-        },
-    )
-    _json_dump(
-        artifact_root / "setpms_formula.json",
-        {
-            "K": "min(64, max(16, 2N)); N=0 keeps top-16",
-            "cost": "(1-soft_iou) + 0.25*clamp(point_distance/crop_diagonal,0,1)",
-            "uot": {"epsilon": 0.10, "tau": 1.0, "iterations": 20, "transport_detached": True},
-            "gate": "sigmoid((IoU-0.5)/0.05)",
-            "loss": "0.5*(1-soft_PQ)+0.5*(1-soft_AJI)+0.1*transport_cost+0.1*duplicate",
-            "lambda_set": "0.0 at epoch 0; 0.05 at epoch 1; 0.1 from epoch 2",
-            "anchor": "1e-3 * mean((theta-theta0)^2)/(mean(theta0^2)+eps)",
-        },
-    )
-    _write_environment(root, artifact_root / "environment.txt")
+        git_manifest = {
+            "canonical_baseline_sha": CANONICAL_SHA,
+            "head_sha": head,
+            "branch": "research/setpms",
+            "worktree": str(root),
+            "status_short": dirty,
+        }
+        _json_dump(artifact_root / "git_manifest.json", git_manifest)
+        _json_dump(
+            artifact_root / "checkpoint_manifest.json",
+            {
+                "tnbc": {"path": str(tnbc_checkpoint), "sha256": TNBC_CHECKPOINT_SHA256},
+                "monuseg": {"path": str(monuseg_checkpoint), "sha256": MONUSEG_CHECKPOINT_SHA256},
+                "official_sam2": "/root/autodl-tmp/projects/CA-SAM2-HRC/checkpoints/sam2_hiera_large.pt",
+            },
+        )
+        _json_dump(
+            artifact_root / "training_config.json",
+            {
+                "seed": SEED,
+                "tta": False,
+                "batch_size": 1,
+                "nms": 12,
+                "inclusive_iou_threshold": 0.5,
+                "texture": True,
+                "context": True,
+                "epochs": 10,
+                "optimizer": "AdamW",
+                "lr": 1e-5,
+                "lr_min": 1e-6,
+                "weight_decay": 1e-4,
+                "scheduler": "cosine",
+                "checkpoint_storage": "model weights plus texture-memory state at every required epoch node",
+                "tnbc": {"overlap": 32, "save_epochs": [0, 2, 4, 6, 8, 10], "eval_epochs": [0, 2, 4, 6, 8, 10]},
+                "monuseg_lite": {"overlap": 92, "save_epochs": [0, 2, 4, 5, 6, 8, 10], "eval_epochs": [0, 5, 10], "max_train_crops_per_image": 4},
+                "prohibited": [
+                    "TNBC patients 9-11",
+                    "MoNuSeg official test",
+                    "TTA",
+                    "coverage refresh",
+                    "dynamic PMS mining",
+                    "pseudo prompts",
+                    "second seed",
+                    "inference modules",
+                ],
+            },
+        )
+        _json_dump(
+            artifact_root / "setpms_formula.json",
+            {
+                "K": "min(64, max(16, 2N)); N=0 keeps top-16",
+                "cost": "(1-soft_iou) + 0.25*clamp(point_distance/crop_diagonal,0,1)",
+                "uot": {"epsilon": 0.10, "tau": 1.0, "iterations": 20, "transport_detached": True},
+                "gate": "sigmoid((IoU-0.5)/0.05)",
+                "loss": "0.5*(1-soft_PQ)+0.5*(1-soft_AJI)+0.1*transport_cost+0.1*duplicate",
+                "lambda_set": "0.0 at epoch 0; 0.05 at epoch 1; 0.1 from epoch 2",
+                "anchor": "1e-3 * mean((theta-theta0)^2)/(mean(theta0^2)+eps)",
+            },
+        )
+        _write_environment(root, artifact_root / "environment.txt")
 
     unit_output = artifact_root / "unit_tests.txt"
-    if options.skip_unit_tests:
-        unit_output.write_text("SKIPPED BY EXPLICIT --skip-unit-tests\n", encoding="utf-8")
+    if resuming:
+        if "OK" not in unit_output.read_text(encoding="utf-8"):
+            raise RuntimeError("Interrupted artifact has no passing SetPMS unit-test record")
     else:
-        _run(
-            root,
-            [
-                sys.executable,
-                "-m",
-                "unittest",
-                "discover",
-                "-s",
-                "tests",
-                "-p",
-                "test_setpms_loss.py",
-                "-v",
-            ],
-            unit_output,
-        )
+        if options.skip_unit_tests:
+            unit_output.write_text("SKIPPED BY EXPLICIT --skip-unit-tests\n", encoding="utf-8")
+        else:
+            _run(
+                root,
+                [
+                    sys.executable,
+                    "-m",
+                    "unittest",
+                    "discover",
+                    "-s",
+                    "tests",
+                    "-p",
+                    "test_setpms_loss.py",
+                    "-v",
+                ],
+                unit_output,
+            )
 
     runtime = {}
-    smoke_dir = artifact_root / "smoke"
-    smoke_metrics = smoke_dir / "metrics"
-    smoke_command = _base_command(
-        sys.executable,
-        tnbc_data,
-        tnbc_checkpoint,
-        tnbc_manifest_path,
-        tnbc_manifest_path,
-        smoke_dir,
-        smoke_metrics,
-        "tnbc_setpms_smoke",
-        32,
-        "",
-        "",
-        setpms=True,
-    )
-    smoke_command.extend(["--setpms_smoke_batches", "2"])
-    runtime["smoke"] = _run(root, smoke_command, artifact_root / "commands" / "smoke.log")
-    shutil.copy2(smoke_metrics / "smoke_report.json", artifact_root / "smoke_report.json")
-    shutil.copy2(smoke_metrics / "baseline_equivalence.json", artifact_root / "baseline_equivalence.json")
+    if not resuming:
+        smoke_dir = artifact_root / "smoke"
+        smoke_metrics = smoke_dir / "metrics"
+        smoke_command = _base_command(
+            sys.executable,
+            tnbc_data,
+            tnbc_checkpoint,
+            tnbc_manifest_path,
+            tnbc_manifest_path,
+            smoke_dir,
+            smoke_metrics,
+            "tnbc_setpms_smoke",
+            32,
+            "",
+            "",
+            setpms=True,
+        )
+        smoke_command.extend(["--setpms_smoke_batches", "2"])
+        runtime["smoke"] = _run(root, smoke_command, artifact_root / "commands" / "smoke.log")
+        shutil.copy2(smoke_metrics / "smoke_report.json", artifact_root / "smoke_report.json")
+        shutil.copy2(smoke_metrics / "baseline_equivalence.json", artifact_root / "baseline_equivalence.json")
 
     def child(name: str) -> tuple[Path, Path]:
         child_root = artifact_root / name
@@ -769,7 +813,27 @@ def main() -> None:
         "--baseline_reference_pq", str(TNBC_REFERENCE_PQ),
         "--baseline_reference_tolerance", str(TNBC_REFERENCE_TOLERANCE),
     ])
-    runtime["tnbc_control"] = _run(root, tnbc_control_command, artifact_root / "commands" / "tnbc_control.log")
+    if resuming:
+        recovery_checkpoint = tnbc_control_dir / "Model" / "continuation_epoch_4.pth"
+        if not recovery_checkpoint.is_file():
+            raise FileNotFoundError(
+                "TNBC Control recovery requires the completed epoch-4 full-state checkpoint: "
+                f"{recovery_checkpoint}"
+            )
+        tnbc_control_command.extend([
+            "--continuation_resume_checkpoint", str(recovery_checkpoint),
+        ])
+        runtime["tnbc_control_recovery"] = _run(
+            root,
+            tnbc_control_command,
+            artifact_root / "commands" / "tnbc_control_recovery.log",
+        )
+    else:
+        runtime["tnbc_control"] = _run(
+            root,
+            tnbc_control_command,
+            artifact_root / "commands" / "tnbc_control.log",
+        )
     tnbc_control_rows = _metric_rows_for_label(_child_rows(tnbc_control_dir, "metrics.csv"), tnbc_control_label)
     _assert_required_epochs(tnbc_control_rows, {0, 2, 4, 6, 8, 10}, tnbc_control_label)
     tnbc_control_zero = _by_epoch(tnbc_control_rows, 0)

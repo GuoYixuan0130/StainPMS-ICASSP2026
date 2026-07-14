@@ -285,6 +285,15 @@ def _save_continuation_checkpoint(
     *,
     filename=None,
 ):
+    """Save an archival continuation checkpoint without duplicating AdamW state.
+
+    The required epoch nodes retain both learned model state dicts and the
+    texture-memory state used by the continuation.  Optimizer and scheduler
+    state are intentionally excluded from normal archival nodes: persisting
+    AdamW moments at every required node would exceed the authorised data-disk
+    capacity without adding an evaluation or selection capability.
+    """
+
     filename = filename or f"continuation_epoch_{int(epoch)}.pth"
     path = os.path.join(cfgs.path_helper["ckpt_path"], filename)
     torch.save(
@@ -292,13 +301,67 @@ def _save_continuation_checkpoint(
             "model": net.state_dict(),
             "model1": model1.state_dict(),
             "epoch": int(epoch),
-            "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
             "texture_memory_bank_list": texture_memory_bank_list,
+            "checkpoint_kind": "continuation_model_weights",
+            "optimizer_state_included": False,
         },
         path,
     )
     return path
+
+
+def _prune_interrupted_continuation_rows(metrics_dir, run_label, resume_epoch):
+    """Discard only stale post-resume rows from the active interrupted run."""
+
+    for filename in ("training_curves.csv", "metrics.csv", "per_image.csv"):
+        path = os.path.join(metrics_dir, filename)
+        if not os.path.isfile(path):
+            continue
+        with open(path, "r", newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            fieldnames = reader.fieldnames
+            rows = list(reader)
+        if not fieldnames:
+            continue
+        retained = [
+            row
+            for row in rows
+            if row.get("run_label") != str(run_label)
+            or int(row.get("epoch", -1)) <= int(resume_epoch)
+        ]
+        if len(retained) == len(rows):
+            continue
+        temporary = path + ".resume_tmp"
+        with open(temporary, "w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(retained)
+        os.replace(temporary, path)
+
+
+def _restore_continuation_state(path, net, model1, optimizer, scheduler, device, epochs):
+    """Restore a full-state node after an external storage interruption."""
+
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Continuation recovery checkpoint is absent: {path}")
+    checkpoint = torch.load(path, map_location=device)
+    required = {"model", "model1", "epoch", "optimizer", "scheduler"}
+    missing = sorted(required.difference(checkpoint))
+    if missing:
+        raise RuntimeError(
+            "Continuation recovery requires a full optimizer/scheduler checkpoint; "
+            f"{path} is missing {missing}"
+        )
+    completed_epoch = int(checkpoint["epoch"])
+    if completed_epoch <= 0 or completed_epoch >= int(epochs):
+        raise ValueError(
+            f"Recovery epoch {completed_epoch} must be in [1, {int(epochs) - 1}]"
+        )
+    net.load_state_dict(checkpoint["model"], strict=True)
+    model1.load_state_dict(checkpoint["model1"], strict=True)
+    optimizer.load_state_dict(checkpoint["optimizer"])
+    scheduler.load_state_dict(checkpoint["scheduler"])
+    return completed_epoch
 
 
 def _continuation_evaluate(
@@ -669,6 +732,34 @@ def main():
             "Controlled continuation is restricted to an explicit train-split holdout manifest"
         )
     best_selection_score = float("-inf")
+    resume_checkpoint = str(cfgs.continuation_resume_checkpoint or "")
+    resume_epoch = 0
+    if resume_checkpoint:
+        if smoke_batches or not controlled_continuation:
+            raise ValueError(
+                "Continuation recovery requires a non-smoke controlled continuation run"
+            )
+        resume_checkpoint = os.path.abspath(resume_checkpoint)
+        resume_epoch = _restore_continuation_state(
+            resume_checkpoint,
+            net,
+            model1,
+            optimizer,
+            scheduler,
+            device,
+            cfgs.epochs,
+        )
+        if not cfgs.metrics_output_dir or not cfgs.run_label:
+            raise ValueError("Continuation recovery requires metrics_output_dir and run_label")
+        _prune_interrupted_continuation_rows(
+            cfgs.metrics_output_dir,
+            cfgs.run_label,
+            resume_epoch,
+        )
+        print(
+            f"[continuation-resume] restored completed epoch {resume_epoch} from "
+            f"{resume_checkpoint}; continuing at epoch {resume_epoch}"
+        )
 
     settings.EPOCH = 1 if smoke_batches else cfgs.epochs
     smoke_equivalence = None
@@ -685,7 +776,7 @@ def main():
         )
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats(device)
-    if controlled_continuation:
+    if controlled_continuation and not resume_checkpoint:
         initial_texture_bank = (
             list(val_texture_bank_template)
             if val_texture_bank_template is not None
@@ -735,15 +826,9 @@ def main():
             initial_score = float(initial_metrics[2] + initial_metrics[6])
             if initial_score > best_selection_score:
                 best_selection_score = initial_score
-                _save_continuation_checkpoint(
-                    cfgs,
-                    0,
-                    net,
-                    model1,
-                    optimizer,
-                    scheduler,
-                    initial_texture_bank,
-                    filename="best_aji_pq_epoch.pth",
+                print(
+                    "[continuation-best] epoch 0 is currently selected; "
+                    "the required continuation_epoch_0.pth is the best checkpoint."
                 )
     if pms_self_bootstrap and iter_refresh_every > 0 and pms_start_epoch <= 0:
         print("[pms-self-bootstrap] generating initial coverage maps before epoch 0.")
@@ -760,7 +845,7 @@ def main():
             device,
         )
 
-    for epoch in range(settings.EPOCH):
+    for epoch in range(resume_epoch, settings.EPOCH):
         if hasattr(train_dataset, "set_epoch"):
             train_dataset.set_epoch(epoch)
         deferred_c0 = (
@@ -958,15 +1043,9 @@ def main():
             selection_score = float(seg_aji + seg_pq)
             if selection_score > best_selection_score:
                 best_selection_score = selection_score
-                _save_continuation_checkpoint(
-                    cfgs,
-                    completed_epoch,
-                    net,
-                    model1,
-                    optimizer,
-                    scheduler,
-                    val_texture_bank,
-                    filename="best_aji_pq_epoch.pth",
+                print(
+                    f"[continuation-best] epoch {completed_epoch} is currently selected; "
+                    f"the required continuation_epoch_{completed_epoch}.pth is the best checkpoint."
                 )
         elif seg_pq > best_pq:
             best_pq = seg_pq

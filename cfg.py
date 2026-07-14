@@ -97,6 +97,7 @@ def parse_args():
     parser.add_argument("--train_crop_manifest", default="", type=str)
     parser.add_argument("--continuation_save_epochs", default="", type=str)
     parser.add_argument("--continuation_eval_epochs", default="", type=str)
+    parser.add_argument("--continuation_resume_checkpoint", default="", type=str)
     parser.add_argument("--run_dir", default="", type=str)
     parser.add_argument("--metrics_output_dir", default="", type=str)
     parser.add_argument("--run_label", default="", type=str)
