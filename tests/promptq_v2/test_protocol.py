@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from promptq_v2.model import ModelBundle, assert_frozen_without_grads, configure_quality_only
+from promptq_v2.model import ModelBundle, assert_frozen_without_grads, configure_quality_only, update_texture_memory
 from promptq_v2.assembly import combine_mask, crop_with_overlap
 from promptq_v2.protocol import (
     INCLUSIVE_IOU_THRESHOLD,
@@ -25,6 +25,11 @@ class _Point(torch.nn.Module):
         super().__init__()
         self.backbone = torch.nn.Linear(2, 2)
         self.quality_head = torch.nn.Sequential(torch.nn.Linear(256, 256), torch.nn.ReLU(), torch.nn.Linear(256, 1))
+
+
+class _MemoryNet:
+    def _encode_new_memory(self, **kwargs):
+        return torch.ones(1, 1, 1, 1), [torch.ones(1, 1, 1, 1)]
 
 
 class PromptQV2ProtocolTests(unittest.TestCase):
@@ -85,6 +90,12 @@ class PromptQV2ProtocolTests(unittest.TestCase):
         combined = combine_mask((4, 4), torch.tensor([[2.0, 2.0]]), logits, torch.tensor([0.9]))
         self.assertEqual(combined.shape, (4, 4))
         self.assertEqual(int((combined > 0).sum()), 4)
+
+    def test_full_texture_bank_replacement_uses_one_device(self):
+        bank = [[torch.ones(1, 1, 1, 1), torch.ones(1, 1, 1, 1), 0.5, torch.ones(1)] for _ in range(64)]
+        bundle = ModelBundle(_Point(), None, _MemoryNet(), bank, torch.device("cpu"), {})
+        update_texture_memory(bundle, [torch.ones(1)], np.zeros((4, 4), dtype=np.float32), 0.7, torch.ones(1, 1), texture=True)
+        self.assertEqual(len(bundle.texture_bank), 64)
 
 
 if __name__ == "__main__":
