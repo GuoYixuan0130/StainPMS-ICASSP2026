@@ -67,7 +67,7 @@ def _scores(mode: Mode, objectness: np.ndarray, quality_logits: np.ndarray | Non
 
 
 def _reassemble(cache_path: Path, scores: np.ndarray) -> tuple[np.ndarray, dict]:
-    from run.run_on_epoch import _assemble_instance_map, mask_process_eval
+    from .assembly import assemble_instance_map, mask_process_eval
 
     with np.load(cache_path, allow_pickle=False) as cache:
         source_crop = np.asarray(cache["source_crop_id"], dtype=np.int64)
@@ -105,7 +105,7 @@ def _reassemble(cache_path: Path, scores: np.ndarray) -> tuple[np.ndarray, dict]
                 all_inds.append(mask["inds"])
                 all_records.append({"crop_id": crop_id, "edge_penalized": edge, "source_group": int(mask["inds"])})
             trace.append({"crop_id": crop_id, "winner_source_ids": [int(value) for value in selected.tolist()]})
-    prediction, selected_records = _assemble_instance_map(all_boxes, all_scores, all_masks, all_inds, shape, INCLUSIVE_IOU_THRESHOLD, all_records=all_records, return_records=True)
+    prediction, selected_records = assemble_instance_map(all_boxes, all_scores, all_masks, all_inds, shape, INCLUSIVE_IOU_THRESHOLD, all_records=all_records, return_records=True)
     return prediction.astype(np.int32), {"nms": trace, "assembly_candidates": len(all_masks), "assembly_selected": len(selected_records), "selected_records": selected_records}
 
 

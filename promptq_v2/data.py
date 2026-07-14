@@ -83,8 +83,7 @@ def normalize_image(image: np.ndarray) -> torch.Tensor:
 
 
 def crop_boxes(image_tensor: torch.Tensor, *, overlap: int = 32) -> list[tuple[int, int, int, int]]:
-    # Importing the canonical helper preserves its unclockwise traversal exactly.
-    from run.run_on_epoch import crop_with_overlap
+    from .assembly import crop_with_overlap
 
     boxes = crop_with_overlap(image_tensor, 256, 256, overlap, "unclockwise").tolist()
     return [tuple(int(value) for value in box) for box in boxes]

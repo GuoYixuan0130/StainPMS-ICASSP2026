@@ -87,7 +87,7 @@ def _decode_partitioned(bundle: ModelBundle, image_embed: torch.Tensor, high_res
 
 
 def _cache_image(bundle: ModelBundle, image_id: str, patient: int, image_tensor: torch.Tensor, out_path: Path, *, texture: bool, context: bool, filtering: bool) -> dict:
-    from run.run_on_epoch import combine_mask
+    from .assembly import combine_mask
 
     candidates: list[dict[str, Any]] = []
     crop_records: list[dict[str, Any]] = []

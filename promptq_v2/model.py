@@ -94,10 +94,10 @@ def assert_frozen_without_grads(bundle: ModelBundle) -> None:
 
 
 def _apply_context(context_bank: list[Any], feats: list[torch.Tensor], positions: list[torch.Tensor], bundle: ModelBundle, x: int, y: int) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-    from run.run_on_epoch import context_memory_attention
+    from .assembly import context_memory_attention
 
     # Canonical validation uses the supplied context bank and same 64/32/16 geometry.
-    return context_memory_attention(context_bank, feats, positions, [x], [y], bundle.sam2, [(64, 64), (32, 32), (16, 16)], 1)
+    return context_memory_attention(context_bank, feats, positions, [x], [y], bundle.sam2, 1)
 
 
 def _apply_texture(texture_bank: list[Any], feats: list[torch.Tensor], positions: list[torch.Tensor], bundle: ModelBundle) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
