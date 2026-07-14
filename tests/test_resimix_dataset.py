@@ -61,9 +61,15 @@ class DatasetIntegrationTest(unittest.TestCase):
                             annulus=annulus_mask(mask, width=4).astype(np.uint8), type_id=np.asarray(1))
         donor_csv = root / "donor_bank_manifest.csv"
         with donor_csv.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.DictWriter(handle, fieldnames=("donor_id", "category", "payload_path", "type_id"))
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=("donor_id", "category", "payload_path", "type_id", "patient_id"),
+            )
             writer.writeheader()
-            writer.writerow({"donor_id": "d0", "category": "Missed", "payload_path": "d0.npz", "type_id": "1"})
+            writer.writerow({
+                "donor_id": "d0", "category": "Missed", "payload_path": "d0.npz",
+                "type_id": "1", "patient_id": "1",
+            })
         stats = root / "host_context_statistics.json"
         stats.write_text(json.dumps({
             "context_mean": [0.0] * len(CONTEXT_FEATURE_NAMES),
