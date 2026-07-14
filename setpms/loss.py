@@ -223,8 +223,10 @@ def compute_setpms_loss(
         min=_MASS_FLOOR, max=1.0
     )
     pred_soft_masks = torch.sigmoid(mask_logits)
-    pred_flat = pred_soft_masks.reshape(prediction_count, -1)
-    gt_flat = gt_masks.reshape(gt_count, -1)
+    # Use the explicit spatial extent: ``reshape(0, -1)`` is ambiguous to
+    # PyTorch when N=0, while [0, H*W] preserves the set-matrix contract.
+    pred_flat = pred_soft_masks.reshape(prediction_count, height * width)
+    gt_flat = gt_masks.reshape(gt_count, height * width)
     pred_area = pred_flat.sum(dim=1)
     gt_area = gt_flat.sum(dim=1)
 
