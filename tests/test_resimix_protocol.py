@@ -13,7 +13,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from resimixpms.protocol import ProtocolError, derive_monuseg_lite_protocol  # noqa: E402
-from resimixpms.manifests import load_allowed_image_names, load_crop_records, validate_frozen_bundle  # noqa: E402
+from resimixpms.manifests import (  # noqa: E402
+    crop_boxes_for_shape,
+    load_allowed_image_names,
+    load_crop_plan,
+    load_crop_records,
+    validate_frozen_bundle,
+)
 
 
 class FrozenProtocolTest(unittest.TestCase):
@@ -73,6 +79,76 @@ class FrozenProtocolTest(unittest.TestCase):
             }
             with self.assertRaises(ProtocolError):
                 derive_monuseg_lite_protocol(source, selectors, root / "bad")
+
+    def test_epoch_crop_indices_are_preserved_as_a_schedule(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = root / "source"
+            bundle.mkdir()
+            names = ["train_a.tif", "train_b.tif"]
+            manifest = {
+                "train_files": names,
+                "holdout_files": [f"holdout_{index}.tif" for index in range(6)],
+                "max_train_crops_per_image": 4,
+                "crop_indices": {
+                    str(epoch): {
+                        name: ([0, 1, 2, 3] if epoch == 0 else [3, 2, 1, 0]) for name in names
+                    }
+                    for epoch in range(10)
+                },
+            }
+            patches = {
+                "patches": [
+                    {
+                        "filename": f"holdout_{index // 2}.tif",
+                        "x": (index % 2) * 256,
+                        "y": 0,
+                        "width": 256,
+                        "height": 256,
+                    }
+                    for index in range(12)
+                ]
+            }
+            for name, payload in (
+                ("monuseg_lite_manifest.json", manifest),
+                ("monuseg_lite_patches.json", patches),
+            ):
+                (bundle / name).write_text(json.dumps(payload), encoding="utf-8")
+            checksums = [
+                f"{hashlib.sha256((bundle / name).read_bytes()).hexdigest()}  {name}"
+                for name in ("monuseg_lite_manifest.json", "monuseg_lite_patches.json")
+            ]
+            (bundle / "SHA256SUMS").write_text("\n".join(checksums) + "\n", encoding="utf-8")
+
+            result = derive_monuseg_lite_protocol(
+                bundle,
+                {
+                    "train_images": "monuseg_lite_manifest.json#/train_files",
+                    "development_images": "monuseg_lite_manifest.json#/holdout_files",
+                    "train_crops": "monuseg_lite_manifest.json#/crop_indices",
+                    "evaluation_patches": "monuseg_lite_patches.json#/patches",
+                },
+                root / "derived",
+            )
+            records, schedule = load_crop_plan(
+                result["train_crop_manifest"],
+                allowed_image_names=names,
+                expected_crop_size=256,
+                expected_overlap=92,
+                expected_load="unclockwise",
+                expected_epochs=10,
+            )
+            self.assertEqual(records, [])
+            self.assertIsNotNone(schedule)
+            self.assertEqual(schedule.indices_for("train_a.tif", epoch=0), (0, 1, 2, 3))
+            self.assertEqual(schedule.indices_for("train_a.tif", epoch=1), (3, 2, 1, 0))
+            self.assertEqual(schedule.indices_for("train_a.tif", union=True), (0, 1, 2, 3))
+            grid = crop_boxes_for_shape((512, 512), 256, 92, "unclockwise")
+            self.assertEqual(
+                schedule.select_boxes("train_a.tif", grid, epoch=1),
+                [grid[3], grid[2], grid[1], grid[0]],
+            )
+            self.assertEqual(len(load_crop_records(result["eval_crop_manifest"])), 12)
 
 
 if __name__ == "__main__":

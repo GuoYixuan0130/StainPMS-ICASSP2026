@@ -26,7 +26,9 @@ from resimixpms.coverage import begin_static_coverage_generation  # noqa: E402
 from resimixpms.experiment import require_sha256, sha256_file, write_json  # noqa: E402
 from resimixpms.manifests import (  # noqa: E402
     ManifestPreflightError,
+    crop_boxes_for_shape,
     load_allowed_image_names,
+    load_crop_plan,
     load_crop_records,
     validate_manifest_patient_isolation,
 )
@@ -101,13 +103,21 @@ def _train_images(dataset: dict[str, Any], dataset_name: str):
     return records
 
 
-def _crop_map(path: str | None):
+def _crop_map(path: str | None, *, allowed_image_names=None, dataset_name: str | None = None, overlap: int | None = None):
     mapping: dict[str, list[dict[str, Any]]] = {}
     if not path:
-        return mapping
-    for record in load_crop_records(path):
+        return mapping, None
+    records, schedule = load_crop_plan(
+        path,
+        allowed_image_names=allowed_image_names,
+        expected_crop_size=256 if dataset_name == "monuseg_lite" else None,
+        expected_overlap=overlap if dataset_name == "monuseg_lite" else None,
+        expected_load="unclockwise" if dataset_name == "monuseg_lite" else None,
+        expected_epochs=10 if dataset_name == "monuseg_lite" else None,
+    )
+    for record in records:
         mapping.setdefault(Path(str(record["image_name"])).stem, []).append(record)
-    return mapping
+    return mapping, schedule
 
 
 def _main_command(spec: dict[str, Any], dataset_name: str, dataset: dict[str, Any], raw_dir: Path, run_dir: Path):
@@ -152,7 +162,12 @@ def build_coverage(spec_path: Path, dataset_name: str, artifact_dir: Path) -> Pa
 
     cache_dir = artifact_dir / "static_coverage"
     shapes = {record["stem"]: record["shape"] for record in images}
-    crop_records = _crop_map(dataset.get("train_crop_manifest"))
+    crop_records, crop_schedule = _crop_map(
+        dataset.get("train_crop_manifest"),
+        allowed_image_names=[record["name"] for record in images],
+        dataset_name=dataset_name,
+        overlap=int(dataset["overlap"]),
+    )
     provenance = {
         "canonical_sha": str(spec.get("canonical_sha", "")),
         "dataset": dataset_name,
@@ -178,6 +193,16 @@ def build_coverage(spec_path: Path, dataset_name: str, artifact_dir: Path) -> Pa
         if tuple(prediction.shape) != tuple(record["shape"]):
             raise ValueError(f"raw coverage shape mismatch for {record['stem']}")
         fixed = crop_records.get(record["stem"], [])
+        if crop_schedule is not None:
+            boxes = crop_schedule.select_boxes(
+                record["name"],
+                crop_boxes_for_shape(record["shape"], crop_schedule.crop_size, crop_schedule.overlap, crop_schedule.load),
+                union=True,
+            )
+            fixed = [
+                {"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1}
+                for x1, y1, x2, y2 in boxes
+            ]
         if fixed:
             for crop in fixed:
                 x, y = int(crop["x"]), int(crop["y"])

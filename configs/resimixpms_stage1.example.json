@@ -27,10 +27,10 @@
       "overlap": 92,
       "frozen_bundle": "/root/autodl-tmp/projects/StainPMS-ICASSP2026/.setpms/logs/setpms/stage1_dual_dev/20260714_172429_6a40ce194788",
       "frozen_protocol": {
-        "train_images": "monuseg_lite_manifest.json#/__REPLACE_TRAIN_IMAGE_LIST_POINTER__",
-        "development_images": "monuseg_lite_manifest.json#/__REPLACE_6_IMAGE_HOLDOUT_POINTER__",
-        "train_crops": "monuseg_lite_manifest.json#/__REPLACE_TRAIN_CROP_POINTER__",
-        "evaluation_patches": "monuseg_lite_patches.json#/__REPLACE_12_PATCH_POINTER__"
+        "train_images": "monuseg_lite_manifest.json#/train_files",
+        "development_images": "monuseg_lite_manifest.json#/holdout_files",
+        "train_crops": "monuseg_lite_manifest.json#/crop_indices",
+        "evaluation_patches": "monuseg_lite_patches.json#/patches"
       }
     }
   }

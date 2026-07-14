@@ -56,6 +56,12 @@ FORMAL_COMMON = {
 }
 EVALUATION_SCHEDULES = {"tnbc": (0, 2, 4, 6, 8, 10), "monuseg_lite": (0, 5, 10)}
 EXPECTED_EVALUATION_ITEMS = {"tnbc": 7, "monuseg_lite": 12}
+FORMAL_MONUSEG_SELECTORS = {
+    "train_images": "monuseg_lite_manifest.json#/train_files",
+    "development_images": "monuseg_lite_manifest.json#/holdout_files",
+    "train_crops": "monuseg_lite_manifest.json#/crop_indices",
+    "evaluation_patches": "monuseg_lite_patches.json#/patches",
+}
 
 
 def _run(command: list[str], *, stdout=None) -> None:
@@ -137,6 +143,8 @@ def _read_spec(path: Path) -> dict[str, Any]:
         raise ValueError(f"MoNuSeg-Lite frozen_bundle is fixed to {FROZEN_MONUSEG_BUNDLE}")
     if any(mono.get(key) for key in ("train_manifest", "test_manifest", "train_crop_manifest", "eval_crop_manifest")):
         raise ValueError("MoNuSeg-Lite run manifests must be derived only from the validated frozen bundle")
+    if mono["frozen_protocol"] != FORMAL_MONUSEG_SELECTORS:
+        raise ValueError("MoNuSeg-Lite frozen selectors differ from the sealed canonical manifest/patch protocol")
     if Path(mono["train_image_root"]).resolve() != Path(mono["test_image_root"]).resolve() or Path(mono["train_label_root"]).resolve() != Path(mono["test_label_root"]).resolve():
         raise ValueError("MoNuSeg-Lite development must use the admitted train roots, never an official-test root")
     return payload

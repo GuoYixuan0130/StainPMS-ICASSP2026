@@ -14,6 +14,7 @@ from stainpms.candidate import compute_b_candidates_oncrop, compute_baseline_cen
 from resimixpms.manifests import (
     ManifestPreflightError,
     load_allowed_image_names,
+    load_crop_plan,
     load_crop_records,
     validate_manifest_patient_isolation,
 )
@@ -79,15 +80,28 @@ class MONUSEG(Dataset):
         self.image_root, self.label_root = self._split_roots(self.source_split)
         self.paths = self._load_manifest_paths(self.source_split)
 
-        self._train_crop_records_by_stem = self._crop_records_by_stem(
-            str(getattr(args, "train_crop_manifest", "") or ""),
-            self.paths if self.source_split == "train" else None,
-        )
+        train_crop_manifest = str(getattr(args, "train_crop_manifest", "") or "")
+        self._train_crop_schedule = None
+        if train_crop_manifest:
+            train_crop_records, self._train_crop_schedule = load_crop_plan(
+                train_crop_manifest,
+                allowed_image_names=self.paths if self.source_split == "train" else None,
+                expected_crop_size=self.crop_size if self.data_identity == "monuseg_lite" else None,
+                expected_overlap=self.overlap if self.data_identity == "monuseg_lite" else None,
+                expected_load=self.load if self.data_identity == "monuseg_lite" else None,
+                expected_epochs=10 if self.data_identity == "monuseg_lite" else None,
+            )
+            self._train_crop_records_by_stem = self._records_by_stem(
+                train_crop_records, self.paths if self.source_split == "train" else None
+            )
+        else:
+            self._train_crop_records_by_stem = defaultdict(list)
         self._eval_crop_records_by_stem = self._crop_records_by_stem(
             str(getattr(args, "eval_crop_manifest", "") or ""),
             self.paths if self.source_split == "test" else None,
         )
         self._active_eval_crop_records = None
+        self._active_eval_crop_schedule = None
         self._test_patch_records = []
         if mode == "test" and self.source_split == "test" and self._eval_crop_records_by_stem:
             by_stem = {_path_stem(path): path for path in self.paths}
@@ -107,6 +121,7 @@ class MONUSEG(Dataset):
             # manifest-admitted training files and, for MoNuSeg-Lite, only the
             # frozen training crops.
             self._active_eval_crop_records = self._train_crop_records_by_stem
+            self._active_eval_crop_schedule = self._train_crop_schedule
 
         self.num_mask_per_img = 150
         self.num_classes = 1
@@ -269,7 +284,9 @@ class MONUSEG(Dataset):
     def _crop_records_by_stem(self, manifest, allowed_paths):
         if not manifest:
             return defaultdict(list)
-        records = load_crop_records(manifest)
+        return self._records_by_stem(load_crop_records(manifest), allowed_paths)
+
+    def _records_by_stem(self, records, allowed_paths):
         result = defaultdict(list)
         allowed_stems = {_path_stem(path) for path in allowed_paths} if allowed_paths else None
         for record in records:
@@ -326,9 +343,8 @@ class MONUSEG(Dataset):
         self.image_root, self.label_root = self._split_roots("train")
         self.paths = self._load_manifest_paths("train")
         self._test_patch_records = []
-        self._active_eval_crop_records = self._crop_records_by_stem(
-            str(getattr(self._runtime_args, "train_crop_manifest", "") or ""), self.paths
-        )
+        self._active_eval_crop_records = self._train_crop_records_by_stem
+        self._active_eval_crop_schedule = self._train_crop_schedule
 
     def _resimix_restore_rgb(self, normalized_image):
         """Invert the formal terminal Normalize solely for a successful transplant.
@@ -348,6 +364,10 @@ class MONUSEG(Dataset):
         return np.rint(np.clip(rgb * self._resimix_normalize_scale, 0.0, self._resimix_normalize_scale)).astype(np.uint8)
 
     def evaluation_crop_boxes(self, image_name, image_shape, default_boxes):
+        if self._active_eval_crop_schedule is not None:
+            return self._active_eval_crop_schedule.select_boxes(
+                image_name, default_boxes, union=True
+            )
         records = self._active_eval_crop_records
         if not records:
             return default_boxes
@@ -460,7 +480,11 @@ class MONUSEG(Dataset):
                 self.load,
             ).tolist()
             frozen_crops = self._train_crop_records_by_stem.get(_path_stem(path), [])
-            if frozen_crops:
+            if self._train_crop_schedule is not None:
+                crop_boxes = self._train_crop_schedule.select_boxes(
+                    path, crop_boxes, epoch=self._resimix_epoch
+                )
+            elif frozen_crops:
                 crop_boxes = []
                 for record in frozen_crops:
                     x, y = int(record["x"]), int(record["y"])

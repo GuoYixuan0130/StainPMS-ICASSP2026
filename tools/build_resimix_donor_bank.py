@@ -20,7 +20,9 @@ from resimixpms.donor import TrainingSample, audit_training_samples, donor_manif
 from resimixpms.experiment import sha256_file, write_json  # noqa: E402
 from resimixpms.manifests import (  # noqa: E402
     ManifestPreflightError,
+    crop_boxes_for_shape,
     load_allowed_image_names,
+    load_crop_plan,
     load_crop_records,
     validate_manifest_patient_isolation,
 )
@@ -104,8 +106,17 @@ def build_donor_bank(options):
             for row in records
         }
     crop_records_by_stem: dict[str, list[dict[str, Any]]] = {}
+    crop_schedule = None
     if options.train_crop_manifest:
-        for record in load_crop_records(options.train_crop_manifest):
+        crop_records, crop_schedule = load_crop_plan(
+            options.train_crop_manifest,
+            allowed_image_names=names,
+            expected_crop_size=256 if options.dataset == "monuseg_lite" else None,
+            expected_overlap=options.overlap if options.dataset == "monuseg_lite" else None,
+            expected_load="unclockwise" if options.dataset == "monuseg_lite" else None,
+            expected_epochs=10 if options.dataset == "monuseg_lite" else None,
+        )
+        for record in crop_records:
             crop_records_by_stem.setdefault(Path(str(record["image_name"])).stem, []).append(record)
 
     cache_manifest = Path(options.coverage_manifest)
@@ -131,6 +142,16 @@ def build_donor_bank(options):
         if instance_map.shape != rgb.shape[:2] or coverage.shape != instance_map.shape:
             raise ValueError(f"image/GT/static-coverage shape mismatch for {relative}")
         crop_records = crop_records_by_stem.get(stem, [])
+        if crop_schedule is not None:
+            boxes = crop_schedule.select_boxes(
+                str(relative),
+                crop_boxes_for_shape(instance_map.shape, crop_schedule.crop_size, crop_schedule.overlap, crop_schedule.load),
+                union=True,
+            )
+            crop_records = [
+                {"x": x1, "y": y1, "width": x2 - x1, "height": y2 - y1}
+                for x1, y1, x2, y2 in boxes
+            ]
         audit_map = instance_map.copy()
         if options.dataset == "monuseg_lite":
             if not crop_records:

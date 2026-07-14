@@ -23,8 +23,9 @@ REQUIRED_FROZEN_FILES = (
     "SHA256SUMS",
 )
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
-_IMAGE_NAME_FIELDS = ("image_name", "image", "name")
+_IMAGE_NAME_FIELDS = ("image_name", "image", "name", "filename")
 _PATIENT_ID_FIELDS = ("patient_id", "patient", "patient_number")
+FROZEN_CROP_INDEX_SCHEDULE_FORMAT = "resimix_frozen_crop_indices_v1"
 
 
 class ManifestPreflightError(RuntimeError):
@@ -46,6 +47,154 @@ class FrozenBundle:
             "file_sha256": dict(self.file_sha256),
             "checksum_file_sha256": self.checksum_file_sha256,
         }
+
+
+@dataclass(frozen=True)
+class FrozenCropIndexSchedule:
+    """An immutable per-epoch selection over the loader's existing crop grid.
+
+    The canonical MoNuSeg-Lite artifact stores four crop *indices* per image
+    for each of the ten registered epochs.  It does not store coordinates, so
+    callers must apply these indices to the already-fixed crop grid rather
+    than inventing a coordinate list or collapsing the epoch schedule.
+    """
+
+    path: Path
+    crop_size: int
+    overlap: int
+    load: str
+    max_crops_per_image: int
+    epoch_indices: Mapping[int, Mapping[str, tuple[int, ...]]]
+
+    @property
+    def epochs(self) -> tuple[int, ...]:
+        return tuple(sorted(self.epoch_indices))
+
+    @property
+    def total_assignments(self) -> int:
+        return sum(
+            len(indices)
+            for image_map in self.epoch_indices.values()
+            for indices in image_map.values()
+        )
+
+    def indices_for(self, image_name: str, *, epoch: int | None = None, union: bool = False) -> tuple[int, ...]:
+        name = _schedule_image_name(image_name)
+        if union:
+            values = set()
+            for image_map in self.epoch_indices.values():
+                try:
+                    values.update(image_map[name])
+                except KeyError as exc:
+                    raise ManifestPreflightError(
+                        f"frozen crop schedule has no entry for {image_name}"
+                    ) from exc
+            return tuple(sorted(values))
+        if epoch is None:
+            raise ManifestPreflightError("frozen crop schedule requires an explicit epoch")
+        try:
+            return self.epoch_indices[int(epoch)][name]
+        except KeyError as exc:
+            raise ManifestPreflightError(
+                f"frozen crop schedule has no entry for epoch {epoch}, image {image_name}"
+            ) from exc
+
+    def select_boxes(
+        self,
+        image_name: str,
+        default_boxes: Sequence[Sequence[int]],
+        *,
+        epoch: int | None = None,
+        union: bool = False,
+    ) -> list[list[int]]:
+        selected = []
+        for index in self.indices_for(image_name, epoch=epoch, union=union):
+            if index < 0 or index >= len(default_boxes):
+                raise ManifestPreflightError(
+                    f"frozen crop index {index} is outside the existing grid for {image_name}"
+                )
+            box = [int(value) for value in default_boxes[index]]
+            if len(box) != 4 or box[2] - box[0] != self.crop_size or box[3] - box[1] != self.crop_size:
+                raise ManifestPreflightError(
+                    f"frozen crop index {index} does not resolve to a {self.crop_size}x{self.crop_size} crop for {image_name}"
+                )
+            selected.append(box)
+        if not selected:
+            raise ManifestPreflightError(f"frozen crop schedule selected no crops for {image_name}")
+        return selected
+
+
+def _schedule_image_name(value: str) -> str:
+    raw = str(value).strip().replace("\\", "/")
+    pure = PurePosixPath(raw)
+    if not raw or pure.is_absolute() or ".." in pure.parts:
+        raise ManifestPreflightError(f"unsafe frozen crop schedule image name: {value}")
+    return str(pure)
+
+
+def crop_boxes_for_shape(
+    shape: Sequence[int], crop_size: int, overlap: int, load: str
+) -> list[list[int]]:
+    """Reproduce the fixed loader grid without reading pixels or selecting crops."""
+
+    if len(shape) < 2:
+        raise ManifestPreflightError("crop grid requires image height and width")
+    height, width = int(shape[0]), int(shape[1])
+    if height < crop_size or width < crop_size:
+        raise ManifestPreflightError("image is smaller than the frozen crop size")
+    if crop_size != 256 or overlap < 0 or overlap >= crop_size:
+        raise ManifestPreflightError("frozen crop grid geometry is invalid")
+    stride = 256 - overlap
+
+    def start_points(size: int) -> list[int]:
+        points = [0]
+        counter = 1
+        while True:
+            point = stride * counter
+            if point + crop_size >= size:
+                if crop_size != size:
+                    points.append(size - crop_size)
+                break
+            points.append(point)
+            counter += 1
+        return points
+
+    x_points, y_points = start_points(width), start_points(height)
+    boxes: list[list[int]] = []
+    if load == "sequence":
+        for x in x_points:
+            for y in y_points:
+                boxes.append([x, y, min(x + crop_size, width), min(y + crop_size, height)])
+    elif load == "unsequence":
+        forward = True
+        for x in x_points:
+            for y in y_points if forward else reversed(y_points):
+                boxes.append([x, y, min(x + crop_size, width), min(y + crop_size, height)])
+            forward = not forward
+    elif load in ("clockwise", "unclockwise"):
+        top, bottom, left, right = 0, len(y_points) - 1, 0, len(x_points) - 1
+        while top <= bottom or left <= right:
+            if top <= bottom:
+                for y in range(left, right + 1):
+                    boxes.append([x_points[top], y_points[y], min(x_points[top] + crop_size, width), min(y_points[y] + crop_size, height)])
+                top += 1
+            if left <= right:
+                for x in range(top, bottom + 1):
+                    boxes.append([x_points[x], y_points[right], min(x_points[x] + crop_size, width), min(y_points[right] + crop_size, height)])
+                right -= 1
+            if top <= bottom:
+                for y in reversed(range(left, right + 1)):
+                    boxes.append([x_points[bottom], y_points[y], min(x_points[bottom] + crop_size, width), min(y_points[y] + crop_size, height)])
+                bottom -= 1
+            if left <= right:
+                for x in reversed(range(top, bottom + 1)):
+                    boxes.append([x_points[x], y_points[left], min(x_points[x] + crop_size, width), min(y_points[left] + crop_size, height)])
+                left += 1
+        if load == "unclockwise":
+            boxes.reverse()
+    else:
+        raise ManifestPreflightError(f"unsupported frozen crop load order: {load}")
+    return boxes
 
 
 def sha256_file(path: str | Path, chunk_size: int = 1024 * 1024) -> str:
@@ -328,3 +477,124 @@ def load_crop_records(path: str | Path) -> List[Dict[str, int | str]]:
     if not normalized:
         raise ManifestPreflightError("Frozen crop manifest is empty")
     return normalized
+
+
+def _read_json_mapping(path: str | Path) -> Mapping[str, Any]:
+    source = Path(path)
+    if not source.is_file():
+        raise ManifestPreflightError(f"Manifest is unavailable: {source}")
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ManifestPreflightError(f"Invalid JSON manifest: {source}") from exc
+    if not isinstance(payload, Mapping):
+        raise ManifestPreflightError(f"Frozen crop schedule must be a JSON object: {source}")
+    return payload
+
+
+def load_frozen_crop_index_schedule(
+    path: str | Path,
+    *,
+    allowed_image_names: Iterable[str] | None = None,
+    expected_crop_size: int | None = None,
+    expected_overlap: int | None = None,
+    expected_load: str | None = None,
+    expected_epochs: int | None = None,
+) -> FrozenCropIndexSchedule | None:
+    """Read a derived, immutable MoNuSeg-Lite crop-index schedule if present.
+
+    Returning ``None`` means that ``path`` is an ordinary explicit-coordinate
+    manifest and should continue through :func:`load_crop_records`.  A file
+    declaring the schedule format is validated completely and never falls back
+    to a different crop source.
+    """
+
+    payload = _read_json_mapping(path)
+    if payload.get("format") != FROZEN_CROP_INDEX_SCHEDULE_FORMAT:
+        return None
+
+    source = Path(path)
+    try:
+        crop_size = int(payload["crop_size"])
+        overlap = int(payload["overlap"])
+        load = str(payload["load"])
+        max_crops = int(payload["max_crops_per_image"])
+        epoch_count = int(payload["epochs"])
+        raw_epochs = payload["epoch_crop_indices"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ManifestPreflightError(f"Frozen crop schedule is missing required fields: {source}") from exc
+    if crop_size <= 0 or overlap < 0 or overlap >= crop_size:
+        raise ManifestPreflightError(f"Frozen crop schedule geometry is invalid: {source}")
+    if load != "unclockwise":
+        raise ManifestPreflightError(f"Frozen crop schedule load order is not fixed unclockwise: {source}")
+    if max_crops <= 0 or epoch_count <= 0 or not isinstance(raw_epochs, Mapping):
+        raise ManifestPreflightError(f"Frozen crop schedule dimensions are invalid: {source}")
+    if expected_crop_size is not None and crop_size != int(expected_crop_size):
+        raise ManifestPreflightError(f"Frozen crop schedule crop_size differs from the formal protocol: {source}")
+    if expected_overlap is not None and overlap != int(expected_overlap):
+        raise ManifestPreflightError(f"Frozen crop schedule overlap differs from the formal protocol: {source}")
+    if expected_load is not None and load != str(expected_load):
+        raise ManifestPreflightError(f"Frozen crop schedule load order differs from the formal protocol: {source}")
+    if expected_epochs is not None and epoch_count != int(expected_epochs):
+        raise ManifestPreflightError(f"Frozen crop schedule epoch count differs from the formal protocol: {source}")
+
+    expected_epoch_keys = {str(index) for index in range(epoch_count)}
+    if set(raw_epochs) != expected_epoch_keys:
+        raise ManifestPreflightError(f"Frozen crop schedule epochs are incomplete or changed: {source}")
+    allowed = None
+    if allowed_image_names is not None:
+        allowed = {_schedule_image_name(name) for name in allowed_image_names}
+
+    normalized: Dict[int, Dict[str, tuple[int, ...]]] = {}
+    for epoch in range(epoch_count):
+        raw_images = raw_epochs[str(epoch)]
+        if not isinstance(raw_images, Mapping) or not raw_images:
+            raise ManifestPreflightError(f"Frozen crop schedule epoch {epoch} is malformed: {source}")
+        image_names = {_schedule_image_name(name) for name in raw_images}
+        if allowed is not None and image_names != allowed:
+            raise ManifestPreflightError(
+                f"Frozen crop schedule epoch {epoch} does not exactly match the admitted training images"
+            )
+        normalized_epoch: Dict[str, tuple[int, ...]] = {}
+        for raw_name, raw_indices in raw_images.items():
+            name = _schedule_image_name(raw_name)
+            if not isinstance(raw_indices, list) or len(raw_indices) != max_crops:
+                raise ManifestPreflightError(
+                    f"Frozen crop schedule must retain exactly {max_crops} indices for {name}, epoch {epoch}"
+                )
+            indices = []
+            for raw_index in raw_indices:
+                if isinstance(raw_index, bool):
+                    raise ManifestPreflightError(f"Frozen crop index is not an integer for {name}, epoch {epoch}")
+                try:
+                    numeric = int(raw_index)
+                except (TypeError, ValueError) as exc:
+                    raise ManifestPreflightError(
+                        f"Frozen crop index is not an integer for {name}, epoch {epoch}"
+                    ) from exc
+                if numeric < 0 or numeric != raw_index:
+                    raise ManifestPreflightError(f"Frozen crop index is invalid for {name}, epoch {epoch}")
+                indices.append(numeric)
+            if len(set(indices)) != len(indices):
+                raise ManifestPreflightError(f"Frozen crop schedule duplicates an index for {name}, epoch {epoch}")
+            normalized_epoch[name] = tuple(indices)
+        normalized[epoch] = normalized_epoch
+
+    return FrozenCropIndexSchedule(
+        path=source.resolve(), crop_size=crop_size, overlap=overlap, load=load,
+        max_crops_per_image=max_crops, epoch_indices=normalized,
+    )
+
+
+def load_crop_plan(
+    path: str | Path,
+    **schedule_constraints: Any,
+) -> tuple[List[Dict[str, int | str]], FrozenCropIndexSchedule | None]:
+    """Load either immutable coordinate records or a frozen index schedule."""
+
+    if Path(path).suffix.lower() != ".json":
+        return load_crop_records(path), None
+    schedule = load_frozen_crop_index_schedule(path, **schedule_constraints)
+    if schedule is not None:
+        return [], schedule
+    return load_crop_records(path), None

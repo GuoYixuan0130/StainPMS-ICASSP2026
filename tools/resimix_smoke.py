@@ -161,7 +161,9 @@ def _digest(value, digest):
 def _baseline_equivalence(options):
     """Compare Static-PMS against the enabled ResiMix warm-up tensor path."""
     _set_seed(3407)
-    control = _build_dataset(options, resimix_enabled=False)[0]
+    control_dataset = _build_dataset(options, resimix_enabled=False)
+    control_dataset.set_epoch(1)
+    control = control_dataset[0]
     _set_seed(3407)
     warmup_dataset = _build_dataset(options, resimix_enabled=True)
     warmup_dataset.set_epoch(1)
