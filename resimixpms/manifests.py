@@ -129,7 +129,11 @@ def _schedule_image_name(value: str) -> str:
     pure = PurePosixPath(raw)
     if not raw or pure.is_absolute() or ".." in pure.parts:
         raise ManifestPreflightError(f"unsafe frozen crop schedule image name: {value}")
-    return str(pure)
+    # Dataset loading resolves a manifest filename to a path and subsequently
+    # identifies it by ``Path(path).stem``.  The sealed crop schedule records
+    # the original ``.tif`` filenames, so compare by that same stable stem
+    # without changing any epoch/index selection.
+    return pure.stem
 
 
 def crop_boxes_for_shape(
@@ -543,7 +547,10 @@ def load_frozen_crop_index_schedule(
         raise ManifestPreflightError(f"Frozen crop schedule epochs are incomplete or changed: {source}")
     allowed = None
     if allowed_image_names is not None:
-        allowed = {_schedule_image_name(name) for name in allowed_image_names}
+        admitted_names = list(allowed_image_names)
+        allowed = {_schedule_image_name(name) for name in admitted_names}
+        if len(allowed) != len(admitted_names):
+            raise ManifestPreflightError("Frozen crop schedule training image stems are ambiguous")
 
     normalized: Dict[int, Dict[str, tuple[int, ...]]] = {}
     for epoch in range(epoch_count):
@@ -551,6 +558,10 @@ def load_frozen_crop_index_schedule(
         if not isinstance(raw_images, Mapping) or not raw_images:
             raise ManifestPreflightError(f"Frozen crop schedule epoch {epoch} is malformed: {source}")
         image_names = {_schedule_image_name(name) for name in raw_images}
+        if len(image_names) != len(raw_images):
+            raise ManifestPreflightError(
+                f"Frozen crop schedule epoch {epoch} has ambiguous filename stems"
+            )
         if allowed is not None and image_names != allowed:
             raise ManifestPreflightError(
                 f"Frozen crop schedule epoch {epoch} does not exactly match the admitted training images"

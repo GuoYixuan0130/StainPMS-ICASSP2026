@@ -141,6 +141,7 @@ class FrozenProtocolTest(unittest.TestCase):
             self.assertEqual(records, [])
             self.assertIsNotNone(schedule)
             self.assertEqual(schedule.indices_for("train_a.tif", epoch=0), (0, 1, 2, 3))
+            self.assertEqual(schedule.indices_for("train_a", epoch=0), (0, 1, 2, 3))
             self.assertEqual(schedule.indices_for("train_a.tif", epoch=1), (3, 2, 1, 0))
             self.assertEqual(schedule.indices_for("train_a.tif", union=True), (0, 1, 2, 3))
             grid = crop_boxes_for_shape((512, 512), 256, 92, "unclockwise")
