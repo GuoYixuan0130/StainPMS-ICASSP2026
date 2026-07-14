@@ -176,16 +176,19 @@ def create_logger(log_dir, phase='train'):
     return logger
 
 
-def set_log_dir(root_dir, exp_name):
+def set_log_dir(root_dir, exp_name, run_dir=''):
     path_dict = {}
-    os.makedirs(root_dir, exist_ok=True)
-
-    # set log path
-    exp_path = os.path.join(root_dir, exp_name)
-    now = datetime.now(dateutil.tz.tzlocal())
-    timestamp = now.strftime('%Y_%m_%d_%H_%M_%S')
-    prefix = exp_path + '_' + timestamp
-    os.makedirs(prefix)
+    if run_dir:
+        # SetPMS orchestration supplies an already-created, immutable artifact
+        # directory.  The legacy timestamped layout remains unchanged when it
+        # is absent.
+        prefix = os.path.abspath(run_dir)
+    else:
+        os.makedirs(root_dir, exist_ok=True)
+        exp_path = os.path.join(root_dir, exp_name)
+        timestamp = datetime.now(dateutil.tz.tzlocal()).strftime('%Y_%m_%d_%H_%M_%S')
+        prefix = exp_path + '_' + timestamp
+    os.makedirs(prefix, exist_ok=True)
     path_dict['prefix'] = prefix
 
     # set checkpoint path

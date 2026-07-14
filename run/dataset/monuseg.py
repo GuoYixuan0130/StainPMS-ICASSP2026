@@ -1,3 +1,5 @@
+import hashlib
+import json
 import os
 
 import numpy as np
@@ -11,26 +13,159 @@ import scipy.io as sio
 from stainpms.candidate import compute_b_candidates_oncrop, compute_baseline_center_candidates
 
 
+def deterministic_crop_indices(seed, epoch, filename, crop_count, max_crops):
+    """Select crop indices using only the frozen seed/epoch/file identity.
+
+    No image pixels, GT labels, or model outputs participate in this choice.
+    The result is sorted back into canonical sliding-window order after the
+    deterministic hash ranking is chosen.
+    """
+
+    crop_count = int(crop_count)
+    max_crops = int(max_crops)
+    if max_crops <= 0 or crop_count <= max_crops:
+        return list(range(crop_count))
+    ranked = []
+    for crop_index in range(crop_count):
+        token = f"{int(seed)}:{int(epoch)}:{filename}:{crop_index}".encode("utf-8")
+        ranked.append((hashlib.sha256(token).hexdigest(), crop_index))
+    return sorted(index for _, index in sorted(ranked)[:max_crops])
+
+
+def _manifest_files(manifest_path, *, split):
+    """Read an explicit filename allow-list from a frozen JSON manifest."""
+
+    if not manifest_path:
+        return None
+    with open(manifest_path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    candidates = (
+        payload.get("files")
+        or payload.get(f"{split}_files")
+        or payload.get("train_files" if split == "train" else "eval_files")
+        or payload.get("holdout_files")
+    )
+    if not isinstance(candidates, list) or not all(isinstance(item, str) for item in candidates):
+        raise ValueError(f"Manifest {manifest_path} has no valid {split} filename list")
+    if len(candidates) != len(set(candidates)):
+        raise ValueError(f"Manifest {manifest_path} contains duplicate filenames")
+    return candidates
+
+
 class MONUSEG(Dataset):
     def __init__(self, args, cfgs, data_path , load, mode = 'train'):
         self.data_path = data_path
         if mode == 'train':
             self.image_root = data_path + '/train_12/images'
             self.label_root = data_path + '/train_12/labels'
+            transform_mode = "train"
+        elif mode == 'eval_train':
+            # This deliberately avoids constructing or listing /test.  It is
+            # used for the authorised TNBC dev and MoNuSeg-Lite holdouts.
+            self.image_root = data_path + '/train_12/images'
+            self.label_root = data_path + '/train_12/labels'
+            transform_mode = "test"
         elif mode == 'test':
             self.image_root = data_path + '/test/images'
             self.label_root = data_path + '/test/labels'
+            transform_mode = "test"
+        else:
+            raise ValueError(f"Unsupported MONUSEG mode: {mode}")
         self.paths = sorted(os.listdir(self.image_root))
         self.mode = mode
         self.crop_size = args.crop_size
         self.overlap = args.overlap
         self.load = load
+        self.seed = int(getattr(args, "seed", 3407))
+        self.epoch = 0
+        self.max_train_crops_per_image = int(
+            getattr(args, "max_train_crops_per_image", 0)
+        )
+        self._crop_manifest = {}
+        self._eval_patch_records = None
+
+        manifest_path = (
+            getattr(args, "train_manifest", "")
+            if mode == "train"
+            else getattr(args, "eval_manifest", "")
+        )
+        allowed_files = _manifest_files(
+            manifest_path, split="train" if mode == "train" else "eval"
+        )
+        if allowed_files is not None:
+            available = set(self.paths)
+            unknown = [name for name in allowed_files if name not in available]
+            if unknown:
+                raise ValueError(
+                    f"Manifest {manifest_path} names files absent from {self.image_root}: {unknown[:5]}"
+                )
+            self.paths = list(allowed_files)
+
+        eval_patch_manifest = getattr(args, "eval_patch_manifest", "") or ""
+        if mode == "eval_train" and eval_patch_manifest:
+            if allowed_files is None:
+                raise ValueError("Patch evaluation requires an explicit eval_manifest allow-list")
+            with open(eval_patch_manifest, "r", encoding="utf-8") as handle:
+                patch_payload = json.load(handle)
+            records = patch_payload.get("patches")
+            if not isinstance(records, list) or not records:
+                raise ValueError(f"Patch manifest {eval_patch_manifest} has no patches")
+            allowed = set(self.paths)
+            normalized_records = []
+            seen_ids = set()
+            for record in records:
+                if not isinstance(record, dict):
+                    raise ValueError(f"Invalid patch record in {eval_patch_manifest}")
+                patch_id = record.get("patch_id")
+                filename = record.get("filename")
+                x = record.get("x")
+                y = record.get("y")
+                width = record.get("width")
+                height = record.get("height")
+                if (
+                    not isinstance(patch_id, str)
+                    or not isinstance(filename, str)
+                    or filename not in allowed
+                    or patch_id in seen_ids
+                    or not all(isinstance(value, int) for value in (x, y, width, height))
+                    or x < 0
+                    or y < 0
+                    or width <= 0
+                    or height <= 0
+                ):
+                    raise ValueError(f"Invalid or disallowed patch record {record}")
+                seen_ids.add(patch_id)
+                normalized_records.append(
+                    {
+                        "patch_id": patch_id,
+                        "filename": filename,
+                        "x": x,
+                        "y": y,
+                        "width": width,
+                        "height": height,
+                    }
+                )
+            self._eval_patch_records = normalized_records
+            self.paths = [record["patch_id"] for record in normalized_records]
+
+        crop_manifest_path = getattr(args, "train_crop_manifest", "") or ""
+        if mode == "train" and crop_manifest_path:
+            with open(crop_manifest_path, "r", encoding="utf-8") as handle:
+                crop_payload = json.load(handle)
+            frozen_seed = crop_payload.get("seed")
+            if frozen_seed is not None and int(frozen_seed) != self.seed:
+                raise ValueError(
+                    f"Crop manifest seed {frozen_seed} != requested seed {self.seed}"
+                )
+            self._crop_manifest = crop_payload.get("crop_indices", {})
+            if not isinstance(self._crop_manifest, dict):
+                raise ValueError(f"Invalid crop_indices in {crop_manifest_path}")
 
         self.num_mask_per_img = 150
         self.num_classes = 1
 
         self.transform = A.Compose(
-          [getattr(A, tf_dict.pop('type'))(**tf_dict) for tf_dict in cfgs.data.get(mode).transform]
+          [getattr(A, tf_dict.pop('type'))(**tf_dict) for tf_dict in cfgs.data.get(transform_mode).transform]
           + [ToTensorV2()], p=1)
 
         # PMS fine-tune support.
@@ -76,6 +211,45 @@ class MONUSEG(Dataset):
                 max_msg = "all" if self.pms_preserve_max_prompts <= 0 else str(self.pms_preserve_max_prompts)
                 print(f"[MONUSEG PMS] coverage-preservation prompts enabled; max_per_crop={max_msg}")
 
+    def set_epoch(self, epoch):
+        self.epoch = int(epoch)
+
+    def _select_train_crop_boxes(self, crop_boxes, filename):
+        if self.mode != "train" or self.max_train_crops_per_image <= 0:
+            return crop_boxes
+        crop_count = len(crop_boxes)
+        epoch_key = str(self.epoch)
+        frozen_for_epoch = self._crop_manifest.get(epoch_key, {})
+        if frozen_for_epoch:
+            if filename not in frozen_for_epoch:
+                raise ValueError(
+                    f"Frozen crop manifest has no epoch {self.epoch} entry for {filename}"
+                )
+            selected_indices = [int(value) for value in frozen_for_epoch[filename]]
+            expected = deterministic_crop_indices(
+                self.seed,
+                self.epoch,
+                filename,
+                crop_count,
+                self.max_train_crops_per_image,
+            )
+            if selected_indices != expected:
+                raise ValueError(
+                    f"Frozen crop manifest differs from deterministic selection for {filename}, "
+                    f"epoch {self.epoch}"
+                )
+        else:
+            selected_indices = deterministic_crop_indices(
+                self.seed,
+                self.epoch,
+                filename,
+                crop_count,
+                self.max_train_crops_per_image,
+            )
+        if any(index < 0 or index >= crop_count for index in selected_indices):
+            raise ValueError(f"Invalid crop index for {filename} at epoch {self.epoch}")
+        return [crop_boxes[index] for index in selected_indices]
+
     def reload_baseline_masks(self):
         """Re-read baseline_masks_dir/*.npy into _baseline_cache in place.
 
@@ -103,12 +277,28 @@ class MONUSEG(Dataset):
 
         """Get the images"""
         path = self.paths[index]
+        patch_record = None
+        source_path = path
+        if self._eval_patch_records is not None:
+            patch_record = self._eval_patch_records[index]
+            source_path = patch_record["filename"]
 
-        image_path = os.path.join(self.image_root, path)
-        mask_path = os.path.join(self.label_root, path.split('.')[0] + '.mat')
+        image_path = os.path.join(self.image_root, source_path)
+        mask_path = os.path.join(self.label_root, source_path.split('.')[0] + '.mat')
 
         img = io.imread(image_path)[..., :3]
         mask = load_maskfile(mask_path)
+        if patch_record is not None:
+            x = patch_record["x"]
+            y = patch_record["y"]
+            width = patch_record["width"]
+            height = patch_record["height"]
+            if y + height > img.shape[0] or x + width > img.shape[1]:
+                raise ValueError(
+                    f"Patch {patch_record['patch_id']} is outside source image {source_path}"
+                )
+            img = img[y : y + height, x : x + width]
+            mask = mask[y : y + height, x : x + width]
 
         # PMS: stack precomputed baseline mask as 3rd mask channel so
         # albumentations augments it together with image + GT (keeps alignment).
@@ -152,6 +342,7 @@ class MONUSEG(Dataset):
                 self.overlap,
                 self.load,
             ).tolist()
+            crop_boxes = self._select_train_crop_boxes(crop_boxes, path)
             for idx, crop_box in enumerate(crop_boxes):
                 x1, y1, x2, y2 = crop_box
                 img_c = img[..., y1:y2, x1:x2].transpose(1, 2, 0)
@@ -346,7 +537,8 @@ class MONUSEG(Dataset):
             binary_tensor = (inst_map_all).to(torch.uint8)
             binary_mask = torch.any(binary_tensor, dim=0).to(torch.uint8)
             
-            return img.to(torch.float32),inst_map, type_map.squeeze(0),prompt_points_all.squeeze(1), prompt_labels_all, binary_mask ,torch.as_tensor(ori_shape),index,path.split('.')[0]
+            output_name = patch_record["patch_id"] if patch_record is not None else path.split('.')[0]
+            return img.to(torch.float32),inst_map, type_map.squeeze(0),prompt_points_all.squeeze(1), prompt_labels_all, binary_mask ,torch.as_tensor(ori_shape),index,output_name
 
 def load_maskfile(mask_path: str):
     inst_map = sio.loadmat(mask_path)['inst_map']

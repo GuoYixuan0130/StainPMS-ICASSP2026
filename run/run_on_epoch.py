@@ -11,6 +11,7 @@ from tqdm import tqdm
 from run.utils import vis_inst_image
 from sam2_train.modeling.stats_utils import *
 from sam2_train.modeling.utils import *
+from setpms import compute_setpms_loss, select_set_queries
 
 
 def _safe_image_name(name):
@@ -207,6 +208,177 @@ def find_nearest_points(pred_coords, points_choose):
     return nearest_points
 
 
+def _setpms_lambda(epoch):
+    """Fixed two-epoch linear warm-up: 0.0, 0.05, then 0.1."""
+
+    return 0.1 * min(max(float(epoch), 0.0) / 2.0, 1.0)
+
+
+def _setpms_loss_weight(cfgs, epoch):
+    """Use raw SetPMS only in the non-scientific gradient smoke check."""
+
+    if int(getattr(cfgs, "setpms_smoke_batches", 0) or 0) > 0:
+        return 1.0
+    return _setpms_lambda(epoch)
+
+
+def _setpms_hungarian_indices(criterion, outputs, targets):
+    """Get existing matcher assignments only for SetPMS prompt inclusion."""
+
+    gt_counts = [int(value) for value in targets["gt_nums"]]
+    if sum(gt_counts) == 0:
+        return [
+            torch.empty(0, dtype=torch.long, device=outputs["pred_coords"].device)
+            for _ in gt_counts
+        ]
+    return criterion.matcher(outputs, targets)
+
+
+def _compute_setpms_training_loss(
+    cfgs,
+    criterion,
+    net,
+    image_embed,
+    high_res_feats,
+    outputs,
+    targets,
+    gt_inst_masks,
+    device,
+):
+    """Run exactly one added batched decoder call and compute SetPMS loss.
+
+    Query selection is discrete and deterministic.  Selected point coordinates
+    are detached for the prompt encoder, while the separately gathered
+    coordinates remain attached in ``compute_setpms_loss`` for UOT distance
+    gradients.
+    """
+
+    batch_size = int(outputs["pred_coords"].shape[0])
+    gt_counts = [int(value) for value in targets["gt_nums"]]
+    if len(gt_counts) != batch_size:
+        raise ValueError("SetPMS batch/query count mismatch")
+    matched_indices = _setpms_hungarian_indices(criterion, outputs, targets)
+    if len(matched_indices) != batch_size:
+        raise ValueError("SetPMS matcher did not return one assignment per crop")
+
+    selected_per_crop = []
+    for batch_index in range(batch_size):
+        selected_per_crop.append(
+            select_set_queries(
+                outputs["pred_logits"][batch_index],
+                matched_indices[batch_index][0]
+                if isinstance(matched_indices[batch_index], tuple)
+                else matched_indices[batch_index],
+                gt_counts[batch_index],
+                max_prompts=64,
+                min_prompts=16,
+            )
+        )
+
+    set_counts = [int(indices.numel()) for indices in selected_per_crop]
+    total_set_prompts = sum(set_counts)
+    zero = outputs["pred_coords"].sum() * 0.0 + outputs["pred_logits"].sum() * 0.0
+    if total_set_prompts == 0:
+        # Q is nonzero in the canonical model, but retaining this branch makes
+        # the K=0 mechanical contract explicit and finite.
+        return zero
+
+    gathered_coords = torch.cat(
+        [
+            outputs["pred_coords"][batch_index].index_select(0, selected)
+            for batch_index, selected in enumerate(selected_per_crop)
+        ],
+        dim=0,
+    )
+
+
+def _per_image_metric_record(inst_map, pred_map, image_name):
+    """Metric/TP-FP-FN detail for authorised continuation artifacts only."""
+
+    gt = remap_label(inst_map)
+    pred = remap_label(pred_map)
+    gt_count = max(0, len(np.unique(gt)) - 1)
+    pred_count = max(0, len(np.unique(pred)) - 1)
+    if gt_count == 0 and pred_count == 0:
+        return {
+            "image": str(image_name), "dice": 1.0, "dice2": 1.0,
+            "aji": 1.0, "aji_plus": 1.0, "dq": 1.0, "sq": 1.0,
+            "pq": 1.0, "tp": 0, "fp": 0, "fn": 0,
+        }
+    if gt_count == 0 or pred_count == 0:
+        return {
+            "image": str(image_name), "dice": 0.0, "dice2": 0.0,
+            "aji": 0.0, "aji_plus": 0.0, "dq": 0.0, "sq": 0.0,
+            "pq": 0.0, "tp": 0, "fp": pred_count, "fn": gt_count,
+        }
+    (dq, sq, pq), (_, _, unpaired_true, unpaired_pred) = get_fast_pq(gt, pred)
+    tp = gt_count - len(unpaired_true)
+    return {
+        "image": str(image_name),
+        "dice": float(get_dice_1(gt, pred)),
+        "dice2": float(get_fast_dice_2(gt, pred)),
+        "aji": float(get_fast_aji(gt, pred)),
+        "aji_plus": float(get_fast_aji_plus(gt, pred)),
+        "dq": float(dq),
+        "sq": float(sq),
+        "pq": float(pq),
+        "tp": int(tp),
+        "fp": int(len(unpaired_pred)),
+        "fn": int(len(unpaired_true)),
+    }
+    prompt_coords = gathered_coords.detach().unsqueeze(1)
+    # Automatic inference prompts use the canonical positive SAM prompt label.
+    prompt_labels = torch.ones(
+        total_set_prompts, 1, dtype=torch.long, device=device
+    )
+    set_cell_nums = torch.tensor(set_counts, dtype=torch.long, device=device)
+
+    with torch.no_grad():
+        sparse_embeddings, dense_embeddings = net.sam_prompt_encoder(
+            points=(prompt_coords, prompt_labels),
+            boxes=None,
+            masks=None,
+            batch_size=batch_size,
+        )
+    low_res_masks, _, _, _ = net.sam_mask_decoder(
+        image_embeddings=image_embed,
+        image_pe=net.sam_prompt_encoder.get_dense_pe(),
+        sparse_prompt_embeddings=sparse_embeddings,
+        dense_prompt_embeddings=dense_embeddings,
+        multimask_output=False,
+        repeat_image=False,
+        cell_nums=set_cell_nums,
+        high_res_features=high_res_feats,
+    )
+    set_mask_logits = _refine_sam_masks(cfgs, low_res_masks)
+
+    # gt_inst_masks is a flat [sum(N_i), H, W] tensor in crop order.
+    gt_offset = 0
+    pred_offset = 0
+    losses = []
+    for batch_index, (gt_count, set_count, selected) in enumerate(
+        zip(gt_counts, set_counts, selected_per_crop)
+    ):
+        gt_masks = gt_inst_masks[gt_offset : gt_offset + gt_count]
+        gt_points = targets["gt_points"][batch_index]
+        pred_masks = set_mask_logits[pred_offset : pred_offset + set_count]
+        pred_coords = outputs["pred_coords"][batch_index].index_select(0, selected)
+        pred_logits = outputs["pred_logits"][batch_index].index_select(0, selected)
+        result = compute_setpms_loss(
+            pred_masks,
+            pred_coords,
+            pred_logits,
+            gt_masks,
+            gt_points,
+        )
+        losses.append(result.loss)
+        gt_offset += gt_count
+        pred_offset += set_count
+    if gt_offset != int(gt_inst_masks.shape[0]) or pred_offset != total_set_prompts:
+        raise ValueError("SetPMS flat mask accounting mismatch")
+    return torch.stack(losses).mean()
+
+
 def train_on_epoch(
     cfgs,
     point_net,
@@ -218,6 +390,7 @@ def train_on_epoch(
     epoch,
     texture_memory_bank_list,
     device,
+    anchor_regularizer=None,
 ):
     point_net.train()
     net.train()
@@ -229,6 +402,9 @@ def train_on_epoch(
     metric_logger.add_meter("lr", SmoothedValue(window_size=1, fmt="{value:.6f}"))
     header = f"Epoch: [{epoch}]"
     feat_sizes = [(64, 64), (32, 32), (16, 16)]
+    setpms_enabled = bool(getattr(cfgs, "setpms", False))
+    smoke_limit = int(getattr(cfgs, "setpms_smoke_batches", 0) or 0)
+    processed_optimizer_steps = 0
 
     with tqdm(total=len(train_loader), desc=f"Epoch {epoch}", unit="img") as pbar:
         for data_iter_step, batch in enumerate(
@@ -257,6 +433,8 @@ def train_on_epoch(
             k_crops = images_lists.size(0)
             cumulative_sums = np.cumsum(cell_nums_lists)
             for start_idx in range(0, k_crops, cfgs.b):
+                if smoke_limit > 0 and processed_optimizer_steps >= smoke_limit:
+                    break
                 end_idx = min(start_idx + cfgs.b, k_crops)
                 start_cell = 0 if start_idx == 0 else cumulative_sums[start_idx - 1]
                 end_cell = cumulative_sums[end_idx - 1]
@@ -300,8 +478,9 @@ def train_on_epoch(
                 nearest_points = find_nearest_points(outputs1["pred_coords"].cpu(), points_choose)
                 nearest_points_cat = torch.cat([nearest_points[i] for i in range(len(nearest_points))]).to(device)
                 cell_nums = cell_nums.to(device)
+                has_original_prompts = nearest_points_cat.shape[0] > 0
 
-                if nearest_points_cat.shape[0] == 0:
+                if not has_original_prompts and not setpms_enabled:
                     print("[skip] no prompts in batch")
                     optimizer.zero_grad(set_to_none=True)
                     continue
@@ -364,6 +543,70 @@ def train_on_epoch(
                 ][::-1]
                 image_embed = feats[-1]
                 high_res_feats = feats[:-1]
+
+                if not has_original_prompts:
+                    # The canonical single-mask loss has no GT-associated
+                    # prompt in an empty crop.  Baseline training skips it;
+                    # SetPMS instead retains top-16 predictions solely for
+                    # FP supervision, without issuing any original decoder
+                    # call or altering the disabled baseline path.
+                    gt_inst_masks = inst_masks.to(torch.float32).to(device)
+                    raw_set_loss = _compute_setpms_training_loss(
+                        cfgs,
+                        criterion,
+                        net,
+                        image_embed,
+                        high_res_feats,
+                        outputs1,
+                        targets,
+                        gt_inst_masks,
+                        device,
+                    )
+                    if anchor_regularizer is None:
+                        raise ValueError("SetPMS requires an L2-SP anchor snapshot")
+                    zero = outputs1["pred_coords"].sum() * 0.0 + outputs1["pred_logits"].sum() * 0.0
+                    loss_dict = {
+                        "loss_original_empty": zero,
+                        "loss_setpms": _setpms_loss_weight(cfgs, epoch) * raw_set_loss,
+                        "loss_setpms_anchor": 1.0e-3 * anchor_regularizer.loss(),
+                    }
+                    losses = sum(loss for loss in loss_dict.values())
+                    metric_logger.update(lr=optimizer.param_groups[0]["lr"])
+                    if not torch.isfinite(losses):
+                        print(
+                            f"[Train] non-finite SetPMS empty-crop loss at epoch {epoch} "
+                            f"batch_step {data_iter_step}; skipping"
+                        )
+                        optimizer.zero_grad()
+                        continue
+                    loss_dict_reduced = reduce_dict(loss_dict)
+                    losses_reduced = sum(loss for loss in loss_dict_reduced.values())
+                    for key, value in loss_dict_reduced.items():
+                        log_info[key] = log_info.get(key, 0) + value.item()
+                    optimizer.zero_grad()
+                    losses.backward()
+                    trainable_params = [
+                        parameter
+                        for group in optimizer.param_groups
+                        for parameter in group["params"]
+                        if parameter.requires_grad
+                    ]
+                    has_bad_grad = any(
+                        parameter.grad is not None and not torch.isfinite(parameter.grad).all()
+                        for parameter in trainable_params
+                    )
+                    if has_bad_grad:
+                        print(f"[Train] non-finite gradients at epoch {epoch}; skipping")
+                        optimizer.zero_grad()
+                        continue
+                    if cfgs.clip_grad > 0 and trainable_params:
+                        torch.nn.utils.clip_grad_norm_(trainable_params, cfgs.clip_grad)
+                    optimizer.step()
+                    processed_optimizer_steps += 1
+                    metric_logger.update(loss=losses_reduced, **loss_dict_reduced)
+                    if smoke_limit > 0 and processed_optimizer_steps >= smoke_limit:
+                        break
+                    continue
 
                 with torch.no_grad():
                     se, de = net.sam_prompt_encoder(
@@ -620,6 +863,23 @@ def train_on_epoch(
                                     * criterion.pms_iou_weight
                                 )
 
+                if setpms_enabled:
+                    raw_set_loss = _compute_setpms_training_loss(
+                        cfgs,
+                        criterion,
+                        net,
+                        image_embed,
+                        high_res_feats,
+                        outputs1,
+                        targets,
+                        gt_inst_masks,
+                        device,
+                    )
+                    loss_dict["loss_setpms"] = _setpms_loss_weight(cfgs, epoch) * raw_set_loss
+                    if anchor_regularizer is None:
+                        raise ValueError("SetPMS requires an L2-SP anchor snapshot")
+                    loss_dict["loss_setpms_anchor"] = 1.0e-3 * anchor_regularizer.loss()
+
                 losses = sum(loss for loss in loss_dict.values())
                 metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
@@ -658,11 +918,19 @@ def train_on_epoch(
                 if cfgs.clip_grad > 0 and trainable_params:
                     torch.nn.utils.clip_grad_norm_(trainable_params, cfgs.clip_grad)
                 optimizer.step()
+                processed_optimizer_steps += 1
                 metric_logger.update(loss=losses_reduced, **loss_dict_reduced)
+                if smoke_limit > 0 and processed_optimizer_steps >= smoke_limit:
+                    break
 
             pbar.update()
+            if smoke_limit > 0 and processed_optimizer_steps >= smoke_limit:
+                break
 
-    return {key: value / max(1, len(train_loader)) for key, value in log_info.items()}
+    log_info = {key: value / max(1, len(train_loader)) for key, value in log_info.items()}
+    if smoke_limit > 0:
+        log_info["setpms_smoke_optimizer_steps"] = float(processed_optimizer_steps)
+    return log_info
 
 
 def validation_on_epoch(
@@ -677,6 +945,7 @@ def validation_on_epoch(
     iou_threshold,
     memory_bank_list,
     device,
+    metric_records=None,
 ):
     point_net.eval()
     net.eval()
@@ -977,6 +1246,12 @@ def validation_on_epoch(
                 )
 
             _append_metric_scores(inst_maps[0], pred_inst_map, score_lists)
+            if metric_records is not None:
+                metric_records.append(
+                    _per_image_metric_record(
+                        inst_maps[0], pred_inst_map, _safe_image_name(name)
+                    )
+                )
 
             if cfgs.vis:
                 namecat = "Test_" + "_".join(str(item) for item in name) + "_"

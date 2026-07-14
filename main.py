@@ -1,4 +1,7 @@
 import copy
+import csv
+import glob
+import hashlib
 import json
 import math
 import os
@@ -9,7 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from mmengine.config import Config
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 import cfg
 from conf import settings
@@ -19,6 +22,7 @@ from run.utils import create_logger, get_network, set_log_dir
 from sam2_train.modeling.criterion import build_criterion
 from sam2_train.modeling.dpa_p2pnet import build_model
 from sam2_train.modeling.utils import collate_fn, set_seed
+from setpms import L2SPAnchor
 
 
 def count_trainable_params(*modules):
@@ -172,7 +176,8 @@ def build_dataloaders(cfgs, args):
         raise ValueError(f"Unsupported dataset: {cfgs.dataset}")
 
     train_dataset = MONUSEG(cfgs, args, cfgs.data_path, cfgs.load, mode="train")
-    test_dataset = MONUSEG(cfgs, args, cfgs.data_path, cfgs.load, mode="test")
+    eval_mode = "eval_train" if cfgs.eval_on_train else "test"
+    test_dataset = MONUSEG(cfgs, args, cfgs.data_path, cfgs.load, mode=eval_mode)
     train_loader = DataLoader(
         train_dataset,
         batch_size=1,
@@ -241,10 +246,188 @@ def write_eval_metric_artifact(cfgs, eval_split, metrics):
     print(f"Wrote unrounded evaluation metrics: {path}")
 
 
+_METRIC_NAMES = ("dice", "dice2", "aji", "aji_plus", "dq", "sq", "pq")
+
+
+def _parse_epoch_set(raw_value):
+    if not raw_value:
+        return set()
+    values = set()
+    for token in str(raw_value).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        value = int(token)
+        if value < 0:
+            raise ValueError(f"Continuation epoch must be non-negative, got {value}")
+        values.add(value)
+    return values
+
+
+def _append_csv(path, row):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    exists = os.path.exists(path)
+    with open(path, "a", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(row.keys()))
+        if not exists:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def _save_continuation_checkpoint(
+    cfgs,
+    epoch,
+    net,
+    model1,
+    optimizer,
+    scheduler,
+    texture_memory_bank_list,
+    *,
+    filename=None,
+):
+    filename = filename or f"continuation_epoch_{int(epoch)}.pth"
+    path = os.path.join(cfgs.path_helper["ckpt_path"], filename)
+    torch.save(
+        {
+            "model": net.state_dict(),
+            "model1": model1.state_dict(),
+            "epoch": int(epoch),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "texture_memory_bank_list": texture_memory_bank_list,
+        },
+        path,
+    )
+    return path
+
+
+def _continuation_evaluate(
+    cfgs,
+    args,
+    test_loader,
+    epoch,
+    model1,
+    model1_encoder,
+    net,
+    val_texture_bank,
+    device,
+):
+    """Evaluate a frozen continuation node and emit aggregate/per-image CSV."""
+
+    records = []
+    metrics = validation_on_epoch(
+        cfgs,
+        args,
+        test_loader,
+        epoch,
+        model1,
+        model1_encoder,
+        net,
+        cfgs.load,
+        args.data.post.iou_threshold,
+        val_texture_bank,
+        device,
+        metric_records=records,
+    )
+    if cfgs.metrics_output_dir:
+        row = {"run_label": cfgs.run_label, "epoch": int(epoch)}
+        row.update({name: float(value) for name, value in zip(_METRIC_NAMES, metrics)})
+        _append_csv(os.path.join(cfgs.metrics_output_dir, "metrics.csv"), row)
+        for record in records:
+            record = {"run_label": cfgs.run_label, "epoch": int(epoch), **record}
+            _append_csv(os.path.join(cfgs.metrics_output_dir, "per_image.csv"), record)
+    return metrics
+
+
+def _smoke_baseline_equivalence(
+    cfgs,
+    args,
+    test_loader,
+    model1,
+    model1_encoder,
+    net,
+    val_texture_bank_template,
+    device,
+):
+    """Prove pixel-level inference equality with SetPMS toggled off/on.
+
+    The comparison runs the unmodified canonical validation path on one frozen
+    holdout image twice, writes no scientific evaluation conclusion, and
+    compares the assembled instance-map pixels byte-for-byte.
+    """
+
+    if len(test_loader.dataset) == 0:
+        raise ValueError("Cannot run baseline-equivalence smoke with an empty holdout")
+    output_root = cfgs.metrics_output_dir or cfgs.path_helper["prefix"]
+    off_dir = os.path.join(output_root, "baseline_equivalence_off")
+    on_dir = os.path.join(output_root, "baseline_equivalence_on")
+    saved_flag = bool(cfgs.setpms)
+    saved_dump_dir = str(cfgs.dump_eval_artifacts_dir or "")
+    saved_vis = bool(cfgs.vis)
+    smoke_loader = DataLoader(
+        Subset(test_loader.dataset, [0]),
+        batch_size=1,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=True,
+    )
+    outputs = []
+    try:
+        for enabled, artifact_dir in ((False, off_dir), (True, on_dir)):
+            cfgs.setpms = enabled
+            cfgs.dump_eval_artifacts_dir = artifact_dir
+            cfgs.vis = False
+            validation_on_epoch(
+                cfgs,
+                args,
+                smoke_loader,
+                0,
+                model1,
+                model1_encoder,
+                net,
+                cfgs.load,
+                args.data.post.iou_threshold,
+                list(val_texture_bank_template or []),
+                device,
+            )
+            paths = sorted(glob.glob(os.path.join(artifact_dir, "*_pred.npy")))
+            if len(paths) != 1:
+                raise RuntimeError(
+                    f"Expected one smoke prediction in {artifact_dir}, found {len(paths)}"
+                )
+            prediction = np.load(paths[0])
+            outputs.append(prediction)
+    finally:
+        cfgs.setpms = saved_flag
+        cfgs.dump_eval_artifacts_dir = saved_dump_dir
+        cfgs.vis = saved_vis
+
+    identical = bool(np.array_equal(outputs[0], outputs[1]))
+    payload = {
+        "checked_images": 1,
+        "pixel_identical": identical,
+        "sha256_setpms_off": hashlib.sha256(outputs[0].tobytes()).hexdigest(),
+        "sha256_setpms_on": hashlib.sha256(outputs[1].tobytes()).hexdigest(),
+    }
+    if not identical:
+        raise RuntimeError("SetPMS changed canonical inference pixels during smoke")
+    return payload
+
+
 def main():
     args = Config.fromfile("./args.py")
     cfgs = cfg.parse_args()
     apply_cli_overrides(args, cfgs)
+    if cfgs.setpms and (
+        cfgs.use_pms
+        or cfgs.pms_self_bootstrap
+        or cfgs.iterative_baseline_refresh_every > 0
+        or cfgs.dump_baseline_masks_dir
+        or cfgs.baseline_masks_dir
+    ):
+        raise ValueError(
+            "SetPMS continuation forbids PMS mining, coverage refresh, and pseudo prompts."
+        )
     set_seed(cfgs)
 
     device = torch.device(
@@ -263,6 +446,7 @@ def main():
 
     val_texture_bank_template = maybe_load_warm_start(cfgs, model1)
     freeze_sam2_image_encoder(net)
+    anchor_regularizer = L2SPAnchor((model1, net)) if cfgs.setpms else None
 
     actual_lr = args.optimizer.lr if cfgs.lr < 0 else cfgs.lr
     actual_wd = args.optimizer.weight_decay if cfgs.weight_decay < 0 else cfgs.weight_decay
@@ -301,7 +485,7 @@ def main():
         f"(image encoder frozen except prompt_generator)"
     )
 
-    cfgs.path_helper = set_log_dir("logs", cfgs.exp_name)
+    cfgs.path_helper = set_log_dir("logs", cfgs.exp_name, cfgs.run_dir)
     logger = create_logger(cfgs.path_helper["log_path"])
     logger.info(cfgs)
 
@@ -392,22 +576,12 @@ def main():
         texture_memory_bank_list = ckpt.get("texture_memory_bank_list", []) or []
 
         eval_loader = test_loader
-        eval_split = "test"
+        eval_split = "train" if cfgs.eval_on_train else "test"
         if cfgs.eval_on_train:
-            train_img_root, train_lbl_root = _train_split_paths(cfgs)
-            eval_dataset = copy.copy(test_dataset)
-            eval_dataset.image_root = train_img_root
-            eval_dataset.label_root = train_lbl_root
-            eval_dataset.paths = sorted(os.listdir(train_img_root))
-            eval_loader = DataLoader(
-                eval_dataset,
-                batch_size=1,
-                shuffle=False,
-                num_workers=cfgs.num_workers,
-                pin_memory=True,
+            print(
+                f"[eval] frozen train-split holdout; n={len(eval_loader.dataset.paths)} "
+                f"from {eval_loader.dataset.image_root}"
             )
-            eval_split = "train"
-            print(f"[eval] train split; n={len(eval_dataset.paths)} from {train_img_root}")
 
         metrics = validation_on_epoch(
             cfgs,
@@ -463,6 +637,12 @@ def main():
         print("[coverage-refresh] disabled because --baseline_masks_dir is empty.")
         iter_refresh_every = 0
 
+    smoke_batches = int(cfgs.setpms_smoke_batches or 0)
+    if smoke_batches < 0:
+        raise ValueError("--setpms_smoke_batches must be non-negative")
+    if smoke_batches and not cfgs.setpms:
+        raise ValueError("SetPMS smoke requires --setpms")
+
     detect_loss = []
     segment_loss = []
     all_loss = []
@@ -475,8 +655,96 @@ def main():
     pq = []
     best_pq = 0.0
     best_aji = 0.0
+    continuation_save_epochs = _parse_epoch_set(cfgs.continuation_save_epochs)
+    continuation_eval_epochs = _parse_epoch_set(cfgs.continuation_eval_epochs)
+    controlled_continuation = bool(
+        continuation_save_epochs or continuation_eval_epochs
+    )
+    if smoke_batches and controlled_continuation:
+        raise ValueError("Mechanical SetPMS smoke cannot include continuation checkpoints/evaluation")
+    if controlled_continuation and not continuation_eval_epochs:
+        raise ValueError("Controlled continuation requires explicit evaluation epochs")
+    if controlled_continuation and not cfgs.eval_on_train:
+        raise ValueError(
+            "Controlled continuation is restricted to an explicit train-split holdout manifest"
+        )
+    best_selection_score = float("-inf")
 
-    settings.EPOCH = cfgs.epochs
+    settings.EPOCH = 1 if smoke_batches else cfgs.epochs
+    smoke_equivalence = None
+    if smoke_batches:
+        smoke_equivalence = _smoke_baseline_equivalence(
+            cfgs,
+            args,
+            test_loader,
+            model1,
+            model1_encoder,
+            net,
+            val_texture_bank_template,
+            device,
+        )
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(device)
+    if controlled_continuation:
+        initial_texture_bank = (
+            list(val_texture_bank_template)
+            if val_texture_bank_template is not None
+            else []
+        )
+        if 0 in continuation_save_epochs:
+            _save_continuation_checkpoint(
+                cfgs,
+                0,
+                net,
+                model1,
+                optimizer,
+                scheduler,
+                initial_texture_bank,
+            )
+        if 0 in continuation_eval_epochs:
+            print(
+                f"[continuation-eval] frozen holdout epoch 0; n={len(test_loader.dataset)}"
+            )
+            initial_metrics = _continuation_evaluate(
+                cfgs,
+                args,
+                test_loader,
+                0,
+                model1,
+                model1_encoder,
+                net,
+                initial_texture_bank,
+                device,
+            )
+            if cfgs.baseline_reference_aji >= 0 and (
+                abs(float(initial_metrics[2]) - float(cfgs.baseline_reference_aji))
+                > float(cfgs.baseline_reference_tolerance)
+            ):
+                raise RuntimeError(
+                    "TNBC step-0 AJI disagrees with the fixed canonical reference; "
+                    "baseline attribution is required before continuation."
+                )
+            if cfgs.baseline_reference_pq >= 0 and (
+                abs(float(initial_metrics[6]) - float(cfgs.baseline_reference_pq))
+                > float(cfgs.baseline_reference_tolerance)
+            ):
+                raise RuntimeError(
+                    "TNBC step-0 PQ disagrees with the fixed canonical reference; "
+                    "baseline attribution is required before continuation."
+                )
+            initial_score = float(initial_metrics[2] + initial_metrics[6])
+            if initial_score > best_selection_score:
+                best_selection_score = initial_score
+                _save_continuation_checkpoint(
+                    cfgs,
+                    0,
+                    net,
+                    model1,
+                    optimizer,
+                    scheduler,
+                    initial_texture_bank,
+                    filename="best_aji_pq_epoch.pth",
+                )
     if pms_self_bootstrap and iter_refresh_every > 0 and pms_start_epoch <= 0:
         print("[pms-self-bootstrap] generating initial coverage maps before epoch 0.")
         refresh_baseline_masks_inplace(
@@ -493,6 +761,8 @@ def main():
         )
 
     for epoch in range(settings.EPOCH):
+        if hasattr(train_dataset, "set_epoch"):
+            train_dataset.set_epoch(epoch)
         deferred_c0 = (
             pms_self_bootstrap
             and iter_refresh_every > 0
@@ -548,9 +818,42 @@ def main():
             epoch,
             texture_memory_bank_list,
             device,
+            anchor_regularizer=anchor_regularizer,
         )
         logger.info(f"Train loss: {log_info} || epoch {epoch}.")
         print("time_for_training", time.time() - start)
+
+        if smoke_batches:
+            observed_steps = int(log_info.get("setpms_smoke_optimizer_steps", 0))
+            if observed_steps != smoke_batches:
+                raise RuntimeError(
+                    f"SetPMS smoke requested {smoke_batches} optimizer steps, observed {observed_steps}"
+                )
+            finite_losses = all(math.isfinite(float(value)) for value in log_info.values())
+            smoke_payload = {
+                "requested_optimizer_steps": smoke_batches,
+                "observed_optimizer_steps": observed_steps,
+                "finite_losses": finite_losses,
+                "cuda_max_memory_bytes": (
+                    int(torch.cuda.max_memory_allocated(device))
+                    if torch.cuda.is_available()
+                    else 0
+                ),
+                "baseline_equivalence": smoke_equivalence,
+                "seed": int(cfgs.seed),
+                "tta": bool(cfgs.tta),
+                "set_loss_weight": 1.0,
+                "note": "Mechanical smoke only; formal continuation retains the fixed 0->0.1 warm-up.",
+            }
+            if not finite_losses:
+                raise RuntimeError("SetPMS smoke produced non-finite logged losses")
+            output_root = cfgs.metrics_output_dir or cfgs.path_helper["prefix"]
+            os.makedirs(output_root, exist_ok=True)
+            with open(os.path.join(output_root, "smoke_report.json"), "w", encoding="utf-8") as handle:
+                json.dump(smoke_payload, handle, indent=2)
+            with open(os.path.join(output_root, "baseline_equivalence.json"), "w", encoding="utf-8") as handle:
+                json.dump(smoke_equivalence, handle, indent=2)
+            return
 
         detect_loss_tmp = (
             log_info.get("loss_reg", 0.0)
@@ -566,13 +869,41 @@ def main():
         detect_loss.append(detect_loss_tmp)
         segment_loss.append(segment_loss_tmp)
         all_loss.append(all_loss_tmp)
+        completed_epoch = epoch + 1
+        if cfgs.metrics_output_dir:
+            curve_row = {
+                "run_label": cfgs.run_label,
+                "epoch": int(completed_epoch),
+                "lr": float(optimizer.param_groups[0]["lr"]),
+                "detect_loss": float(detect_loss_tmp),
+                "segment_loss": float(segment_loss_tmp),
+                "total_loss": float(all_loss_tmp),
+            }
+            for key, value in sorted(log_info.items()):
+                curve_row[key] = float(value)
+            _append_csv(
+                os.path.join(cfgs.metrics_output_dir, "training_curves.csv"), curve_row
+            )
 
         scheduler.step()
+        if controlled_continuation and completed_epoch in continuation_save_epochs:
+            _save_continuation_checkpoint(
+                cfgs,
+                completed_epoch,
+                net,
+                model1,
+                optimizer,
+                scheduler,
+                texture_memory_bank_list,
+            )
         net.eval()
-        should_validate = (
-            epoch > cfgs.val_start_epoch
-            and (epoch % cfgs.val_freq == 0 or epoch == settings.EPOCH - 1)
-        )
+        if controlled_continuation:
+            should_validate = completed_epoch in continuation_eval_epochs
+        else:
+            should_validate = (
+                epoch > cfgs.val_start_epoch
+                and (epoch % cfgs.val_freq == 0 or epoch == settings.EPOCH - 1)
+            )
         if not should_validate:
             continue
 
@@ -581,20 +912,34 @@ def main():
             if val_texture_bank_template is not None
             else texture_memory_bank_list.copy()
         )
-        print(f"[test-eval] test split evaluation; n={len(test_loader.dataset)}")
-        metrics = validation_on_epoch(
-            cfgs,
-            args,
-            test_loader,
-            epoch,
-            model1,
-            model1_encoder,
-            net,
-            cfgs.load,
-            args.data.post.iou_threshold,
-            val_texture_bank,
-            device,
-        )
+        split_label = "frozen train-split holdout" if cfgs.eval_on_train else "test split"
+        print(f"[test-eval] {split_label} evaluation; n={len(test_loader.dataset)}")
+        if controlled_continuation:
+            metrics = _continuation_evaluate(
+                cfgs,
+                args,
+                test_loader,
+                completed_epoch,
+                model1,
+                model1_encoder,
+                net,
+                val_texture_bank,
+                device,
+            )
+        else:
+            metrics = validation_on_epoch(
+                cfgs,
+                args,
+                test_loader,
+                epoch,
+                model1,
+                model1_encoder,
+                net,
+                cfgs.load,
+                args.data.post.iou_threshold,
+                val_texture_bank,
+                device,
+            )
         seg_dice1, seg_dice2, seg_aji, seg_aji_p, seg_dq, seg_sq, seg_pq = metrics
         print(
             f"dice1: {seg_dice1 * 100:.2f} dice2: {seg_dice2 * 100:.2f} "
@@ -609,7 +954,21 @@ def main():
         sq.append(seg_sq)
         pq.append(seg_pq)
 
-        if seg_pq > best_pq:
+        if controlled_continuation:
+            selection_score = float(seg_aji + seg_pq)
+            if selection_score > best_selection_score:
+                best_selection_score = selection_score
+                _save_continuation_checkpoint(
+                    cfgs,
+                    completed_epoch,
+                    net,
+                    model1,
+                    optimizer,
+                    scheduler,
+                    val_texture_bank,
+                    filename="best_aji_pq_epoch.pth",
+                )
+        elif seg_pq > best_pq:
             best_pq = seg_pq
             torch.save(
                 {
@@ -621,7 +980,7 @@ def main():
                 },
                 os.path.join(cfgs.path_helper["ckpt_path"], "base_pq_epoch.pth"),
             )
-        if seg_aji > best_aji:
+        if not controlled_continuation and seg_aji > best_aji:
             best_aji = seg_aji
             torch.save(
                 {
@@ -633,6 +992,28 @@ def main():
                 },
                 os.path.join(cfgs.path_helper["ckpt_path"], "base_aji_epoch.pth"),
             )
+
+    if cfgs.metrics_output_dir:
+        os.makedirs(cfgs.metrics_output_dir, exist_ok=True)
+        runtime_payload = {
+            "run_label": cfgs.run_label,
+            "cuda_max_memory_bytes": (
+                int(torch.cuda.max_memory_allocated(device))
+                if torch.cuda.is_available()
+                else 0
+            ),
+            "cuda_max_memory_reserved_bytes": (
+                int(torch.cuda.max_memory_reserved(device))
+                if torch.cuda.is_available()
+                else 0
+            ),
+        }
+        with open(
+            os.path.join(cfgs.metrics_output_dir, "runtime_memory.json"),
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(runtime_payload, handle, indent=2)
 
     if detect_loss:
         epochs = np.arange(1, len(detect_loss) + 1)

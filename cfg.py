@@ -85,6 +85,25 @@ def parse_args():
     parser.add_argument("--coverage_accumulate", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--pms_start_epoch", default=0, type=int)
 
+    # SetPMS is strictly training-only.  Its formulation is fixed in
+    # setpms/loss.py; these flags only enable the branch and provide frozen
+    # data/continuation manifests for the authorised Stage 1 experiment.
+    parser.add_argument("--setpms", action="store_true")
+    parser.add_argument("--setpms_smoke_batches", default=0, type=int)
+    parser.add_argument("--max_train_crops_per_image", default=0, type=int)
+    parser.add_argument("--train_manifest", default="", type=str)
+    parser.add_argument("--eval_manifest", default="", type=str)
+    parser.add_argument("--eval_patch_manifest", default="", type=str)
+    parser.add_argument("--train_crop_manifest", default="", type=str)
+    parser.add_argument("--continuation_save_epochs", default="", type=str)
+    parser.add_argument("--continuation_eval_epochs", default="", type=str)
+    parser.add_argument("--run_dir", default="", type=str)
+    parser.add_argument("--metrics_output_dir", default="", type=str)
+    parser.add_argument("--run_label", default="", type=str)
+    parser.add_argument("--baseline_reference_aji", default=-1.0, type=float)
+    parser.add_argument("--baseline_reference_pq", default=-1.0, type=float)
+    parser.add_argument("--baseline_reference_tolerance", default=0.005, type=float)
+
     parser.add_argument("--stain_baseline_dilate_radius", default=-1, type=int)
     parser.add_argument("--stain_min_distance", default=-1, type=int)
     parser.add_argument("--stain_top_k", default=-1, type=int)
