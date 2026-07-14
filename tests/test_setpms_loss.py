@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import math
 import inspect
+import json
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
 
 import numpy as np
@@ -233,6 +237,31 @@ def test_archival_checkpoint_keeps_weights_and_drops_optimizer_state():
     assert compact["model"]["weight"].dtype == torch.float16
     assert compact["model"]["steps"].dtype == torch.int64
     assert compact["texture_memory_bank_list"][0][0].dtype == torch.float16
+
+
+def test_owner_decision_freeze_does_not_rewrite_formal_report():
+    tool = Path("tools/finalize_setpms_owner_decision.py").resolve()
+    with tempfile.TemporaryDirectory() as temporary_dir:
+        artifact_root = Path(temporary_dir)
+        report_path = artifact_root / "report.json"
+        report_path.write_text(
+            json.dumps({"decision": {"category": "INCONCLUSIVE_OWNER_REVIEW"}}),
+            encoding="utf-8",
+        )
+        original_report = report_path.read_bytes()
+        completed = subprocess.run(
+            [sys.executable, str(tool), "--artifact-root", str(artifact_root)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert report_path.read_bytes() == original_report
+        owner = json.loads((artifact_root / "owner_decision.json").read_text(encoding="utf-8"))
+        assert owner["formal_artifact_verdict"] == "INCONCLUSIVE_OWNER_REVIEW"
+        assert owner["owner_decision"] == "STOP_SET_PMS"
+        sums = (artifact_root / "SHA256SUMS").read_text(encoding="utf-8")
+        assert "report.json" in sums and "owner_decision.json" in sums
 
 
 def load_tests(loader, tests, pattern):
