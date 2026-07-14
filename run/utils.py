@@ -176,7 +176,7 @@ def create_logger(log_dir, phase='train'):
     return logger
 
 
-def set_log_dir(root_dir, exp_name, run_dir=''):
+def set_log_dir(root_dir, exp_name, run_dir='', resume_existing=False):
     path_dict = {}
     if run_dir:
         # SetPMS orchestration supplies an already-created, immutable artifact
@@ -193,16 +193,16 @@ def set_log_dir(root_dir, exp_name, run_dir=''):
 
     # set checkpoint path
     ckpt_path = os.path.join(prefix, 'Model')
-    os.makedirs(ckpt_path)
+    os.makedirs(ckpt_path, exist_ok=resume_existing)
     path_dict['ckpt_path'] = ckpt_path
 
     log_path = os.path.join(prefix, 'Log')
-    os.makedirs(log_path)
+    os.makedirs(log_path, exist_ok=resume_existing)
     path_dict['log_path'] = log_path
 
     # set sample image path for fid calculation
     sample_path = os.path.join(prefix, 'Samples')
-    os.makedirs(sample_path)
+    os.makedirs(sample_path, exist_ok=resume_existing)
     path_dict['sample_path'] = sample_path
 
     return path_dict

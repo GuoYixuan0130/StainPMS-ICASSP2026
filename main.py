@@ -548,7 +548,12 @@ def main():
         f"(image encoder frozen except prompt_generator)"
     )
 
-    cfgs.path_helper = set_log_dir("logs", cfgs.exp_name, cfgs.run_dir)
+    cfgs.path_helper = set_log_dir(
+        "logs",
+        cfgs.exp_name,
+        cfgs.run_dir,
+        resume_existing=bool(cfgs.continuation_resume_checkpoint),
+    )
     logger = create_logger(cfgs.path_helper["log_path"])
     logger.info(cfgs)
 
