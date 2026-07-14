@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "dataset": "TNBC",
+  "train_image_root_relative": "train_12/images",
+  "label_root_relative": "train_12/labels",
+  "train_patients": [1, 2, 3, 4, 5, 6],
+  "development_patients": [7, 8],
+  "train_image_ids": ["01_1", "01_2", "01_3", "01_4", "01_5", "01_6", "01_7", "02_1", "02_2", "02_3", "03_1", "03_2", "03_3", "03_4", "03_5", "04_1", "04_2", "04_3", "04_4", "04_5", "04_6", "04_7", "04_8", "05_1", "05_2", "05_3", "05_4", "06_1", "06_2", "06_3"],
+  "development_image_ids": ["07_1", "07_2", "07_3", "08_1", "08_2", "08_3", "08_4"],
+  "prohibited": ["patients 9-11", "MoNuSeg", "TNBC test root"]
+}

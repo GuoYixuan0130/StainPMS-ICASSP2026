@@ -78,6 +78,26 @@ class MLP(nn.Module):
             x = layer(x)
         return x
     
+class QualityHead(nn.Module):
+    """Small scalar head used only by the isolated PromptQ-v2 audit.
+
+    The architecture intentionally has 66,049 parameters for a 256-channel
+    ROI: 256*256 + 256 + 256 + 1.  It is not constructed for ordinary
+    StainPMS inference, so the canonical path remains bit-for-bit unchanged.
+    """
+
+    def __init__(self, hidden_dim: int):
+        super().__init__()
+        self.fc1 = nn.Linear(hidden_dim, hidden_dim)
+        self.act = nn.ReLU(inplace=True)
+        self.fc2 = nn.Linear(hidden_dim, 1)
+        nn.init.zeros_(self.fc2.weight)
+        nn.init.constant_(self.fc2.bias, float(np.log(0.01 / 0.99)))
+
+    def forward(self, features):
+        return self.fc2(self.act(self.fc1(features)))
+
+
 class DPAP2PNet(nn.Module):
     """ This is the Proposal-aware P2PNet module that performs cell recognition """
 
@@ -90,7 +110,11 @@ class DPAP2PNet(nn.Module):
             dropout=0.1,
             space: int = 16,
             hidden_dim: int = 256,
-            with_mask=False
+            with_mask=False,
+            enable_quality_head: bool = False,
+            detach_quality_features: bool = False,
+            quantize_quality_features_fp16: bool = False,
+            export_quality_features: bool = False,
     ):
         """
             Initializes the model.
@@ -102,6 +126,10 @@ class DPAP2PNet(nn.Module):
         self.num_levels = num_levels
         self.hidden_dim = hidden_dim
         self.with_mask = with_mask
+        self.enable_quality_head = bool(enable_quality_head)
+        self.detach_quality_features = bool(detach_quality_features)
+        self.quantize_quality_features_fp16 = bool(quantize_quality_features_fp16)
+        self.export_quality_features = bool(export_quality_features)
         self.strides = [2 ** (i + 2) for i in range(self.num_levels)]
 
         self.deform_layer = MLP(hidden_dim, hidden_dim, 2, 2, drop=dropout)
@@ -117,6 +145,8 @@ class DPAP2PNet(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(hidden_dim, 1, kernel_size=1, padding=1)
         )
+        if self.enable_quality_head:
+            self.quality_head = QualityHead(hidden_dim)
 
     def forward(self,
                 images):
@@ -152,10 +182,25 @@ class DPAP2PNet(nn.Module):
             'pred_masks': F.interpolate(
                 self.mask_head(feats1), size=images.shape[2:], mode='bilinear', align_corners=True)
         }
+        if self.enable_quality_head:
+            quality_features = roi_features.detach() if self.detach_quality_features else roi_features
+            if self.quantize_quality_features_fp16:
+                quality_features = quality_features.to(torch.float16).to(torch.float32)
+            quality_logits = self.quality_head(quality_features).squeeze(-1)
+            output['pred_quality_logits'] = quality_logits.flatten(1, 2)
+            if self.export_quality_features:
+                output['quality_roi_features'] = quality_features.flatten(1, 2)
 
         return output,feats_origin,embedding,feats
 
-def build_model(cfg):
+def build_model(
+        cfg,
+        *,
+        enable_quality_head: bool = False,
+        detach_quality_features: bool = False,
+        quantize_quality_features_fp16: bool = False,
+        export_quality_features: bool = False,
+):
     backbone = Backbone(cfg)
     
     model = DPAP2PNet(
@@ -164,7 +209,11 @@ def build_model(cfg):
         num_classes=cfg.data.num_classes,
         dropout=cfg.prompter.dropout,
         space=cfg.prompter.space,
-        hidden_dim=cfg.prompter.hidden_dim
+        hidden_dim=cfg.prompter.hidden_dim,
+        enable_quality_head=enable_quality_head,
+        detach_quality_features=detach_quality_features,
+        quantize_quality_features_fp16=quantize_quality_features_fp16,
+        export_quality_features=export_quality_features,
     )
 
     return model,backbone
