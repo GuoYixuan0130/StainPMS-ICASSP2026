@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from promptq_v2.model import ModelBundle, assert_frozen_without_grads, configure_quality_only
+from promptq_v2.assembly import crop_with_overlap
 from promptq_v2.protocol import (
     INCLUSIVE_IOU_THRESHOLD,
     NMS_RADIUS,
@@ -69,6 +70,14 @@ class PromptQV2ProtocolTests(unittest.TestCase):
     def test_quality_loss_is_finite(self):
         loss = quality_focal_loss(torch.zeros(3), torch.tensor([0.0, 0.5, 1.0]), torch.tensor([False, True, True]))
         self.assertTrue(torch.isfinite(loss))
+
+    def test_isolated_canonical_crop_replay_is_deterministic(self):
+        image = torch.zeros(3, 480, 480)
+        first = crop_with_overlap(image, overlap=32, load="unclockwise")
+        second = crop_with_overlap(image.clone(), overlap=32, load="unclockwise")
+        np.testing.assert_array_equal(first, second)
+        self.assertTrue(np.all(first[:, 2] - first[:, 0] <= 256))
+        self.assertTrue(np.all(first[:, 3] - first[:, 1] <= 256))
 
 
 if __name__ == "__main__":
