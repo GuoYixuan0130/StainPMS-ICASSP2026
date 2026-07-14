@@ -235,6 +235,7 @@ def _run_unit_tests(artifact: Path) -> None:
         "tests.test_resimix_transplant", "tests.test_resimix_donor", "tests.test_resimix_coverage",
         "tests.test_resimix_runtime", "tests.test_resimix_dataset", "tests.test_resimix_metrics",
         "tests.test_resimix_protocol", "tests.test_resimix_report", "tests.test_resimix_offline",
+        "tests.test_resimix_driver_contract",
     ]
     output = artifact / "unit_tests.txt"
     with output.open("w", encoding="utf-8") as handle:
@@ -369,7 +370,7 @@ def _sha256sums(root: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--spec", required=True, type=Path)
-    parser.add_argument("--artifact-root", default=ROOT / "logs" / "resimixpms" / "stage1_dual_dev", type=Path)
+    parser.add_argument("--artifact-root", required=True, type=Path)
     options = parser.parse_args()
     spec = _read_spec(options.spec)
     head = _require_clean_formal_checkout()
