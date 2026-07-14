@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from promptq_v2.model import ModelBundle, assert_frozen_without_grads, configure_quality_only
-from promptq_v2.assembly import crop_with_overlap
+from promptq_v2.assembly import combine_mask, crop_with_overlap
 from promptq_v2.protocol import (
     INCLUSIVE_IOU_THRESHOLD,
     NMS_RADIUS,
@@ -78,6 +78,13 @@ class PromptQV2ProtocolTests(unittest.TestCase):
         np.testing.assert_array_equal(first, second)
         self.assertTrue(np.all(first[:, 2] - first[:, 0] <= 256))
         self.assertTrue(np.all(first[:, 3] - first[:, 1] <= 256))
+
+    def test_combine_mask_uses_host_indices_for_assembly(self):
+        logits = torch.full((1, 4, 4), -1.0)
+        logits[0, 1:3, 1:3] = 1.0
+        combined = combine_mask((4, 4), torch.tensor([[2.0, 2.0]]), logits, torch.tensor([0.9]))
+        self.assertEqual(combined.shape, (4, 4))
+        self.assertEqual(int((combined > 0).sum()), 4)
 
 
 if __name__ == "__main__":

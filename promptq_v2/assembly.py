@@ -109,7 +109,11 @@ def combine_mask(ori_shape: Any, points: torch.Tensor, pred: torch.Tensor, iou_p
     del data["masks"]
     data.filter(batched_nms(data["boxes"].float(), data["iou_preds"], torch.zeros_like(data["boxes"][:, 0]), iou_threshold=box_nms_thresh))
     masks = [rle_to_mask(rle) for rle in data["rles"]]
-    scores, inds = torch.as_tensor(data["iou_preds"]), np.asarray(data["inds"])
+    # ``combine_mask`` executes during the GPU cache pass.  The original
+    # canonical routine reduces these values to host-side assembly indices;
+    # make that transfer explicit before NumPy duplicate handling.
+    scores = data["iou_preds"].detach().cpu().numpy()
+    inds = data["inds"].detach().cpu().numpy()
     keep = np.ones(len(inds), dtype=bool)
     for value in np.unique(inds):
         duplicate = np.flatnonzero(inds == value)
