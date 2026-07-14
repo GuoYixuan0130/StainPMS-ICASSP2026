@@ -18,7 +18,7 @@ from resimixpms.manifests import (
     load_crop_records,
     validate_manifest_patient_isolation,
 )
-from resimixpms.runtime import ResiMixAugmentor
+from resimixpms.runtime import ResiMixAugmentor, force_single_synthetic_medoid_prompt
 from resimixpms.transplant import mask_medoid
 from resimixpms.coverage import StaticCoverageCache
 
@@ -628,20 +628,11 @@ class MONUSEG(Dataset):
                     preserve_count = 0
 
                     # A successful synthetic transplant is deliberately an
-                    # uncovered residual positive.  De-duplicate only natural
-                    # residual H-peak prompts within six pixels, then retain
-                    # the synthetic medoid before any preserve prompts.
+                    # uncovered residual positive.  Retain its medoid exactly
+                    # once before any preserve prompts.
                     if synthetic_medoid_xy is not None:
-                        if len(pos_coords):
-                            distances = np.linalg.norm(pos_coords - synthetic_medoid_xy[None, :], axis=1)
-                            keep_natural = distances > 6.0
-                            pos_coords = pos_coords[keep_natural]
-                            pos_inst_ids = pos_inst_ids[keep_natural]
-                        pos_coords = np.concatenate(
-                            [pos_coords, synthetic_medoid_xy.reshape(1, 2)], axis=0
-                        ).astype(np.float32, copy=False)
-                        pos_inst_ids = np.concatenate(
-                            [pos_inst_ids, np.asarray([synthetic_instance_id], dtype=np.int32)], axis=0
+                        pos_coords, pos_inst_ids = force_single_synthetic_medoid_prompt(
+                            pos_coords, pos_inst_ids, synthetic_medoid_xy, synthetic_instance_id
                         )
                         pos_weights = np.full(
                             len(pos_coords), 1.0 / max(1, len(pos_coords)), dtype=np.float32

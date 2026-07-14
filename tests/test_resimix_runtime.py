@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from resimixpms.runtime import ResiMixAugmentor  # noqa: E402
+from resimixpms.runtime import ResiMixAugmentor, force_single_synthetic_medoid_prompt  # noqa: E402
 from resimixpms.experiment import sha256_file  # noqa: E402
 from resimixpms.transplant import CONTEXT_FEATURE_NAMES, annulus_mask  # noqa: E402
 
@@ -26,6 +26,16 @@ def disk(shape, center, radius):
 
 
 class RuntimeSmokeTest(unittest.TestCase):
+    def test_forced_synthetic_medoid_replaces_duplicate_synthetic_candidate(self):
+        coords, instance_ids = force_single_synthetic_medoid_prompt(
+            np.asarray([[30.0, 30.0], [0.0, 0.0], [12.0, 10.0]], dtype=np.float32),
+            np.asarray([70, 5, 6], dtype=np.int32),
+            np.asarray([10.0, 10.0], dtype=np.float32),
+            70,
+        )
+        self.assertTrue(np.array_equal(instance_ids, np.asarray([5, 70], dtype=np.int32)))
+        self.assertTrue(np.array_equal(coords, np.asarray([[0.0, 0.0], [10.0, 10.0]], dtype=np.float32)))
+
     def _runtime(self, directory: Path) -> ResiMixAugmentor:
         payload_dir = directory / "payloads"
         payload_dir.mkdir()

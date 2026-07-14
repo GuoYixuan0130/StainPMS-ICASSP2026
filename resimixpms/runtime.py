@@ -52,6 +52,35 @@ class AugmentResult:
     event_index: int | None
 
 
+def force_single_synthetic_medoid_prompt(
+    pos_coords: np.ndarray,
+    pos_instance_ids: np.ndarray,
+    synthetic_medoid_xy: np.ndarray,
+    synthetic_instance_id: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Retain exactly one synthetic residual prompt at its forced medoid.
+
+    Candidate mining can independently rediscover the just-transplanted
+    nucleus.  That candidate may be far from the medoid, so distance-only
+    de-duplication would leave two identical synthetic GT masks.  Preserve
+    natural residual prompts only, then append the registered medoid once.
+    """
+    coords = np.asarray(pos_coords, dtype=np.float32).reshape(-1, 2)
+    instance_ids = np.asarray(pos_instance_ids, dtype=np.int32).reshape(-1)
+    if len(coords) != len(instance_ids):
+        raise ValueError("residual prompt coordinates and instance IDs disagree")
+    medoid = np.asarray(synthetic_medoid_xy, dtype=np.float32).reshape(1, 2)
+    if len(coords):
+        distances = np.linalg.norm(coords - medoid, axis=1)
+        keep_natural = (instance_ids != int(synthetic_instance_id)) & (distances > 6.0)
+        coords = coords[keep_natural]
+        instance_ids = instance_ids[keep_natural]
+    return (
+        np.concatenate([coords, medoid], axis=0).astype(np.float32, copy=False),
+        np.concatenate([instance_ids, np.asarray([synthetic_instance_id], dtype=np.int32)], axis=0),
+    )
+
+
 def _as_hwc_rgb_uint8(image: np.ndarray) -> np.ndarray:
     arr = np.asarray(image)
     if arr.ndim != 3 or arr.shape[-1] != 3:
