@@ -234,7 +234,7 @@ def _run_unit_tests(artifact: Path) -> None:
         sys.executable, "-m", "unittest", "-v",
         "tests.test_resimix_transplant", "tests.test_resimix_donor", "tests.test_resimix_coverage",
         "tests.test_resimix_runtime", "tests.test_resimix_dataset", "tests.test_resimix_metrics",
-        "tests.test_resimix_protocol", "tests.test_resimix_report",
+        "tests.test_resimix_protocol", "tests.test_resimix_report", "tests.test_resimix_offline",
     ]
     output = artifact / "unit_tests.txt"
     with output.open("w", encoding="utf-8") as handle:

@@ -1,7 +1,10 @@
 prompter = dict(
     backbone=dict(
         model_name="convnext_xlarge_in22k",
-        pretrained=True,
+        # ResiMix formal runs must initialize this module exclusively from the
+        # sealed PMS checkpoint.  Enabling timm pretraining triggers an
+        # unpinned network download before that checkpoint is restored.
+        pretrained=False,
         num_classes=0,
         global_pool="",
     ),
