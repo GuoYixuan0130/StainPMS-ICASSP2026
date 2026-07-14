@@ -714,7 +714,21 @@ def main() -> None:
     if options.skip_unit_tests:
         unit_output.write_text("SKIPPED BY EXPLICIT --skip-unit-tests\n", encoding="utf-8")
     else:
-        _run(root, [sys.executable, "-m", "pytest", "tests/test_setpms_loss.py", "-q"], unit_output)
+        _run(
+            root,
+            [
+                sys.executable,
+                "-m",
+                "unittest",
+                "discover",
+                "-s",
+                "tests",
+                "-p",
+                "test_setpms_loss.py",
+                "-v",
+            ],
+            unit_output,
+        )
 
     runtime = {}
     smoke_dir = artifact_root / "smoke"

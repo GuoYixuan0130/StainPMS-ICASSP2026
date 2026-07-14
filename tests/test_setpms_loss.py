@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import math
+import inspect
 from pathlib import Path
+import unittest
 
 import numpy as np
 import torch
@@ -211,3 +213,17 @@ def test_inclusive_iou_half_threshold_matches_canonical_metric():
     assert paired_pred == [1]
     assert unpaired_true == []
     assert unpaired_pred == []
+
+
+def load_tests(loader, tests, pattern):
+    """Expose the dependency-free mechanical checks to ``unittest discover``."""
+
+    suite = unittest.TestSuite()
+    for name, candidate in sorted(globals().items()):
+        if name.startswith("test_") and inspect.isfunction(candidate):
+            suite.addTest(unittest.FunctionTestCase(candidate, description=name))
+    return suite
+
+
+if __name__ == "__main__":
+    unittest.main()
