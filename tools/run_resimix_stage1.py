@@ -260,7 +260,7 @@ def _training_command(
         "--use_pms", "--pms_loss_coef", "0.5", "--pms_residual_mask_weight", "0.3",
         "--pms_preserve_loss_coef", "1.0", "--pms_object_weight", "1.0",
         "--baseline_masks_dir", str(coverage_manifest.parent), "--coverage_manifest", str(coverage_manifest),
-        "--evaluation_epochs", ",".join(map(str, evaluation_epochs)), "--save_eval_checkpoints",
+        "--evaluation_epochs", ",".join(map(str, evaluation_epochs)),
         "--artifact_dir", str(run_dir), "--per_image_metrics_path", str(run_dir / "per_image.csv"),
     ])
     if resimix_config is not None:
@@ -315,8 +315,7 @@ def _verify_run(run_dir: Path, dataset: str) -> None:
     for epoch in expected_epochs:
         metric_path = run_dir / f"evaluation_epoch_{epoch:02d}.json"
         item_path = run_dir / f"per_image_epoch_{epoch:02d}.csv"
-        checkpoint_path = run_dir / "Model" / f"epoch_{epoch:02d}.pth"
-        if not metric_path.is_file() or not item_path.is_file() or not checkpoint_path.is_file():
+        if not metric_path.is_file() or not item_path.is_file():
             raise RuntimeError(f"{dataset} run lacks registered artifacts for epoch {epoch}")
         with item_path.open("r", newline="", encoding="utf-8") as handle:
             rows = list(csv.DictReader(handle))
@@ -347,16 +346,20 @@ def _collect_runtime_memory() -> dict[str, Any]:
 
 
 def _checkpoint_checksums(artifact: Path) -> dict[str, Any]:
-    entries = []
-    for dataset, epochs in EVALUATION_SCHEDULES.items():
-        for method in ("static_control", "resimix"):
-            for epoch in epochs:
-                path = artifact / dataset / method / "Model" / f"epoch_{epoch:02d}.pth"
-                entries.append({
-                    "dataset": dataset, "method": method, "completed_epochs": epoch,
-                    "path": str(path), "sha256": sha256_file(path),
-                })
-    return {"checkpoints": entries}
+    """Record the initialization checkpoint provenance without retaining model copies.
+
+    Registered evaluation JSON/CSV nodes are the formal results.  Full model
+    serializations at every node are neither consumed by the report nor needed
+    to continue the single-pass protocol, and exceed the AutoDL disk budget.
+    """
+    manifest_path = artifact / "checkpoint_manifest.json"
+    with manifest_path.open("r", encoding="utf-8") as handle:
+        initialization = json.load(handle).get("checkpoints", [])
+    return {
+        "initialization_checkpoints": initialization,
+        "evaluation_checkpoint_policy": "metrics_only_no_full_model_copies",
+        "evaluation_checkpoints": [],
+    }
 
 
 def _sha256sums(root: Path) -> None:

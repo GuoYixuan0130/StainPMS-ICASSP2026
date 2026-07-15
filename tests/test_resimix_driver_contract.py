@@ -23,6 +23,18 @@ class FormalDriverContractTest(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("--artifact-root", result.stderr)
 
+    def test_formal_training_keeps_metrics_not_full_model_copies(self):
+        from tools.run_resimix_stage1 import _training_command
+
+        data = {
+            "data_path": "data", "checkpoint_path": "initialization.pth",
+            "train_manifest": "train.json", "test_manifest": "development.json",
+            "train_image_root": "train_images", "train_label_root": "train_labels",
+            "test_image_root": "development_images", "test_label_root": "development_labels",
+        }
+        command = _training_command("tnbc", data, Path("coverage.json"), Path("run"), (0, 2, 4, 6, 8, 10))
+        self.assertNotIn("--save_eval_checkpoints", command)
+
 
 class SmokeCLIContractTest(unittest.TestCase):
     def test_omitted_crop_manifests_remain_none(self):
