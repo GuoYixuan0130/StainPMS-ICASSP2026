@@ -51,5 +51,24 @@ class SmokeCLIContractTest(unittest.TestCase):
         self.assertIsNone(options.eval_crop_manifest)
 
 
+class RecoveryCLIContractTest(unittest.TestCase):
+    def test_recovery_commands_do_not_train_tnbc_or_save_full_models(self):
+        from tools.recover_resimix_stage1 import _commands
+
+        artifact = Path("artifact")
+        data = {
+            "data_path": "data", "checkpoint_path": "initialization.pth",
+            "train_manifest": "train.json", "test_manifest": "development.json",
+            "train_image_root": "train_images", "train_label_root": "train_labels",
+            "test_image_root": "development_images", "test_label_root": "development_labels",
+            "train_crop_manifest": "crops.json", "eval_crop_manifest": "patches.json",
+        }
+        control, resimix = _commands(artifact, data, Path("coverage.json"), Path("resimix.json"))
+        self.assertNotIn("tnbc", control)
+        self.assertNotIn("tnbc", resimix)
+        self.assertNotIn("--save_eval_checkpoints", control)
+        self.assertNotIn("--save_eval_checkpoints", resimix)
+
+
 if __name__ == "__main__":
     unittest.main()

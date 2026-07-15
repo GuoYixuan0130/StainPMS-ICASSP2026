@@ -54,6 +54,29 @@ class ReportGateTest(unittest.TestCase):
             self.assertTrue((root / "monuseg_lite_per_patch.csv").is_file())
             self.assertEqual(report["tnbc"]["step0_equivalence"]["checked_items"], 7)
 
+    def test_report_can_use_an_explicit_recovery_control_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            development = [{"image_name": f"tnbc_{index:02d}.png", "patient_id": 7 + index % 2} for index in range(7)]
+            (root / "tnbc_data_manifest.json").write_text(json.dumps({"development_records": development}), encoding="utf-8")
+            for method, delta in (("static_control", 0.0), ("resimix", 0.03)):
+                self._write_run(root, "tnbc", method, 7, _SUMMARY.SCHEDULES["tnbc"], delta)
+            self._write_run(root, "monuseg_lite", "static_control", 12, _SUMMARY.SCHEDULES["monuseg_lite"], 0.0)
+            self._write_run(root, "monuseg_lite", "resimix", 12, _SUMMARY.SCHEDULES["monuseg_lite"], 0.03)
+            recovery = root / "monuseg_lite" / "static_control_recovery"
+            self._write_run(root, "monuseg_lite", "static_control_recovery", 12, _SUMMARY.SCHEDULES["monuseg_lite"], 0.02)
+            saved_argv = sys.argv
+            try:
+                sys.argv = [
+                    "summarize_resimix_stage1.py", "--artifact-dir", str(root),
+                    "--monuseg-control-dir", str(recovery),
+                ]
+                _SUMMARY.main()
+            finally:
+                sys.argv = saved_argv
+            report = json.loads((root / "report.json").read_text(encoding="utf-8"))
+            self.assertAlmostEqual(report["monuseg_lite"]["control_best"]["aji"], 0.22)
+
 
 if __name__ == "__main__":
     unittest.main()

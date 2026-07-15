@@ -158,8 +158,9 @@ def _delta(left: Mapping[str, Any], right: Mapping[str, Any], metric: str) -> fl
     return float(right[metric]) - float(left[metric])
 
 
-def _dataset_summary(root: Path, dataset: str) -> dict[str, Any]:
-    control_dir, resimix_dir = root / dataset / "static_control", root / dataset / "resimix"
+def _dataset_summary(root: Path, dataset: str, *, control_dir: Path | None = None) -> dict[str, Any]:
+    control_dir = control_dir or root / dataset / "static_control"
+    resimix_dir = root / dataset / "resimix"
     expected_epochs, expected_items = SCHEDULES[dataset], ITEM_COUNTS[dataset]
     control_nodes = _evaluations(control_dir, expected_epochs)
     resimix_nodes = _evaluations(resimix_dir, expected_epochs)
@@ -328,9 +329,15 @@ def _explicit_answers(tnbc: Mapping[str, Any], mono: Mapping[str, Any], gate: Ma
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifact-dir", required=True, type=Path)
+    parser.add_argument(
+        "--monuseg-control-dir",
+        type=Path,
+        help="recovery-only override for an incomplete MoNuSeg-Lite Static-PMS arm",
+    )
     options = parser.parse_args()
     root = options.artifact_dir
-    tnbc, mono = _dataset_summary(root, "tnbc"), _dataset_summary(root, "monuseg_lite")
+    tnbc = _dataset_summary(root, "tnbc")
+    mono = _dataset_summary(root, "monuseg_lite", control_dir=options.monuseg_control_dir)
     gate = _gate(tnbc, mono)
     t_rows, m_rows = _metric_rows("tnbc", tnbc), _metric_rows("monuseg_lite", mono)
     _write_csv(root / "tnbc_metrics.csv", t_rows, list(t_rows[0]))
