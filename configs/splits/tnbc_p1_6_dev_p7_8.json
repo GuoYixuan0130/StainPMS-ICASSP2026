@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "dataset": "tnbc",
+  "protocol_id": "tnbc_p1_6_dev_p7_8_v1",
+  "status": "pending_remote_manifest_audit",
+  "protocol": {
+    "train_patients": [1, 2, 3, 4, 5, 6],
+    "development_patients": [7, 8],
+    "closed_test_patients": [9, 10, 11],
+    "closed_test_policy": "Never enumerate, read, hash, summarize, visualize, infer, or evaluate during development.",
+    "development_merge_into_training": false,
+    "selection_unit": "patient",
+    "training_order_source": "explicit_manifest_only"
+  },
+  "roots": {
+    "image_root": "/root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/tnbc/train_12/images",
+    "label_root": "/root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/tnbc/train_12/labels",
+    "raw_label_root": null
+  },
+  "splits": {
+    "train": {
+      "role": "optimization",
+      "expected_count": 30,
+      "allowed_patient_ids": [1, 2, 3, 4, 5, 6],
+      "source_manifest": "/root/autodl-tmp/resimix_tnbc_train.json",
+      "samples": []
+    },
+    "development": {
+      "role": "model_selection",
+      "expected_count": 7,
+      "allowed_patient_ids": [7, 8],
+      "source_manifest": "/root/autodl-tmp/resimix_tnbc_dev.json",
+      "samples": []
+    }
+  },
+  "materialization_note": "The two safe AutoDL manifests are authoritative. Their entries and SHA256 values must be copied into a locked training manifest after the Phase 0 audit; this file must not be used for training while status is pending."
+}

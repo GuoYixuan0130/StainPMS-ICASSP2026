@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "dataset": "monuseg",
+  "protocol_id": "monuseg_grouped_dev_v1",
+  "status": "pending_remote_case_organ_audit_and_owner_selection",
+  "protocol": {
+    "official_test_access": "forbidden_during_phase0_and_model_selection",
+    "group_unit": "patient_or_tcga_case",
+    "patch_level_random_split": false,
+    "organ_balance": "best_effort_subject_to_group_integrity",
+    "stain_range_source": "optimization_split_only",
+    "training_order_source": "explicit_manifest_only"
+  },
+  "roots": {
+    "image_root": "/root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/monuseg/train_12/images",
+    "label_root": "/root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/monuseg/train_12/labels"
+  },
+  "splits": {
+    "internal_train_dev_pool": {
+      "role": "audit_only_until_grouped_split_is_locked",
+      "expected_count": 37,
+      "source_manifest": null,
+      "samples": [],
+      "audit_discovery_from_training_root": true
+    }
+  },
+  "grouped_development": {
+    "selected_candidate": null,
+    "selection_locked": false,
+    "required_metadata": [
+      "sample_id",
+      "patient_or_case_id",
+      "organ",
+      "source_release",
+      "image_sha256",
+      "label_sha256"
+    ],
+    "candidates": [
+      {
+        "id": "G1_fixed_30_7",
+        "development_images_target": 7,
+        "priority": [
+          "no patient_or_case overlap",
+          "cover as many organs as possible",
+          "minimize organ-count imbalance",
+          "deterministic lexicographic tie break"
+        ],
+        "cost": "One fixed development fold; closest to a 30/7 internal split if the 37-image training pool is valid."
+      },
+      {
+        "id": "G2_grouped_5fold_screening",
+        "folds": 5,
+        "priority": [
+          "no patient_or_case overlap",
+          "organ-stratified assignment where feasible",
+          "fixed folds and one predeclared selection aggregate"
+        ],
+        "cost": "Approximately five times validation inference and more bookkeeping; better robustness than one seven-image fold."
+      },
+      {
+        "id": "G3_leave_one_organ_diagnostic_only",
+        "priority": [
+          "one held-out organ at a time",
+          "never use as the sole model-selection protocol"
+        ],
+        "cost": "High variance and multiple runs; useful only to diagnose organ transfer after G1 or G2 is fixed."
+      }
+    ]
+  },
+  "frozen_monuseg_lite_reference": {
+    "path": "/root/autodl-tmp/projects/StainPMS-ICASSP2026/.setpms/logs/setpms/stage1_dual_dev/20260714_172429_6a40ce194788",
+    "status": "pending_remote_checksum_validation",
+    "required_files": [
+      "monuseg_lite_manifest.json",
+      "monuseg_lite_patches.json",
+      "SHA256SUMS"
+    ],
+    "policy": "Reference only after every required file matches SHA256SUMS; it cannot silently define the new grouped development split."
+  },
+  "provenance_note": "Official MoNuSeg 2018 is documented as 30 training images and 14 official test images. The local 37-image training pool is non-official until filenames, cases, organs, duplicates, and source release are audited. No official-test entry or split entry is fabricated here."
+}
