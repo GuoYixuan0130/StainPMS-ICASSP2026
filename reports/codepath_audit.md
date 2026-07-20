@@ -148,6 +148,15 @@ compares raw 8-connected components, prepared instances, split/merge counts,
 foreground XOR, and the project evaluator only when an owner-approved raw GT
 manifest/path is supplied.
 
+The official source is now resolved to the corrected Zenodo v1.1 archive
+`TNBC_NucleiSegmentation.zip` (record `2579118`, 25,232,361 bytes, publisher MD5
+`1605712a752b201b57eacc8f866adb4f`).  The original paper describes the
+annotation as binary and defines AJI ground-truth objects as connected
+components.  No paper/dataset evidence was found that authorizes applying a
+new distance-transform watershed to GT; this makes the current prepared
+watershed labels a legacy conversion requiring pixel-level p1--8 audit, not a
+pre-validated standard protocol.
+
 ## Evaluator and instance assembly
 
 The fixed defaults found in code are:

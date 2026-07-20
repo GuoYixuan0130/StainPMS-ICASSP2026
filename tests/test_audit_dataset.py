@@ -72,12 +72,18 @@ class DatasetAuditTests(unittest.TestCase):
                 "image_root": "/images",
                 "image_extension": ".png",
                 "label_root": "/labels",
+                "raw_label_root": "/selective_tnbc_p1_8",
             },
             metadata_map={},
         )
         self.assertEqual(entry["patient"], "1")
         self.assertTrue(entry["image_path"].replace("\\", "/").endswith("/images/01_1.png"))
         self.assertTrue(entry["label_path"].replace("\\", "/").endswith("/labels/01_1.mat"))
+        self.assertTrue(
+            entry["raw_label_path"]
+            .replace("\\", "/")
+            .endswith("/selective_tnbc_p1_8/GT_01/1.png")
+        )
 
     def test_cross_split_patient_and_content_overlap_is_rejected(self):
         reports = {

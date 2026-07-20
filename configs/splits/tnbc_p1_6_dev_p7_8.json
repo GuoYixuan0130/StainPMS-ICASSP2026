@@ -3,6 +3,22 @@
   "dataset": "tnbc",
   "protocol_id": "tnbc_p1_6_dev_p7_8_v1",
   "status": "pending_remote_manifest_audit",
+  "official_raw_source": {
+    "record": "https://zenodo.org/records/2579118",
+    "doi": "10.5281/zenodo.2579118",
+    "version": "1.1",
+    "version_note": "Small corrections to a few pixels that were labelled nuclei but were not.",
+    "archive_url": "https://zenodo.org/records/2579118/files/TNBC_NucleiSegmentation.zip?download=1",
+    "archive_filename": "TNBC_NucleiSegmentation.zip",
+    "archive_size_bytes": 25232361,
+    "publisher_md5": "1605712a752b201b57eacc8f866adb4f",
+    "archive_sha256": null,
+    "downloaded_at_utc": null,
+    "paper_doi": "10.1109/TMI.2018.2865709",
+    "paper_gt_semantics": "binary annotation; AJI treats ground-truth instances as connected components",
+    "watershed_as_gt_evidence": "not_found_in_original_paper_or_dataset_record",
+    "selective_access": "extract patients 1-8 only; never open or record patients 9-11 members"
+  },
   "protocol": {
     "train_patients": [1, 2, 3, 4, 5, 6],
     "development_patients": [7, 8],

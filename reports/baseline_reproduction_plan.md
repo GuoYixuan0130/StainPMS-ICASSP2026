@@ -21,6 +21,14 @@ the new development images; a correct hash alone does not establish that.
 
 ## TNBC protocol to materialize
 
+The raw-data source is the corrected official Zenodo v1.1 record
+`10.5281/zenodo.2579118`, not v1.0.  Its archive is
+`TNBC_NucleiSegmentation.zip`, 25,232,361 bytes, with publisher MD5
+`1605712a752b201b57eacc8f866adb4f`; a local SHA256 must still be recorded.  The
+paper treats GT as binary and AJI objects as connected components.  Therefore
+connected components, the current distance-transform watershed and prepared
+labels must be compared before the project lead freezes an instance-GT version.
+
 - Optimization: patients 1--6, expected 30 images, ordered only by
   `/root/autodl-tmp/resimix_tnbc_train.json`.
 - Model selection: patients 7--8, expected 7 images, ordered only by

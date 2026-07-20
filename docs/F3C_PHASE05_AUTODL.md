@@ -9,7 +9,9 @@ It is not authorization for baseline training or Phase 1.  It must be run on
 - MoNuSeg test14: the manifest tool may read ZIP directory metadata and raw
   source-TIFF bytes only to record filename, size, CRC and SHA256.  It does not
   decode test images and never opens test XML/PNG/MAT annotations.
-- TNBC patients 9--11 are never enumerated or read.
+- TNBC patients 9--11 member contents are never opened, extracted, counted or
+  reported.  The official all-patient ZIP central directory is examined only
+  to select the explicitly allowed p1--8 folders.
 - XML and prepared-label audit is accepted only for a training manifest; the
   tool rejects a test-role manifest before opening its archive.
 - Smoke mode requires a hash-verified train manifest, constructs no evaluation
@@ -30,6 +32,9 @@ preserve the original downloaded filenames.  Required inputs are:
 3. preferably, official training-organ information and XML-to-mask MATLAB
    converter files, Drive IDs `1xYyQ31CHFRnvTCTuuHdconlJCMk2SK7Z` and
    `1YDtIiLZX0lQzZp_JbqneHXHvRo45ZWGX`.
+4. official TNBC v1.1 `TNBC_NucleiSegmentation.zip` from Zenodo record
+   `2579118`; keep the original filename.  The expected size is 25,232,361
+   bytes and the publisher MD5 is `1605712a752b201b57eacc8f866adb4f`.
 
 Record the actual download time in UTC.  Do not extract or inspect test labels.
 
@@ -88,6 +93,28 @@ conda run -n agentseg python tools/audit_monuseg_xml_labels.py \
   --regenerated-label-root /root/autodl-tmp/f3c_phase05/candidate_labels/xml_region_skimage_v1
 ```
 
+Verify the TNBC v1.1 archive and selectively extract patients 1--8.  The tool
+does not open, extract, count or report patient 9--11 member content:
+
+```bash
+conda run -n agentseg python tools/extract_tnbc_p1_8.py \
+  --archive /root/autodl-tmp/f3c_phase05/source/TNBC_NucleiSegmentation.zip \
+  --downloaded-at-utc 2026-07-21T00:00:00Z \
+  --output-root /root/autodl-tmp/f3c_phase05/tnbc_p1_8 \
+  --output /root/autodl-tmp/f3c_phase05/reports/tnbc_selective_extract.json
+```
+
+Compare official binary GT, 4/8-connected components, the current watershed
+conversion and prepared labels on p1--8 only:
+
+```bash
+conda run -n agentseg python tools/audit_dataset.py \
+  --config configs/splits/tnbc_p1_6_dev_p7_8.json \
+  --tnbc-raw-label-root /root/autodl-tmp/f3c_phase05/tnbc_p1_8 \
+  --output /root/autodl-tmp/f3c_phase05/reports/tnbc_raw_label_audit.json \
+  --summary-output /root/autodl-tmp/f3c_phase05/reports/tnbc_raw_label_audit.md
+```
+
 Run the train-only smoke from generic SAM2 initialization on the first one or
 two classic30 manifest records.  This command does not load extended7 or test14:
 
@@ -112,4 +139,6 @@ and do not run any baseline epoch loop.
 Return the whole `/root/autodl-tmp/f3c_phase05/reports` directory and the five
 JSON files under `/root/autodl-tmp/f3c_phase05/manifests`.  The candidate-label
 MAT files are large and need not be returned unless a discrepancy requires
-pixel-level inspection.  Do not commit or push any generated file.
+pixel-level inspection.  The selectively extracted TNBC p1--8 images/GT also
+need not be returned; the extraction and audit JSON contain their hashes.  Do
+not commit or push any generated file.

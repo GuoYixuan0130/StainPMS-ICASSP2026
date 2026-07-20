@@ -214,6 +214,21 @@ def _normalize_entry(
         str(raw_label_value) if raw_label_value is not None else None,
         roots.get("raw_label_root"),
     )
+    if (
+        dataset == "tnbc"
+        and raw_label_value is None
+        and roots.get("raw_label_root")
+    ):
+        sample_match = re.fullmatch(r"0*([0-9]+)[_-]0*([0-9]+)", stem)
+        if not sample_match:
+            raise ValueError(f"cannot infer official TNBC GT path for {stem!r}")
+        raw_patient = int(sample_match.group(1))
+        raw_index = int(sample_match.group(2))
+        raw_label_path = (
+            Path(str(roots["raw_label_root"]))
+            / f"GT_{raw_patient:02d}"
+            / f"{raw_index}.png"
+        ).resolve()
 
     patient = _first_present(
         combined, ("patient", "patient_id", "patient_number", "subject")
@@ -860,11 +875,21 @@ def _audit_split_isolation(
     }
 
 
-def audit_configs(config_paths: list[Path], argv: list[str]) -> dict[str, Any]:
+def audit_configs(
+    config_paths: list[Path],
+    argv: list[str],
+    *,
+    tnbc_raw_label_root: Path | None = None,
+) -> dict[str, Any]:
     reports = []
     for config_path in config_paths:
         config = _load_json(config_path)
         dataset = str(config.get("dataset") or "").lower()
+        if dataset == "tnbc" and tnbc_raw_label_root is not None:
+            config = dict(config)
+            roots = dict(config.get("roots") or {})
+            roots["raw_label_root"] = str(tnbc_raw_label_root.resolve())
+            config["roots"] = roots
         if dataset not in {"tnbc", "monuseg"}:
             reports.append(
                 {
@@ -978,13 +1003,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", action="append", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--summary-output", type=Path)
+    parser.add_argument(
+        "--tnbc-raw-label-root",
+        type=Path,
+        help="Selective p1--8 extraction root containing GT_01 ... GT_08; never a full closed archive tree.",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     command = [sys.executable, *sys.argv]
-    report = audit_configs(args.config, command)
+    report = audit_configs(
+        args.config,
+        command,
+        tnbc_raw_label_root=args.tnbc_raw_label_root,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")
     if args.summary_output:
