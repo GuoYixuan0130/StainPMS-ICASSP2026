@@ -14,6 +14,7 @@
   },
   "roots": {
     "image_root": "/root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/tnbc/train_12/images",
+    "image_extension": ".png",
     "label_root": "/root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/tnbc/train_12/labels",
     "raw_label_root": null
   },

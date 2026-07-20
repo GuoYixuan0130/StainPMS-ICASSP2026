@@ -60,7 +60,7 @@ class DatasetAuditTests(unittest.TestCase):
     def test_safe_manifest_schema_is_supported(self):
         payload = {
             "records": [
-                {"image_name": "01_1.png", "patient_number": "1"},
+                {"image_name": "01_1", "patient_number": "1"},
             ]
         }
         rows = _extract_manifest_entries(payload)
@@ -68,7 +68,11 @@ class DatasetAuditTests(unittest.TestCase):
             rows[0],
             dataset="tnbc",
             split_name="train",
-            roots={"image_root": "/images", "label_root": "/labels"},
+            roots={
+                "image_root": "/images",
+                "image_extension": ".png",
+                "label_root": "/labels",
+            },
             metadata_map={},
         )
         self.assertEqual(entry["patient"], "1")

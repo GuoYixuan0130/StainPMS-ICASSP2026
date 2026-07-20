@@ -171,7 +171,7 @@ sha256sum -c SHA256SUMS
 cd /root/autodl-tmp/projects/StainPMS-ICASSP2026
 
 conda run -n agentseg python -m pip freeze
-conda run -n agentseg python -m unittest -v tests.test_audit_dataset
+conda run -n agentseg python -m unittest discover -s tests -p 'test_audit_dataset.py' -v
 git diff --check
 ```
 

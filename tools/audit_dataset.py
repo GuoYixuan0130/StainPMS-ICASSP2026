@@ -186,7 +186,13 @@ def _normalize_entry(
     )
     if image_value is None:
         raise ValueError(f"sample has no image path: {entry}")
-    image_path = _resolve_path(str(image_value), roots.get("image_root"))
+    image_value_text = str(image_value)
+    image_extension = str(roots.get("image_extension") or "")
+    if not Path(image_value_text).suffix and image_extension:
+        if not image_extension.startswith("."):
+            image_extension = "." + image_extension
+        image_value_text += image_extension
+    image_path = _resolve_path(image_value_text, roots.get("image_root"))
     assert image_path is not None
     stem = image_path.stem
 
