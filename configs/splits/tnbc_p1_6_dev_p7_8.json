@@ -10,7 +10,13 @@
     "closed_test_policy": "Never enumerate, read, hash, summarize, visualize, infer, or evaluate during development.",
     "development_merge_into_training": false,
     "selection_unit": "patient",
-    "training_order_source": "explicit_manifest_only"
+    "training_order_source": "explicit_manifest_only",
+    "prepared_label_status": "smoke_only_pending_raw_binary_gt_audit",
+    "current_prep_tnbc_watershed": {
+      "min_distance": 10,
+      "sigma": 1.0,
+      "source": "tools/prep_tnbc.py defaults"
+    }
   },
   "roots": {
     "image_root": "/root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/tnbc/train_12/images",

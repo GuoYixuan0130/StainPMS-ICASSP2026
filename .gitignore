@@ -190,6 +190,21 @@ memory/
 /*_diag*/
 /*_diagnostic*/
 
+# Local experiment state and generated audit outputs (never commit)
+/.deploypms-phase0/
+/.promptq_v2/
+/.resimixpms/
+/.semipms-phase0/
+/.semipms-stage1/
+/.semipms-stage1b/
+/.setpms/
+/.staincfpms/
+/temple/
+/reports/phase05/
+/reports/*.autodl.*
+/reports/dataset_audit.json
+/reports/dataset_audit.md
+
 # Model weights and generated arrays
 *.pth
 *.pt

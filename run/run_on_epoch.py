@@ -11,6 +11,7 @@ from tqdm import tqdm
 from run.utils import vis_inst_image
 from sam2_train.modeling.stats_utils import *
 from sam2_train.modeling.utils import *
+from stainpms.evaluator import evaluate_instance_pair, write_evaluation_outputs
 
 
 def _safe_image_name(name):
@@ -162,37 +163,40 @@ def _accumulate_coverage(prev_map, new_map, overlap_thr=0.5):
     return out
 
 
-def _append_metric_scores(inst_map, pred_map, score_lists):
-    if (
-        len(np.unique(inst_map)) == 1
-        or len(pred_map) == 1
-        or len(pred_map) == 0
-        or len(np.unique(inst_map)) == 0
-        or len(np.unique(pred_map)) == 1
-    ):
+def _append_metric_scores(
+    inst_map,
+    pred_map,
+    score_lists,
+    *,
+    evaluator_mode="legacy_skip",
+    sample_id=None,
+):
+    record = evaluate_instance_pair(
+        inst_map,
+        pred_map,
+        mode=evaluator_mode,
+        match_iou=0.5,
+        sample_id=sample_id,
+    )
+    score_lists.setdefault("_records", []).append(record)
+    if not record["included_in_macro"]:
         return
-
-    gt = remap_label(inst_map)
-    pred = remap_label(pred_map)
-    [dq_tmp, sq_tmp, pq_tmp], _ = get_fast_pq(gt, pred)
-    score_lists["dq"].append(dq_tmp)
-    score_lists["sq"].append(sq_tmp)
-    score_lists["pq"].append(pq_tmp)
-    score_lists["dice2"].append(get_fast_dice_2(gt, pred))
-    score_lists["dice1"].append(get_dice_1(gt, pred))
-    score_lists["aji_p"].append(get_fast_aji_plus(gt, pred))
-    score_lists["aji"].append(get_fast_aji(gt, pred))
+    for name, value in record["metrics"].items():
+        score_lists[name].append(value)
 
 
 def _mean_metric_tuple(score_lists):
+    def mean_or_nan(values):
+        return float(np.nanmean(values)) if values else float("nan")
+
     return (
-        np.nanmean(score_lists["dice1"]),
-        np.nanmean(score_lists["dice2"]),
-        np.nanmean(score_lists["aji"]),
-        np.nanmean(score_lists["aji_p"]),
-        np.nanmean(score_lists["dq"]),
-        np.nanmean(score_lists["sq"]),
-        np.nanmean(score_lists["pq"]),
+        mean_or_nan(score_lists["dice1"]),
+        mean_or_nan(score_lists["dice2"]),
+        mean_or_nan(score_lists["aji"]),
+        mean_or_nan(score_lists["aji_p"]),
+        mean_or_nan(score_lists["dq"]),
+        mean_or_nan(score_lists["sq"]),
+        mean_or_nan(score_lists["pq"]),
     )
 
 
@@ -218,7 +222,15 @@ def train_on_epoch(
     epoch,
     texture_memory_bank_list,
     device,
+    runtime_stats=None,
 ):
+    if runtime_stats is not None:
+        runtime_stats.setdefault("images_seen", 0)
+        runtime_stats.setdefault("crop_batches_seen", 0)
+        runtime_stats.setdefault("optimizer_steps", 0)
+        runtime_stats.setdefault("shape_skips", 0)
+        runtime_stats.setdefault("nonfinite_loss_skips", 0)
+        runtime_stats.setdefault("nonfinite_gradient_skips", 0)
     point_net.train()
     net.train()
     criterion.train()
@@ -234,6 +246,8 @@ def train_on_epoch(
         for data_iter_step, batch in enumerate(
             metric_logger.log_every(train_loader, cfgs.print_freq, header)
         ):
+            if runtime_stats is not None:
+                runtime_stats["images_seen"] += 1
             (
                 images_lists,
                 inst_masks_lists,
@@ -257,6 +271,8 @@ def train_on_epoch(
             k_crops = images_lists.size(0)
             cumulative_sums = np.cumsum(cell_nums_lists)
             for start_idx in range(0, k_crops, cfgs.b):
+                if runtime_stats is not None:
+                    runtime_stats["crop_batches_seen"] += 1
                 end_idx = min(start_idx + cfgs.b, k_crops)
                 start_cell = 0 if start_idx == 0 else cumulative_sums[start_idx - 1]
                 end_cell = cumulative_sums[end_idx - 1]
@@ -465,6 +481,8 @@ def train_on_epoch(
                         f"gt_inst_masks.shape[0]={gt_inst_masks.shape[0]}"
                     )
                     optimizer.zero_grad(set_to_none=True)
+                    if runtime_stats is not None:
+                        runtime_stats["shape_skips"] += 1
                     continue
 
                 loss_dict = criterion(outputs1, targets, pred, values, gt_inst_masks, epoch)
@@ -633,6 +651,8 @@ def train_on_epoch(
                         f"components={nonfinite_keys}; skipping"
                     )
                     optimizer.zero_grad()
+                    if runtime_stats is not None:
+                        runtime_stats["nonfinite_loss_skips"] += 1
                     continue
 
                 loss_dict_reduced = reduce_dict(loss_dict)
@@ -653,11 +673,15 @@ def train_on_epoch(
                 if has_bad_grad:
                     print(f"[Train] non-finite gradients at epoch {epoch}; skipping")
                     optimizer.zero_grad()
+                    if runtime_stats is not None:
+                        runtime_stats["nonfinite_gradient_skips"] += 1
                     continue
 
                 if cfgs.clip_grad > 0 and trainable_params:
                     torch.nn.utils.clip_grad_norm_(trainable_params, cfgs.clip_grad)
                 optimizer.step()
+                if runtime_stats is not None:
+                    runtime_stats["optimizer_steps"] += 1
                 metric_logger.update(loss=losses_reduced, **loss_dict_reduced)
 
             pbar.update()
@@ -690,6 +714,7 @@ def validation_on_epoch(
         "aji_p": [],
         "dice2": [],
         "dice1": [],
+        "_records": [],
     }
     margin = 7
 
@@ -976,7 +1001,14 @@ def validation_on_epoch(
                     selected_records,
                 )
 
-            _append_metric_scores(inst_maps[0], pred_inst_map, score_lists)
+            image_name = _safe_image_name(name)
+            _append_metric_scores(
+                inst_maps[0],
+                pred_inst_map,
+                score_lists,
+                evaluator_mode=getattr(cfgs, "evaluator_mode", "legacy_skip"),
+                sample_id=image_name,
+            )
 
             if cfgs.vis:
                 namecat = "Test_" + "_".join(str(item) for item in name) + "_"
@@ -991,7 +1023,32 @@ def validation_on_epoch(
 
             pbar.update()
 
-    return _mean_metric_tuple(score_lists)
+    metrics = _mean_metric_tuple(score_lists)
+    metrics_output_dir = str(getattr(cfgs, "metrics_output_dir", "") or "")
+    if metrics_output_dir:
+        epoch_dir = os.path.join(metrics_output_dir, f"epoch_{int(epoch):04d}")
+        eval_manifest_payload = getattr(test_loader.dataset, "manifest", None) or {}
+        write_evaluation_outputs(
+            score_lists["_records"],
+            epoch_dir,
+            context={
+                "dataset": str(getattr(cfgs, "dataset", "")),
+                "epoch": int(epoch),
+                "evaluator_mode": str(
+                    getattr(cfgs, "evaluator_mode", "legacy_skip")
+                ),
+                "match_iou": 0.5,
+                "aggregation_unit": "complete_reconstructed_image",
+                "crop_overlap": int(getattr(cfgs, "overlap", 0)),
+                "point_nms_threshold": int(args.test.nms_thr),
+                "test_filtering": bool(args.test.filtering),
+                "train_manifest": str(getattr(cfgs, "train_manifest", "") or ""),
+                "eval_manifest": str(getattr(cfgs, "eval_manifest", "") or ""),
+                "eval_manifest_sha256": eval_manifest_payload.get("manifest_sha256"),
+                "eval_protocol_id": eval_manifest_payload.get("protocol_id"),
+            },
+        )
+    return metrics
 
 
 def _tta_average(

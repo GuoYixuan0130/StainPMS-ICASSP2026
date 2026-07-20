@@ -1,13 +1,17 @@
 # Phase 0 code-path audit
 
-Audit base: `research/f3c-stainpms` at
+Phase 0 audit base: `research/f3c-stainpms` at
 `0f2fa9822146842f88aef2e20bc07c6b36bd39d7`.  The checkout was copied from
 AgentSeg-CA-SAM2 commit `51c2eac`; local `data/` and `checkpoints/` are empty.
 No model inference or training was run in this audit.
 
+The executive findings below describe that audited base.  Phase 0.5 has since
+added an opt-in manifest loader and strict evaluator while preserving legacy
+defaults; remote data materialization and the GPU smoke are still pending.
+
 ## Executive findings
 
-1. The current loader is not manifest-backed.  Training enumerates
+1. At the Phase 0 base, the loader was not manifest-backed.  Training enumerated
    `train_12/images`; validation/model selection enumerates `test/images` and
    saves best-PQ/best-AJI checkpoints from that loader.  It cannot implement
    TNBC p1--6/p7--8 or grouped MoNuSeg development safely without a loader
@@ -22,7 +26,7 @@ No model inference or training was run in this audit.
    `multimask_output=False`.  Consequently the ordinary segmentation losses and
    quality loss supervise the selected single result, not an explicit set of
    four task candidates.
-4. The evaluator silently omits an image when GT or prediction is empty.  That
+4. The Phase 0 evaluator silently omitted an image when GT or prediction was empty.  That
    changes the estimand and must be fixed or explicitly frozen before baseline
    reproduction and all later arms.
 5. Baseline checkpoints/logs do not contain enough provenance for a fully
@@ -119,7 +123,9 @@ overlap fraction with prior coverage is below 0.5
 ## Data preprocessing and augmentation
 
 `MONUSEG` is also used for TNBC and assumes `.mat` labels with `inst_map`.
-Paths are `sorted(os.listdir(...))`, not manifest rows.  Training expands every
+The legacy-compatible path uses `sorted(os.listdir(...))`.  Phase 0.5 adds an
+explicit ordered, hash-verifiable manifest path; formal work must use it.
+Training expands every
 image to overlapping 256 crops, batch size 1 and `shuffle=False`.  Both dataset
 and inference crop helpers hard-code stride as `256-overlap` rather than
 `split_size-overlap`; this only agrees while crop size stays 256.
@@ -164,9 +170,10 @@ target region is currently all zero.  Candidate quality, crop-edge penalty
 the epoch result is `nanmean` over appended images.  DQ is
 `TP/(TP+0.5FP+0.5FN)`, SQ is paired-IoU sum divided by TP, and PQ is DQ*SQ.
 At match IoU 0.5 the current code includes equality through a special branch.
-However `_append_metric_scores` returns without appending when GT or prediction
-is empty (`run/run_on_epoch.py:166-185`).  Formal experiments must use a single
-predeclared empty-image policy in every arm.
+At the Phase 0 base, `_append_metric_scores` returned without appending when GT
+or prediction was empty.  Phase 0.5 now exposes `strict_empty_handling_v1` and
+the historical `legacy_skip_empty_handling_v1`; clean baseline and future F3C
+must use strict under the same evaluator and postprocessing settings.
 
 ## Checkpoint, log, and environment audit
 
@@ -197,11 +204,13 @@ environment must be captured rather than inferred from the YAML.
 | Code paths and candidate selection | Complete (static) | GPU shape smoke still required before Phase 1. |
 | TNBC p1--6 / p7--8 identity | Blocked locally | Run safe-manifest audit on AutoDL; lock rows and hashes. |
 | TNBC raw-vs-watershed effect | Blocked | Owner-approved raw p1--8 label manifest/root. |
-| MoNuSeg 37-image provenance | Blocked locally | Filenames, case/organ/source metadata, image/label hashes, duplicates. |
-| MoNuSeg grouped development | Awaiting owner decision | Select and lock G1 or G2 after provenance audit. |
+| MoNuSeg version provenance | Phase 0.5 in progress | Version scopes and case sets are declared; official archive/member hashes remain to be materialized on AutoDL. |
+| MoNuSeg development candidate | Awaiting Phase 0.5 evidence and owner lock | Audit `classic30 -> extended7`; random/hash 23/7 and five-fold are not approved. |
+| Extended7 GDC/TSS metadata | Complete locally; remote replay pending | GDC returned all seven cases with no missing field or TSS-code mismatch; preserve the raw response and SHA256 on AutoDL. |
 | Checkpoint/config correspondence | Partial | Verify supplied hashes; checkpoint payload/config audit on AutoDL. |
 | Initialization/dev isolation | Blocked | Prove the TNBC checkpoint excluded p7--8 and the MoNuSeg checkpoint excluded the chosen fold, or use a protocol-clean initialization. |
-| Baseline runtime/memory | Not measured | Manifest-safe 1--2 batch GPU smoke after loader gate is fixed. |
+| Strict evaluator | Implemented locally; 11 boundary/output tests pass | Re-run the repository suite in `agentseg`; legacy skip remains available only for historical reproduction. |
+| Baseline runtime/memory | Not measured | Manifest-safe train-only 1--2 batch GPU smoke on classic30 or TNBC p1--6. |
 
 No Phase 1 diagnostic or Phase 2 method should start while these data gates are
 unresolved.

@@ -31,6 +31,8 @@ import numpy as np
 from scipy import ndimage as ndi
 from scipy.io import loadmat
 from skimage import io
+from skimage.feature import peak_local_max
+from skimage.segmentation import relabel_sequential, watershed
 
 
 IMAGE_EXTENSIONS = {".png", ".tif", ".tiff", ".jpg", ".jpeg", ".bmp"}
@@ -439,34 +441,123 @@ def _label_agreement(reference: np.ndarray, candidate: np.ndarray) -> dict[str, 
     return {"aji": aji, "dq": float(dq), "sq": float(sq), "pq": float(pq)}
 
 
-def _compare_raw_binary(raw: np.ndarray, prepared: np.ndarray) -> dict[str, Any]:
+def _current_prep_watershed(
+    raw_binary: np.ndarray,
+    *,
+    min_distance: int = 10,
+    sigma: float = 1.0,
+) -> np.ndarray:
+    binary = np.asarray(raw_binary, dtype=bool)
+    if not binary.any():
+        return np.zeros(binary.shape, dtype=np.int32)
+    distance = ndi.distance_transform_edt(binary)
+    if sigma > 0:
+        distance = ndi.gaussian_filter(distance, sigma)
+    coords = peak_local_max(distance, min_distance=min_distance, labels=binary)
+    if coords.shape[0] == 0:
+        labels, _ = ndi.label(binary)
+    else:
+        markers = np.zeros(binary.shape, dtype=np.int32)
+        markers[tuple(coords.T)] = np.arange(1, len(coords) + 1)
+        labels = watershed(-distance, markers, mask=binary)
+    labels, _, _ = relabel_sequential(labels.astype(np.int32))
+    return labels.astype(np.int32)
+
+
+def _split_merge_counts(reference: np.ndarray, candidate: np.ndarray) -> dict[str, int]:
+    split_reference = 0
+    for reference_id in np.unique(reference):
+        if reference_id <= 0:
+            continue
+        overlap_ids = np.unique(candidate[reference == reference_id])
+        if int((overlap_ids > 0).sum()) > 1:
+            split_reference += 1
+    merged_candidate = 0
+    for candidate_id in np.unique(candidate):
+        if candidate_id <= 0:
+            continue
+        overlap_ids = np.unique(reference[candidate == candidate_id])
+        if int((overlap_ids > 0).sum()) > 1:
+            merged_candidate += 1
+    return {
+        "reference_instances_split_by_candidate": int(split_reference),
+        "candidate_instances_merging_reference": int(merged_candidate),
+    }
+
+
+def _label_area_summary(label: np.ndarray) -> dict[str, Any]:
+    areas = [int((label == value).sum()) for value in np.unique(label) if value > 0]
+    return {
+        "distribution": _distribution(areas),
+        "area_le_4_count": sum(value <= 4 for value in areas),
+        "area_le_8_count": sum(value <= 8 for value in areas),
+        "area_le_16_count": sum(value <= 16 for value in areas),
+    }
+
+
+def _compare_raw_binary(
+    raw: np.ndarray,
+    prepared: np.ndarray,
+    *,
+    watershed_min_distance: int = 10,
+    watershed_sigma: float = 1.0,
+) -> dict[str, Any]:
     raw_binary = np.asarray(raw) > 0
+    raw_components_4, raw_count_4 = ndi.label(raw_binary)
     raw_components, raw_count = ndi.label(
         raw_binary, structure=np.ones((3, 3), dtype=np.uint8)
     )
+    current_watershed = _current_prep_watershed(
+        raw_binary,
+        min_distance=watershed_min_distance,
+        sigma=watershed_sigma,
+    )
+    watershed_count = int((np.unique(current_watershed) > 0).sum())
     prepared_binary = prepared > 0
-    split_components = 0
-    for component_id in range(1, raw_count + 1):
-        overlap_ids = np.unique(prepared[raw_components == component_id])
-        if int((overlap_ids > 0).sum()) > 1:
-            split_components += 1
-    merged_prepared = 0
-    for prepared_id in np.unique(prepared):
-        if prepared_id <= 0:
-            continue
-        overlap_components = np.unique(raw_components[prepared == prepared_id])
-        if int((overlap_components > 0).sum()) > 1:
-            merged_prepared += 1
+    cc_vs_prepared = _split_merge_counts(raw_components, prepared)
+    watershed_vs_prepared = _split_merge_counts(current_watershed, prepared)
     prepared_count = int((np.unique(prepared) > 0).sum())
     return {
         "raw_binary_connected_components_8": int(raw_count),
+        "raw_binary_connected_components_4": int(raw_count_4),
+        "current_prep_watershed": {
+            "min_distance": int(watershed_min_distance),
+            "sigma": float(watershed_sigma),
+            "instance_count": watershed_count,
+            "instance_count_delta_vs_connected_components": int(
+                watershed_count - raw_count
+            ),
+            "foreground_equal_to_raw": bool(
+                np.array_equal(current_watershed > 0, raw_binary)
+            ),
+            "area": _label_area_summary(current_watershed),
+        },
         "prepared_instance_count": prepared_count,
         "instance_count_delta": int(prepared_count - raw_count),
-        "raw_components_split_by_preparation": int(split_components),
-        "prepared_instances_merging_raw_components": int(merged_prepared),
+        "raw_components_split_by_preparation": cc_vs_prepared[
+            "reference_instances_split_by_candidate"
+        ],
+        "prepared_instances_merging_raw_components": cc_vs_prepared[
+            "candidate_instances_merging_reference"
+        ],
         "foreground_xor_pixels": int(np.logical_xor(raw_binary, prepared_binary).sum()),
         "foreground_equal": bool(np.array_equal(raw_binary, prepared_binary)),
+        "prepared_area": _label_area_summary(prepared),
         "cc_vs_prepared_evaluator_agreement": _label_agreement(raw_components, prepared),
+        "cc4_vs_prepared_evaluator_agreement": _label_agreement(
+            raw_components_4, prepared
+        ),
+        "watershed_vs_prepared": {
+            **watershed_vs_prepared,
+            "instance_count_delta": int(prepared_count - watershed_count),
+            "foreground_xor_pixels": int(
+                np.logical_xor(current_watershed > 0, prepared_binary).sum()
+            ),
+            "exact_instance_map_equal": bool(
+                np.array_equal(current_watershed, prepared)
+            ),
+            "evaluator_agreement": _label_agreement(current_watershed, prepared),
+        },
     }
 
 

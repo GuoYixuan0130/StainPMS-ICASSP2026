@@ -1,15 +1,19 @@
-import copy
+import hashlib
 import json
 import math
 import os
+import platform
+import subprocess
 import sys
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from mmengine.config import Config
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 import cfg
 from conf import settings
@@ -28,6 +32,14 @@ def count_trainable_params(*modules):
         for param in module.parameters()
         if param.requires_grad
     )
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def load_ca_sam2_point_head_checkpoint(cfgs, model1):
@@ -53,15 +65,6 @@ def load_ca_sam2_texture_bank(cfgs):
     return list(bank)
 
 
-def _train_split_paths(cfgs):
-    if cfgs.dataset == "monuseg":
-        return (
-            os.path.join(cfgs.data_path, "train_12", "images"),
-            os.path.join(cfgs.data_path, "train_12", "labels"),
-        )
-    raise ValueError(f"Unsupported dataset: {cfgs.dataset}")
-
-
 def refresh_baseline_masks_inplace(
     cfgs,
     args,
@@ -80,11 +83,7 @@ def refresh_baseline_masks_inplace(
         return None
 
     saved_dump_dir = getattr(cfgs, "dump_baseline_masks_dir", "") or ""
-    train_img_root, train_lbl_root = _train_split_paths(cfgs)
-    refresh_dataset = copy.copy(test_dataset)
-    refresh_dataset.image_root = train_img_root
-    refresh_dataset.label_root = train_lbl_root
-    refresh_dataset.paths = sorted(os.listdir(train_img_root))
+    refresh_dataset = build_eval_dataset(cfgs, args, split="train")
     cfgs.dump_baseline_masks_dir = cfgs.baseline_masks_dir
 
     temp_loader = DataLoader(
@@ -96,7 +95,8 @@ def refresh_baseline_masks_inplace(
     )
     print(
         "[coverage-refresh] train split inference only; "
-        f"n={len(refresh_dataset.paths)}; dump={cfgs.baseline_masks_dir}"
+        f"n={len(refresh_dataset.paths)}; dump={cfgs.baseline_masks_dir}; "
+        f"manifest={cfgs.train_manifest or 'legacy_directory'}"
     )
 
     seg_pq = None
@@ -167,20 +167,69 @@ def apply_cli_overrides(args, cfgs):
         args.test.filtering = cfgs.test_filtering == "true"
 
 
+def build_eval_dataset(cfgs, args, *, split):
+    if split == "train":
+        manifest_path = cfgs.train_manifest
+        data_split = "train"
+    elif split == "eval":
+        manifest_path = cfgs.eval_manifest
+        data_split = "train" if manifest_path else "test"
+    else:
+        raise ValueError(f"Unsupported evaluation split selector: {split}")
+    return MONUSEG(
+        cfgs,
+        args,
+        cfgs.data_path,
+        cfgs.load,
+        mode="test",
+        manifest_path=manifest_path or None,
+        data_split=data_split,
+        verify_manifest_hashes=cfgs.verify_manifest_hashes,
+    )
+
+
 def build_dataloaders(cfgs, args):
     if cfgs.dataset != "monuseg":
         raise ValueError(f"Unsupported dataset: {cfgs.dataset}")
 
-    train_dataset = MONUSEG(cfgs, args, cfgs.data_path, cfgs.load, mode="train")
-    test_dataset = MONUSEG(cfgs, args, cfgs.data_path, cfgs.load, mode="test")
+    train_dataset = MONUSEG(
+        cfgs,
+        args,
+        cfgs.data_path,
+        cfgs.load,
+        mode="train",
+        manifest_path=cfgs.train_manifest or None,
+        data_split="train",
+        verify_manifest_hashes=cfgs.verify_manifest_hashes,
+    )
+    smoke_steps = int(cfgs.train_only_smoke_steps or 0)
+    train_loader_dataset = train_dataset
+    if smoke_steps > 0:
+        if not cfgs.train_manifest:
+            raise ValueError("train-only smoke requires --train_manifest")
+        if smoke_steps > len(train_dataset):
+            raise ValueError(
+                f"smoke steps {smoke_steps} exceed manifest size {len(train_dataset)}"
+            )
+        train_loader_dataset = Subset(train_dataset, range(smoke_steps))
     train_loader = DataLoader(
-        train_dataset,
+        train_loader_dataset,
         batch_size=1,
         shuffle=False,
         num_workers=cfgs.num_workers,
         pin_memory=True,
         collate_fn=collate_fn,
     )
+    if smoke_steps > 0:
+        return train_dataset, None, train_loader, None
+
+    if cfgs.train_manifest and not cfgs.eval_manifest:
+        raise ValueError(
+            "manifest-backed training requires an explicit --eval_manifest; "
+            "the legacy test directory will not be selected implicitly"
+        )
+
+    test_dataset = build_eval_dataset(cfgs, args, split="eval")
     test_loader = DataLoader(
         test_dataset,
         batch_size=1,
@@ -189,6 +238,159 @@ def build_dataloaders(cfgs, args):
         pin_memory=True,
     )
     return train_dataset, test_dataset, train_loader, test_loader
+
+
+def run_train_only_smoke(
+    cfgs,
+    args,
+    train_dataset,
+    train_loader,
+    model1,
+    model1_encoder,
+    net,
+    criterion,
+    optimizer,
+    device,
+    val_texture_bank_template,
+):
+    if not cfgs.smoke_output:
+        raise ValueError("--smoke_output is required for train-only smoke")
+    runtime_stats = {}
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats(device)
+        torch.cuda.synchronize(device)
+    net.train()
+    model1.train()
+    started = time.perf_counter()
+    log_info = train_on_epoch(
+        cfgs,
+        model1,
+        model1_encoder,
+        net,
+        train_loader,
+        criterion,
+        optimizer,
+        0,
+        [],
+        device,
+        runtime_stats=runtime_stats,
+    )
+    if torch.cuda.is_available():
+        torch.cuda.synchronize(device)
+    elapsed = time.perf_counter() - started
+    images_seen = int(runtime_stats.get("images_seen", 0))
+    optimizer_steps = int(runtime_stats.get("optimizer_steps", 0))
+    full_epoch_seconds = (
+        elapsed * len(train_dataset) / images_seen if images_seen > 0 else None
+    )
+    checkpoint_path = Path(cfgs.sam_ckpt).resolve()
+    try:
+        driver = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=driver_version",
+                "--format=csv,noheader",
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).splitlines()[0].strip()
+    except (OSError, subprocess.CalledProcessError, IndexError):
+        driver = None
+    gpu_name = torch.cuda.get_device_name(device) if torch.cuda.is_available() else None
+    peak_allocated = (
+        int(torch.cuda.max_memory_allocated(device)) if torch.cuda.is_available() else 0
+    )
+    peak_reserved = (
+        int(torch.cuda.max_memory_reserved(device)) if torch.cuda.is_available() else 0
+    )
+    estimates = {}
+    if full_epoch_seconds is not None:
+        for epochs in (50, 100, 200, 300):
+            estimates[str(epochs)] = {
+                "train_only_gpu_hours": full_epoch_seconds * epochs / 3600.0,
+                "validation_and_checkpoint_overhead_included": False,
+            }
+    report = {
+        "schema_version": 1,
+        "phase": "0.5",
+        "status": "complete" if optimizer_steps > 0 else "issues_found",
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "protocol": "train_only_smoke_no_development_or_test_loader",
+        "command": list(sys.argv),
+        "environment": {
+            "python": sys.version,
+            "platform": platform.platform(),
+            "torch": torch.__version__,
+            "torch_cuda": torch.version.cuda,
+            "cudnn": torch.backends.cudnn.version(),
+            "cuda_available": torch.cuda.is_available(),
+            "gpu": gpu_name,
+            "driver": driver,
+        },
+        "determinism": {
+            "seed": int(cfgs.seed),
+            "cudnn_deterministic": bool(torch.backends.cudnn.deterministic),
+            "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
+        },
+        "repository": {
+            "branch": subprocess.check_output(
+                ["git", "branch", "--show-current"], text=True
+            ).strip(),
+            "commit": subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], text=True
+            ).strip(),
+        },
+        "data": {
+            "manifest_path": str(cfgs.train_manifest),
+            "manifest_sha256": train_dataset.manifest.get("manifest_sha256"),
+            "protocol_id": train_dataset.manifest.get("protocol_id"),
+            "full_manifest_image_count": len(train_dataset),
+            "smoke_image_count": images_seen,
+            "sample_ids": train_dataset.sample_names[:images_seen],
+            "hashes_verified": bool(cfgs.verify_manifest_hashes),
+        },
+        "initialization": {
+            "checkpoint_path": str(checkpoint_path),
+            "checkpoint_sha256": sha256_file(checkpoint_path),
+            "task_warm_start_detected": val_texture_bank_template is not None,
+            "policy": "generic SAM2 allowed; task checkpoint exposed to development is forbidden",
+        },
+        "runtime": {
+            **runtime_stats,
+            "wall_seconds": elapsed,
+            "wall_seconds_per_image": elapsed / images_seen if images_seen else None,
+            "wall_seconds_per_optimizer_step": (
+                elapsed / optimizer_steps if optimizer_steps else None
+            ),
+            "extrapolated_full_train_epoch_seconds": full_epoch_seconds,
+            "peak_memory_allocated_bytes": peak_allocated,
+            "peak_memory_reserved_bytes": peak_reserved,
+            "peak_memory_allocated_mib": peak_allocated / (1024 ** 2),
+            "peak_memory_reserved_mib": peak_reserved / (1024 ** 2),
+        },
+        "numerics": {
+            "losses": {key: float(value) for key, value in log_info.items()},
+            "all_losses_finite": all(np.isfinite(value) for value in log_info.values()),
+        },
+        "preliminary_budget": {
+            "basis": "linear extrapolation from 1-2 manifest-ordered images; train path only",
+            "estimates_by_epoch_count": estimates,
+            "formal_budget_status": "preliminary_until_owner_locks_epochs_and_validation_cadence",
+        },
+        "sealed_data_attestation": {
+            "eval_manifest": None,
+            "development_loader_constructed": False,
+            "test_loader_constructed": False,
+        },
+    }
+    output = Path(cfgs.smoke_output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2)
+        handle.write("\n")
+    print(f"[train-only-smoke] wrote {output}; status={report['status']}")
+    return report
 
 
 def maybe_load_warm_start(cfgs, model1):
@@ -232,6 +434,9 @@ def write_eval_metric_artifact(cfgs, eval_split, metrics):
         "overlap": int(cfgs.overlap),
         "nms_threshold": int(cfgs.test_nms_thr),
         "seed": int(cfgs.seed),
+        "evaluator_mode": str(cfgs.evaluator_mode),
+        "train_manifest": str(cfgs.train_manifest or ""),
+        "eval_manifest": str(cfgs.eval_manifest or ""),
         "command": list(sys.argv),
     }
     os.makedirs(dump_dir, exist_ok=True)
@@ -245,6 +450,28 @@ def main():
     args = Config.fromfile("./args.py")
     cfgs = cfg.parse_args()
     apply_cli_overrides(args, cfgs)
+    if cfgs.train_only_smoke_steps < 0:
+        raise ValueError("--train_only_smoke_steps cannot be negative")
+    if cfgs.train_only_smoke_steps > 0:
+        incompatible = {
+            "eval": cfgs.eval,
+            "stage1_coverage_oracle": cfgs.stage1_coverage_oracle,
+            "stage2_selective_refine": cfgs.stage2_selective_refine,
+            "use_pms": cfgs.use_pms,
+            "pms_self_bootstrap": cfgs.pms_self_bootstrap,
+            "eval_manifest": bool(cfgs.eval_manifest),
+        }
+        enabled = [name for name, value in incompatible.items() if value]
+        if enabled:
+            raise ValueError(
+                "train-only smoke cannot be combined with: " + ", ".join(enabled)
+            )
+        if not cfgs.train_manifest or not cfgs.verify_manifest_hashes:
+            raise ValueError(
+                "Phase 0.5 smoke requires --train_manifest and --verify_manifest_hashes"
+            )
+        if not cfgs.smoke_output:
+            raise ValueError("Phase 0.5 smoke requires --smoke_output")
     set_seed(cfgs)
 
     device = torch.device(
@@ -307,6 +534,22 @@ def main():
 
     train_dataset, test_dataset, train_loader, test_loader = build_dataloaders(cfgs, args)
 
+    if cfgs.train_only_smoke_steps > 0:
+        run_train_only_smoke(
+            cfgs,
+            args,
+            train_dataset,
+            train_loader,
+            model1,
+            model1_encoder,
+            net,
+            criterion,
+            optimizer,
+            device,
+            val_texture_bank_template,
+        )
+        return
+
     if cfgs.stage1_coverage_oracle:
         ckpt = torch.load(cfgs.sam_ckpt, map_location="cpu")
         if "model1" in ckpt:
@@ -317,11 +560,7 @@ def main():
 
         oracle_loader = test_loader
         if cfgs.oracle_split == "train":
-            train_img_root, train_lbl_root = _train_split_paths(cfgs)
-            oracle_dataset = copy.copy(test_dataset)
-            oracle_dataset.image_root = train_img_root
-            oracle_dataset.label_root = train_lbl_root
-            oracle_dataset.paths = sorted(os.listdir(train_img_root))
+            oracle_dataset = build_eval_dataset(cfgs, args, split="train")
             oracle_loader = DataLoader(
                 oracle_dataset,
                 batch_size=1,
@@ -329,7 +568,10 @@ def main():
                 num_workers=cfgs.num_workers,
                 pin_memory=True,
             )
-            print(f"[stage1-oracle] train split; n={len(oracle_dataset.paths)} from {train_img_root}")
+            print(
+                f"[stage1-oracle] train split; n={len(oracle_dataset.paths)}; "
+                f"manifest={cfgs.train_manifest or 'legacy_directory'}"
+            )
         else:
             print(f"[stage1-oracle] test split; n={len(test_loader.dataset)}")
 
@@ -355,11 +597,7 @@ def main():
 
         selective_loader = test_loader
         if cfgs.selective_split == "train":
-            train_img_root, train_lbl_root = _train_split_paths(cfgs)
-            selective_dataset = copy.copy(test_dataset)
-            selective_dataset.image_root = train_img_root
-            selective_dataset.label_root = train_lbl_root
-            selective_dataset.paths = sorted(os.listdir(train_img_root))
+            selective_dataset = build_eval_dataset(cfgs, args, split="train")
             selective_loader = DataLoader(
                 selective_dataset,
                 batch_size=1,
@@ -367,7 +605,10 @@ def main():
                 num_workers=cfgs.num_workers,
                 pin_memory=True,
             )
-            print(f"[stage2-selective] train split; n={len(selective_dataset.paths)} from {train_img_root}")
+            print(
+                f"[stage2-selective] train split; n={len(selective_dataset.paths)}; "
+                f"manifest={cfgs.train_manifest or 'legacy_directory'}"
+            )
         else:
             print(f"[stage2-selective] test split; n={len(test_loader.dataset)}")
 
@@ -394,11 +635,7 @@ def main():
         eval_loader = test_loader
         eval_split = "test"
         if cfgs.eval_on_train:
-            train_img_root, train_lbl_root = _train_split_paths(cfgs)
-            eval_dataset = copy.copy(test_dataset)
-            eval_dataset.image_root = train_img_root
-            eval_dataset.label_root = train_lbl_root
-            eval_dataset.paths = sorted(os.listdir(train_img_root))
+            eval_dataset = build_eval_dataset(cfgs, args, split="train")
             eval_loader = DataLoader(
                 eval_dataset,
                 batch_size=1,
@@ -407,7 +644,10 @@ def main():
                 pin_memory=True,
             )
             eval_split = "train"
-            print(f"[eval] train split; n={len(eval_dataset.paths)} from {train_img_root}")
+            print(
+                f"[eval] train split; n={len(eval_dataset.paths)}; "
+                f"manifest={cfgs.train_manifest or 'legacy_directory'}"
+            )
 
         metrics = validation_on_epoch(
             cfgs,

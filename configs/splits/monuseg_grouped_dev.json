@@ -2,9 +2,9 @@
   "schema_version": 1,
   "dataset": "monuseg",
   "protocol_id": "monuseg_grouped_dev_v1",
-  "status": "pending_remote_case_organ_audit_and_owner_selection",
+  "status": "phase05_pending_download_xml_metadata_and_test_identity_audit",
   "protocol": {
-    "official_test_access": "forbidden_during_phase0_and_model_selection",
+    "official_test_access": "identity_only_case_filename_size_and_raw_image_sha256_until_final_evaluation",
     "group_unit": "patient_or_tcga_case",
     "patch_level_random_split": false,
     "organ_balance": "best_effort_subject_to_group_integrity",
@@ -31,45 +31,33 @@
       "sample_id",
       "patient_or_case_id",
       "organ",
+      "tcga_project",
+      "disease",
+      "tissue_source_site",
       "source_release",
       "image_sha256",
       "label_sha256"
     ],
     "candidates": [
       {
-        "id": "G1_fixed_30_7",
-        "development_images_target": 7,
-        "priority": [
-          "no patient_or_case overlap",
-          "cover as many organs as possible",
-          "minimize organ-count imbalance",
-          "deterministic lexicographic tie break"
-        ],
-        "cost": "One fixed development fold; closest to a 30/7 internal split if the 37-image training pool is valid."
-      },
-      {
-        "id": "G2_grouped_5fold_screening",
-        "folds": 5,
-        "priority": [
-          "no patient_or_case overlap",
-          "organ-stratified assignment where feasible",
-          "fixed folds and one predeclared selection aggregate"
-        ],
-        "cost": "Approximately five times validation inference and more bookkeeping; better robustness than one seven-image fold."
-      },
-      {
-        "id": "G3_leave_one_organ_diagnostic_only",
-        "priority": [
-          "one held-out organ at a time",
-          "never use as the sole model-selection protocol"
-        ],
-        "cost": "High variance and multiple runs; useful only to diagnose organ transfer after G1 or G2 is fixed."
+        "id": "classic30_train_extended7_development_candidate",
+        "optimization_protocol": "monuseg_challenge30_v1",
+        "development_protocol": "monuseg_extended7_v1",
+        "final_training_protocol": "monuseg_download37_v1",
+        "lock_status": "pending_owner_decision_after_phase05_evidence",
+        "scientific_interpretation": "Diagnose differences between the classic training release and seven cases later present in the current official Training Data download; not a random holdout.",
+        "required_gates": [
+          "no case filename or raw image SHA256 overlap with sealed test14",
+          "complete and conversion-compatible XML annotations",
+          "reliable TCGA project organ disease and tissue-source-site metadata",
+          "no evidence that extended7 derives from test14"
+        ]
       }
     ]
   },
   "frozen_monuseg_lite_reference": {
     "path": "/root/autodl-tmp/projects/StainPMS-ICASSP2026/.setpms/logs/setpms/stage1_dual_dev/20260714_172429_6a40ce194788",
-    "status": "pending_remote_checksum_validation",
+    "status": "required_manifest_and_patch_files_validated_full_historical_artifact_incomplete",
     "required_files": [
       "monuseg_lite_manifest.json",
       "monuseg_lite_patches.json",
@@ -77,5 +65,6 @@
     ],
     "policy": "Reference only after every required file matches SHA256SUMS; it cannot silently define the new grouped development split."
   },
-  "provenance_note": "Official MoNuSeg 2018 is documented as 30 training images and 14 official test images. The local 37-image training pool is non-official until filenames, cases, organs, duplicates, and source release are audited. No official-test entry or split entry is fabricated here."
+  "release_config": "configs/manifests/monuseg_release_v1.json",
+  "provenance_note": "Two MoNuSeg version scopes are retained: the original 2018 Challenge paper 30/14 protocol and the current official-download 37/14 protocol used for StainPMS continuity. The seven added cases are called extended7 until Phase 0.5 provenance and metadata audit is complete."
 }

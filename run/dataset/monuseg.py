@@ -8,20 +8,52 @@ from albumentations.pytorch import ToTensorV2
 from skimage import io
 import scipy.io as sio
 
+from run.dataset.manifest import load_dataset_manifest
 from stainpms.candidate import compute_b_candidates_oncrop, compute_baseline_center_candidates
 
 
 class MONUSEG(Dataset):
-    def __init__(self, args, cfgs, data_path , load, mode = 'train'):
+    def __init__(
+        self,
+        args,
+        cfgs,
+        data_path,
+        load,
+        mode='train',
+        manifest_path=None,
+        data_split=None,
+        verify_manifest_hashes=False,
+    ):
         self.data_path = data_path
-        if mode == 'train':
+        self.mode = mode
+        self.data_split = data_split or mode
+        if self.data_split == 'train':
             self.image_root = data_path + '/train_12/images'
             self.label_root = data_path + '/train_12/labels'
-        elif mode == 'test':
+        elif self.data_split == 'test':
             self.image_root = data_path + '/test/images'
             self.label_root = data_path + '/test/labels'
-        self.paths = sorted(os.listdir(self.image_root))
-        self.mode = mode
+        else:
+            raise ValueError(f"Unsupported MoNuSeg data split: {self.data_split}")
+        self.manifest = None
+        self.records = None
+        if manifest_path:
+            self.manifest, self.records = load_dataset_manifest(
+                manifest_path,
+                expected_dataset="monuseg",
+                require_labels=True,
+                verify_hashes=bool(verify_manifest_hashes),
+            )
+            self.paths = [os.path.basename(record["image_path"]) for record in self.records]
+            self.sample_names = [record["sample_id"] for record in self.records]
+            print(
+                f"[MONUSEG manifest] mode={mode} split={self.data_split} "
+                f"protocol={self.manifest.get('protocol_id')} n={len(self.records)} "
+                f"sha256={self.manifest.get('manifest_sha256')}"
+            )
+        else:
+            self.paths = sorted(os.listdir(self.image_root))
+            self.sample_names = [os.path.splitext(path)[0] for path in self.paths]
         self.crop_size = args.crop_size
         self.overlap = args.overlap
         self.load = load
@@ -61,8 +93,7 @@ class MONUSEG(Dataset):
         self.baseline_masks_dir = getattr(args, "baseline_masks_dir", "") or ""
         self._baseline_cache = {}
         if self._need_b and self.baseline_masks_dir:
-            for p in self.paths:
-                name = p.split(".")[0]
+            for name in self.sample_names:
                 npy_path = os.path.join(self.baseline_masks_dir, name + ".npy")
                 if os.path.exists(npy_path):
                     self._baseline_cache[name] = np.load(npy_path).astype(np.int32)
@@ -86,8 +117,7 @@ class MONUSEG(Dataset):
             return 0
         n_old = len(self._baseline_cache)
         self._baseline_cache.clear()
-        for p in self.paths:
-            name = p.split(".")[0]
+        for name in self.sample_names:
             npy_path = os.path.join(self.baseline_masks_dir, name + ".npy")
             if os.path.exists(npy_path):
                 self._baseline_cache[name] = np.load(npy_path).astype(np.int32)
@@ -103,9 +133,15 @@ class MONUSEG(Dataset):
 
         """Get the images"""
         path = self.paths[index]
-
-        image_path = os.path.join(self.image_root, path)
-        mask_path = os.path.join(self.label_root, path.split('.')[0] + '.mat')
+        if self.records is not None:
+            record = self.records[index]
+            image_path = record["image_path"]
+            mask_path = record["label_path"]
+            name_no_ext = record["sample_id"]
+        else:
+            image_path = os.path.join(self.image_root, path)
+            name_no_ext = os.path.splitext(path)[0]
+            mask_path = os.path.join(self.label_root, name_no_ext + '.mat')
 
         img = io.imread(image_path)[..., :3]
         mask = load_maskfile(mask_path)
@@ -114,7 +150,6 @@ class MONUSEG(Dataset):
         # albumentations augments it together with image + GT (keeps alignment).
         baseline_attached = False
         if self.mode == 'train' and self._need_b and self._baseline_cache:
-            name_no_ext = path.split('.')[0]
             baseline = self._baseline_cache.get(name_no_ext)
             if baseline is not None:
                 if baseline.shape != mask.shape[:2]:
@@ -346,7 +381,7 @@ class MONUSEG(Dataset):
             binary_tensor = (inst_map_all).to(torch.uint8)
             binary_mask = torch.any(binary_tensor, dim=0).to(torch.uint8)
             
-            return img.to(torch.float32),inst_map, type_map.squeeze(0),prompt_points_all.squeeze(1), prompt_labels_all, binary_mask ,torch.as_tensor(ori_shape),index,path.split('.')[0]
+            return img.to(torch.float32),inst_map, type_map.squeeze(0),prompt_points_all.squeeze(1), prompt_labels_all, binary_mask ,torch.as_tensor(ori_shape),index,name_no_ext
 
 def load_maskfile(mask_path: str):
     inst_map = sio.loadmat(mask_path)['inst_map']

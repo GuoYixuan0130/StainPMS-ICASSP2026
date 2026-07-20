@@ -53,11 +53,53 @@ def parse_args():
     parser.add_argument("--distributed", default="none", type=str)
     parser.add_argument("--dataset", default="monuseg", choices=["monuseg"])
     parser.add_argument("--data_path", default="./data/monuseg", type=str)
+    parser.add_argument(
+        "--train_manifest",
+        default="",
+        type=str,
+        help="Ordered manifest for optimization data; empty preserves the legacy directory loader.",
+    )
+    parser.add_argument(
+        "--eval_manifest",
+        default="",
+        type=str,
+        help="Ordered manifest for development/final evaluation data.",
+    )
+    parser.add_argument(
+        "--verify_manifest_hashes",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Verify every image/label SHA256 before constructing a manifest-backed loader.",
+    )
     parser.add_argument("--sam_ckpt", default="./checkpoints/sam2_hiera_large.pt", type=str)
     parser.add_argument("--sam_config", default="sam2_hiera_l", type=str)
 
     parser.add_argument("--test_nms_thr", default=-1, type=int)
     parser.add_argument("--test_filtering", default="", choices=["", "true", "false"])
+    parser.add_argument(
+        "--evaluator_mode",
+        default="legacy_skip",
+        choices=["legacy_skip", "strict"],
+        help="Empty-case inclusion policy; metric definitions and thresholds are unchanged.",
+    )
+    parser.add_argument(
+        "--metrics_output_dir",
+        default="",
+        type=str,
+        help="Write per-image CSV/JSON and macro summaries for complete-image evaluation.",
+    )
+    parser.add_argument(
+        "--train_only_smoke_steps",
+        default=0,
+        type=int,
+        help="Run only the first N manifest-ordered training images for one update smoke and exit.",
+    )
+    parser.add_argument(
+        "--smoke_output",
+        default="",
+        type=str,
+        help="Required JSON output path when --train_only_smoke_steps is non-zero.",
+    )
 
     parser.add_argument("--use_pms", action="store_true")
     parser.add_argument("--pms_loss_coef", default=-1.0, type=float)

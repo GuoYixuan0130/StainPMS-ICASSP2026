@@ -19,9 +19,11 @@ consistency are explanatory outcomes; CCR never replaces final instance metrics.
   cannot be merged into training without project-lead approval.  Patients 9--11
   are closed: code must reject them before opening an image, label, prediction,
   or metadata record.
-- MoNuSeg model selection must be grouped by patient/case, with organ balance
-  where group integrity permits.  The official test is closed until every
-  selection is locked.  Patches from one source image/case cannot cross folds.
+- MoNuSeg retains two named version scopes: the current official-download
+  37/14 StainPMS-continuity protocol and the original Challenge-paper 30/14
+  protocol.  During Phase 0.5, test14 access is limited to case ID, filename,
+  byte size and raw-image SHA256; test images are never decoded and test labels
+  are never opened.  Patches from one source image/case cannot cross splits.
 - CPM-17 is diagnostic only unless its disease/tissue/image mapping is reliable;
   it is not a default training source or a replacement endpoint.
 - Every runnable split is an explicit, ordered manifest with content hashes.
@@ -37,10 +39,16 @@ manifests.
 
 ## Stage gates
 
-Phase 0 must establish code paths, label semantics, case/organ provenance,
+Phase 0 and Phase 0.5 must establish code paths, label semantics, case/organ provenance,
 split isolation, preprocessing effects, evaluator invariants, checkpoint
 identity, and a budgeted baseline plan.  Phase 1 cannot begin while any of
 these protocol gates remains unresolved.
+
+The only MoNuSeg development candidate currently under audit is classic30
+optimization to extended7 development, followed by download37 final training
+after configuration lock.  It is not an approved split until the project lead
+reviews archive identity, test14 de-duplication, XML conversion and GDC/TSS
+metadata evidence.
 
 Phase 1 is read-only diagnosis from frozen checkpoints/inference where
 possible: automatic-point behavior, GT-point single/four-candidate CCR, final

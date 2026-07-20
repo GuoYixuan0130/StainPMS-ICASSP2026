@@ -1,8 +1,10 @@
 # Phase 0 baseline reproduction plan
 
-This is a gated plan, not authorization to train.  The current `main.py` uses a
-`test/` loader for model selection and therefore no formal command is runnable
-until explicit-manifest loading is implemented and its CPU/GPU smoke tests pass.
+This is a gated plan, not authorization to train.  Phase 0.5 implements an
+opt-in explicit-manifest loader and a train-only smoke path; legacy directory
+loading remains the default for historical compatibility.  No formal baseline
+command is authorized until the manifest path passes the AutoDL GPU smoke and
+the project lead locks the development protocol and training budget.
 
 ## Fixed identities
 
@@ -58,17 +60,28 @@ provenance audit.
 The [official challenge paper](https://pmc.ncbi.nlm.nih.gov/articles/PMC10439521/)
 describes 30 training images from 30 patients, and the
 [official evaluation page](https://monuseg.grand-challenge.org/Evaluation/)
-describes 14 test images.  The supplied local training pool is expected to have
-37 images, which is not the official 30-image training set until its provenance
-is reconciled.  Before choosing a fold, the AutoDL audit must answer:
+describes 14 test images. The official data page still states 30 training
+images, but its current Training Data link (Google Drive file ID
+`1ZgqFJomqQGNnsx7w7QBzQQMVA16lbVCA`) supplies a 37-image package according to
+the project lead's independent inspection. These are two explicit version
+scopes, not evidence that StainPMS used an erroneous third-party mirror:
 
-1. which seven images extend or differ from the official 30 training images;
-2. whether each filename is one WSI/patient or a derivative/duplicate;
-3. which case and organ each image belongs to;
-4. whether the seven additional/different training-pool images come from a
-   documented release or are derived/duplicated images.
+- `monuseg_download37_v1`: current official-download 37/14 protocol and the
+  StainPMS continuity primary protocol;
+- `monuseg_challenge30_v1`: original 2018 Challenge paper 30/14 protocol and a
+  later protocol-sensitivity experiment.
 
-The official 14-image test remains closed.  The frozen MoNuSeg-Lite directory
+The seven cases in the current download beyond classic30 are called
+`extended7` until Phase 0.5 resolves:
+
+1. whether each filename is one WSI/patient or a derivative/duplicate;
+2. which TCGA project, organ, disease and tissue source site each case has;
+3. whether any extended7 image overlaps or derives from test14;
+4. whether XML annotations and conversion behavior match classic30.
+
+The official 14-image test remains sealed for decoding, annotation access,
+inference and statistics; Phase 0.5 permits identity, size and raw-image SHA256
+checks only.  The frozen MoNuSeg-Lite directory
 may be used only if its manifest, patch schedule and `SHA256SUMS` all validate;
 it does not define the new grouped split by itself.
 
@@ -78,19 +91,17 @@ cannot initialize an experiment that treats a subset of those images as grouped
 development.  Options are (A) prove the chosen fold was excluded, (B) build a
 protocol-clean initialization per fixed split/fold, or (C) use the existing
 checkpoint only for a clearly labeled, non-selective diagnostic that cannot
-choose methods or hyperparameters.  G2 may require fold-specific clean
-initializations and therefore has substantially higher cost than validation
-inference alone.
+choose methods or hyperparameters. Formal extended7 development work requires
+a clean baseline initialized without extended7 task supervision.
 
-## Grouped-development options requiring owner selection
+## Phase 0.5 development candidate requiring owner lock
 
-| Option | Value | Cost/risk |
+| Candidate | Value | Cost/risk |
 |---|---|---|
-| G1 fixed 30/7 | One deterministic seven-image dev group, maximizing organ coverage subject to no case overlap. | Lowest screening cost and closest to current accounting; high variance from one fold. |
-| G2 grouped 5-fold | Predeclare all case-disjoint, organ-balanced folds and one aggregate selection rule. | Roughly 5x validation inference/bookkeeping; more robust selection. |
-| G3 leave-one-organ diagnostic | Evaluate organ transfer after G1/G2 is fixed. | Diagnostic only; too variable and expensive as sole model-selection rule. |
+| `classic30 -> extended7` | Train on classic30, diagnose on cases later present in the current official download, then retrain locked final methods on download37. | Scientifically interpretable version/domain transition, but invalid if extended7 overlaps or derives from test14, has incompatible XML conversion, or lacks reliable TCGA metadata. |
 
-No option can be materialized until case/organ/source metadata is verified.
+This candidate is not locked by the engineer. Five-fold and random/hash 23/7
+splits are not approved in Phase 0.5.
 
 ## Continued-training control and screening fairness
 
@@ -140,11 +151,14 @@ and the hard-coded CUDA allocation prevents a full CPU forward.  The historical
 environment states one RTX 4090, but that is not a timing measurement.  A
 manifest-safe 1--2 batch smoke must record peak allocated/reserved memory,
 data-loading time, forward/backward/update time, candidate count, and crop count;
-only then should the report extrapolate total GPU hours.  Until the manifest
-loader exists, do not run `main.py` even for timing because it constructs the
-wrong validation boundary.
+only then should the report extrapolate total GPU hours.  The manifest loader
+and smoke-only exit now exist but have not yet run on AutoDL.
 
-## Safe AutoDL Phase 0 commands
+## Safe AutoDL commands
+
+Phase 0.5 commands are maintained in
+[`docs/F3C_PHASE05_AUTODL.md`](../docs/F3C_PHASE05_AUTODL.md).  The commands
+below are retained only as the earlier Phase 0 audit record.
 
 These commands audit only the named training/development pools and asset
 identities; they do not run a model or access a closed test.
@@ -179,14 +193,15 @@ Return the two generated audit files, hash output, `pip freeze`, GPU model/drive
 and `nvidia-smi` memory state.  Do not run the TNBC converter, current baseline
 evaluation, or any official-test command.
 
-## Phase 0 decisions still needed
+## Phase 0.5 gates still open
 
 1. Provide an owner-approved raw TNBC p1--8 GT root/manifest so watershed impact
    can be measured without discovering closed patients.
-2. Prove development isolation for both proposed initialization checkpoints or
-   select protocol-clean initialization alternatives.
-3. After the AutoDL identity audit, select G1 or G2 for MoNuSeg.
-4. Decide the evaluator policy for empty GT/pred images before reproducing a
-   baseline.
-5. After a manifest-safe GPU smoke, lock screening/full update budgets and
+2. Materialize download37/classic30/extended7/test14 identities and hashes from
+   the current official archives without decoding or analyzing sealed test images.
+3. Audit extended7 GDC/TSS metadata and XML conversion, then return evidence for
+   the owner to accept or reject `classic30 -> extended7`.
+4. Use the approved strict evaluator for new work and retain `legacy_skip` only
+   for historical reproduction.
+5. After a classic30/TNBC-p1--6 train-only GPU smoke, lock screening/full update budgets and
    checkpoint cadence.
