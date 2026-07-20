@@ -38,6 +38,25 @@ preserve the original downloaded filenames.  Required inputs are:
 
 Record the actual download time in UTC.  Do not extract or inspect test labels.
 
+The frozen environment has `requests` but not `gdown`.  Download all five
+approved assets without changing the environment; the command preserves server
+attachment filenames and writes hashes/timestamps.  It downloads no weights:
+
+```bash
+conda run -n agentseg python tools/download_phase05_sources.py \
+  --asset monuseg_train \
+  --asset monuseg_test \
+  --asset monuseg_organ \
+  --asset monuseg_converter \
+  --asset tnbc_v1_1 \
+  --output-dir /root/autodl-tmp/f3c_phase05/source \
+  --report /root/autodl-tmp/f3c_phase05/reports/source_downloads.json
+```
+
+If Google Drive returns HTML or blocks the automated request, the tool exits
+with `issues_found`.  In that case download those files in a browser, upload
+them with their original filenames, and do not rerun with overwrite flags.
+
 ## Commands
 
 Create local output directories and capture the frozen environment:
