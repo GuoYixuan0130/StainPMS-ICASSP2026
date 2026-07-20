@@ -43,6 +43,9 @@ approved assets without changing the environment; the command preserves server
 attachment filenames and writes hashes/timestamps.  It downloads no weights:
 
 ```bash
+cd /root/autodl-tmp/projects/StainPMS-ICASSP2026-f3c
+mkdir -p /root/autodl-tmp/f3c_phase05/reports
+
 conda run -n agentseg python tools/download_phase05_sources.py \
   --asset monuseg_train \
   --asset monuseg_test \
