@@ -16,6 +16,7 @@ from tools.audit_monuseg_xml_labels import (
 )
 from tools.audit_tcga_metadata import audit_metadata
 from tools.build_monuseg_manifests import build_manifests
+from tools.summarize_monuseg_xml_audit import render_summary
 
 
 class MonusegPhase05Tests(unittest.TestCase):
@@ -243,6 +244,60 @@ class MonusegPhase05Tests(unittest.TestCase):
             )
         self.assertEqual(report["source_access_mode"], "local_source_tree")
         self.assertEqual(report["aggregates"]["download37"]["image_count"], 1)
+
+    def test_key_findings_summary_lists_only_samples_requiring_review(self):
+        report = {
+            "status": "complete_with_xml_anomalies",
+            "source_access_mode": "local_source_tree",
+            "aggregates": {
+                "classic30": {key: 0 for key in [
+                    "xml_empty_region_count", "xml_invalid_vertex_region_count",
+                    "xml_out_of_bounds_region_count", "xml_self_intersection_region_count",
+                    "xml_disconnected_raster_region_count", "candidate_fully_occluded_region_count",
+                    "candidate_effective_instance_count", "legacy_instance_count",
+                    "exact_instance_map_equal_image_count", "legacy_disconnected_image_count",
+                ]}
+            },
+            "classic30_reported_count_comparison": {
+                "reported_classic30_nuclei": 21623,
+                "audited_classic30_xml_regions": 1,
+                "delta": -21622,
+            },
+            "samples": [
+                {
+                    "sample_id": "clean",
+                    "subset": "classic30",
+                    "label_audit": {
+                        "candidate_effective_instance_count": 1,
+                        "legacy_instance_count": 1,
+                        "candidate_fully_occluded_region_count": 0,
+                        "xml_empty_region_count": 0,
+                        "xml_out_of_bounds_region_count": 0,
+                        "xml_self_intersection_region_count": 0,
+                        "xml_disconnected_raster_region_count": 0,
+                        "legacy_disconnected_instance_ids": {},
+                    },
+                },
+                {
+                    "sample_id": "review",
+                    "subset": "extended7",
+                    "label_audit": {
+                        "candidate_effective_instance_count": 1,
+                        "legacy_instance_count": 2,
+                        "candidate_fully_occluded_region_count": 0,
+                        "xml_empty_region_count": 0,
+                        "xml_out_of_bounds_region_count": 0,
+                        "xml_self_intersection_region_count": 0,
+                        "xml_disconnected_raster_region_count": 0,
+                        "legacy_disconnected_instance_ids": {},
+                        "xml_region_count": 1,
+                    },
+                },
+            ],
+        }
+        text = render_summary(report)
+        self.assertIn("review", text)
+        self.assertNotIn('"sample_id": "clean"', text)
 
 
 if __name__ == "__main__":
