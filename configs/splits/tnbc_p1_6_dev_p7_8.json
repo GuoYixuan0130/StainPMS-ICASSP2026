@@ -2,7 +2,7 @@
   "schema_version": 1,
   "dataset": "tnbc",
   "protocol_id": "tnbc_p1_6_dev_p7_8_v1",
-  "status": "pending_remote_manifest_audit",
+  "status": "historical_prepared_labels_continuity_pending_p1_8_provenance_audit",
   "official_raw_source": {
     "record": "https://zenodo.org/records/2579118",
     "doi": "10.5281/zenodo.2579118",
@@ -27,7 +27,8 @@
     "development_merge_into_training": false,
     "selection_unit": "patient",
     "training_order_source": "explicit_manifest_only",
-    "prepared_label_status": "smoke_only_pending_raw_binary_gt_audit",
+    "prepared_label_status": "historical_prepared_instance_labels_continuity_baseline",
+    "baseline_label_policy": "Use the StainPMS historical prepared inst_map labels for baseline and new-method continuity; provenance audit is descriptive and does not select GT by AJI/PQ.",
     "current_prep_tnbc_watershed": {
       "min_distance": 10,
       "sigma": 1.0,

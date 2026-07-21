@@ -48,10 +48,10 @@ No MoNuSeg internal development split is currently authorized.  The current
 37-image set remains the continuity training scope; official test14 remains
 sealed until final evaluation.
 
-TNBC's existing prepared ``.mat`` labels are permitted for the manifest-safe
-1--2 batch Phase 0.5 smoke only.  They cannot become the final label protocol
-until the separate raw-binary versus connected-components/watershed audit is
-resolved.
+TNBC's historical prepared ``.mat`` instance labels remain the continuity GT
+for the baseline and new method.  A p1--p8 raw-binary provenance audit records
+their relation to official PNG labels, connected components, and the current
+watershed implementation; it must not choose the GT protocol from AJI/PQ.
 
 Phase 1 is read-only diagnosis from frozen checkpoints/inference where
 possible: automatic-point behavior, GT-point single/four-candidate CCR, final

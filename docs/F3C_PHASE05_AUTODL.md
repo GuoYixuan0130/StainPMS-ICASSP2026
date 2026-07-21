@@ -12,8 +12,9 @@ selection, Phase 1 diagnosis, or any MoNuSeg internal split.
   opened by this command; p9--p11 are rejected before file access.
 - The smoke does not construct an evaluation loader, load task-specific TNBC
   weights, write a checkpoint, or run an epoch loop.
-- The prepared MAT labels are labelled `smoke_only_pending_raw_binary_gt_audit`.
-  This does not decide the eventual TNBC ground-truth protocol.
+- Historical prepared MAT labels remain the continuity GT for the baseline and
+  new method.  The p1--p8 raw-label audit records their provenance only; it
+  never chooses GT from AJI/PQ.
 - MoNuSeg remains the current 37/14 continuity protocol.  No internal 37-image
   train/development split is created or used here.
 
@@ -54,6 +55,25 @@ conda run -n agentseg python tools/freeze_tnbc_smoke_manifest.py \
   --allowed-patients 1 2 3 4 5 6 \
   --expected-count 30 \
   --output "$phase05_root/manifests/tnbc_p1_6_smoke_prepared_labels_v1.json"
+```
+
+Run the read-only p1--p8 label-provenance audit.  It reads only the two safe
+manifests, checks prepared MAT suffix/dtype/unique values, and probes only
+exact `GT_01` through `GT_08` PNG candidate paths.  It does not recursively
+scan a directory, open the TNBC ZIP, or access p9--p11.
+
+```bash
+conda run -n agentseg python tools/audit_tnbc_label_provenance.py \
+  --source-manifest /root/autodl-tmp/resimix_tnbc_train.json \
+  --source-manifest /root/autodl-tmp/resimix_tnbc_dev.json \
+  --image-root /root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/tnbc/train_12/images \
+  --prepared-label-root /root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/tnbc/train_12/labels \
+  --raw-root /root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/TNBC \
+  --raw-root /root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/TNBC/TNBC_NucleiSegmentation \
+  --raw-root /root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/tnbc \
+  --expected-count 37 \
+  --output "$phase05_root/reports/tnbc_p1_8_label_provenance.json" \
+  --summary-output "$phase05_root/reports/tnbc_p1_8_label_provenance.md"
 ```
 
 Run exactly one optimizer update first.  It uses only generic SAM2 initialization and
