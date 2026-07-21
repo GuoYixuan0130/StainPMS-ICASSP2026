@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "dataset": "tnbc",
+  "classification": "historical_exploratory",
+  "checkpoint_path": "/root/autodl-tmp/projects/CA-SAM2-HRC/deliver_ckpts/tnbc_pms_best_e156.pth",
+  "checkpoint_sha256": "44a3cb3e93051301d789e44f93769588abfa727d7a174b0270f55305ef023781",
+  "selection_history": "unknown_in_current_reviewed_records",
+  "training_manifest": "unknown_in_current_reviewed_records",
+  "p7_p8_exposure": "unknown",
+  "p9_p11_exposure": "unknown",
+  "test_metric_selection": "unknown",
+  "allowed_phase1_use": "historical exploratory failure analysis only; not clean-baseline, model-selection, or final-performance evidence",
+  "source_note": "Checkpoint identity and SHA256 are verified. Its split and selection provenance must not be inferred from the filename."
+}

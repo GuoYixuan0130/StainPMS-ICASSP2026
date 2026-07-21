@@ -1,4 +1,4 @@
-"""Freeze a p1--p6 TNBC prepared-label manifest for a Phase 0.5 smoke.
+"""Freeze an authorized TNBC prepared-label manifest without directory discovery.
 
 The tool consumes an already-authorized explicit source manifest.  It never
 walks ``image_root`` and rejects a closed patient before opening any image or
@@ -128,15 +128,15 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "schema_version": 1,
         "dataset": "tnbc",
         "protocol_id": args.protocol_id,
-        "status": "smoke_only_prepared_labels_pending_raw_binary_gt_audit",
-        "role": "phase05_train_only_smoke",
+        "status": args.status,
+        "role": args.role,
         "record_count": len(records),
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_manifest": str(source_path),
         "source_manifest_sha256": sha256_file(source_path),
         "allowed_patients": sorted(allowed_patients),
         "sealed_patient_policy": "p9-p11 rejected before sample file access",
-        "prepared_label_policy": "smoke_only_pending_raw_binary_gt_audit",
+        "prepared_label_policy": args.prepared_label_policy,
         "records": records,
     }
 
@@ -150,6 +150,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--allowed-patients", type=int, nargs="+", required=True)
     parser.add_argument("--expected-count", type=int, default=None)
     parser.add_argument("--protocol-id", default="tnbc_p1_6_smoke_prepared_labels_v1")
+    parser.add_argument(
+        "--role",
+        default="phase05_train_only_smoke",
+        help="Auditable use role; this does not alter sample membership.",
+    )
+    parser.add_argument(
+        "--status",
+        default="smoke_only_prepared_labels_pending_raw_binary_gt_audit",
+        help="Frozen manifest status recorded in the output.",
+    )
+    parser.add_argument(
+        "--prepared-label-policy",
+        default="smoke_only_pending_raw_binary_gt_audit",
+        help="Human-readable prepared-label provenance policy recorded in the output.",
+    )
     return parser.parse_args()
 
 

@@ -25,16 +25,7 @@ from PIL import Image
 from torch.autograd import Function
 
 
-import cfg
-
 import pandas as pd
-
-
-args = cfg.parse_args()
-
-device = torch.device('cuda:' + str(args.gpu_device) if torch.cuda.is_available() else 'cpu')
-
-
 
 def get_network(args, net, use_gpu=True, gpu_device=0, distribution=True):
     """Build the SAM2 mask path used by CA-SAM2 and StainPMS."""
@@ -43,7 +34,15 @@ def get_network(args, net, use_gpu=True, gpu_device=0, distribution=True):
 
     from sam2_train.build_sam import build_sam2
 
-    net = build_sam2(args.sam_config, args.sam_ckpt, device=device)
+    # This utility is imported by data/model helpers as well as executable
+    # entry points. Parsing the process command line at import time made
+    # read-only tools impossible to compose safely. Resolve the build device
+    # solely from the explicit function argument instead.
+    if torch.cuda.is_available() and use_gpu:
+        build_device = gpu_device if isinstance(gpu_device, torch.device) else torch.device("cuda:" + str(gpu_device))
+    else:
+        build_device = torch.device("cpu")
+    net = build_sam2(args.sam_config, args.sam_ckpt, device=build_device)
 
     if use_gpu:
         #net = net.cuda(device = gpu_device)
@@ -340,8 +339,8 @@ def vis_inst_image(imgs, pred_masks, gt_masks, save_path, reverse = False, point
 
     imgs = imgs * std + mean
 
-    pred_masks = get_inst_image(pred_masks).to(device)
-    gt_masks = get_inst_image(gt_masks).to(device)
+    pred_masks = get_inst_image(pred_masks).to(imgs.device)
+    gt_masks = get_inst_image(gt_masks).to(imgs.device)
     pred_masks = pred_masks / 255.0
     gt_masks = gt_masks / 255.0
 

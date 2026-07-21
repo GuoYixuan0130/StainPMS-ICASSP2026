@@ -172,6 +172,11 @@ CA-SAM2.code-workspace
 /checkpoints/
 /data/
 
+# Generated read-only diagnostics and run-specific frozen manifests stay local.
+/reports/
+/artifacts/
+/phase1_outputs/
+
 # IDE / tooling local state
 .idea/
 .vscode/

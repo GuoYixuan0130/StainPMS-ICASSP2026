@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "protocol_id": "f3c_phase1_candidate_failure_diagnosis_v1",
+  "evaluator": {
+    "mode": "strict",
+    "policy_id": "strict_empty_handling_v1",
+    "main_match_iou": 0.5,
+    "sensitivity_ccr_iou": [0.3, 0.5, 0.7],
+    "do_not_change": ["AJI/PQ definitions", "main matching threshold", "point NMS", "mask threshold", "postprocessing"]
+  },
+  "candidate_tokens": {
+    "count": 4,
+    "token_indices": [0, 1, 2, 3],
+    "default_selected_token": 0,
+    "decoder_access": "sam_mask_decoder.predict_masks returns all native mask tokens; this is diagnostic-only and does not change the standard multimask_output=False inference path"
+  },
+  "point_definition": {
+    "automatic": "distinct automatic positive prompts that actually enter the decoder after the existing crop filtering and incremental global point-NMS path",
+    "point_recall": "a GT instance is recalled when at least one such automatic point lies within its prepared instance mask",
+    "background_point": "an automatic decoder prompt whose integer pixel coordinate has prepared GT label 0",
+    "gt_internal_point": "per-instance Euclidean-distance-transform maximum; ties choose smallest y then smallest x"
+  },
+  "coverage_definition": {
+    "gt_point_ccr": "maximum IoU over all four native candidates produced from the fixed GT interior point in every sliding-window crop containing that point",
+    "auto_point_ccr": "maximum IoU over all four native candidates from automatic prompts located inside the same GT instance",
+    "auto_conditional_denominator": "GT instances with at least one automatic positive point",
+    "auto_end_to_end_denominator": "all GT instances",
+    "candidate_masks": "thresholded at 0.0 before candidate selection, NMS, or final assembly"
+  },
+  "selection_and_error_definition": {
+    "selected_candidate": "the exact standard multimask_output=False candidate before per-crop mask processing, NMS, and final assembly; token 0 unless the existing decoder's enabled dynamic-stability fallback chooses its highest-quality ambiguity token",
+    "selection_regret": "best_candidate_iou - selected_token0_iou",
+    "good_but_not_final": "best native automatic candidate IoU >= main_match_iou and final assembled prediction has no strict match",
+    "mutually_exclusive_gt_error_order": ["final_matched_tp", "point_miss", "candidate_generation_miss", "selection_ranking_miss", "assembly_nms_conflict_miss"],
+    "candidate_generation_miss": "automatic point exists but no associated native candidate reaches main_match_iou",
+    "selection_ranking_miss": "a native candidate reaches main_match_iou but no standard selected candidate reaches it",
+    "assembly_nms_conflict_miss": "a standard selected candidate reaches main_match_iou but no final assembled prediction strictly matches the GT"
+  },
+  "supplementary_final_error_definition": {
+    "fn_fp": "strict evaluator unmatched GT/prediction instances",
+    "boundary_localization": "unmatched GT having maximum IoU with any final prediction in (0, main_match_iou)",
+    "split": "unmatched GT with positive-pixel overlap with two or more final prediction instances",
+    "merge": "unmatched final prediction with positive-pixel overlap with two or more GT instances"
+  },
+  "scope": {
+    "tnbc": "p1-p6 and p7-p8 only; report separately by split and patient; p9-p11 forbidden",
+    "monuseg": "37 training images only; training-set mechanism diagnosis, not unseen-domain evidence; test14 forbidden"
+  }
+}

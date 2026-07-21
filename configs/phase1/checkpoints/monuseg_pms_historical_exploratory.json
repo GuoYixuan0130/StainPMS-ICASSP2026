@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "dataset": "monuseg",
+  "classification": "historical_exploratory",
+  "checkpoint_path": "/root/autodl-tmp/projects/CA-SAM2-HRC/deliver_ckpts/monuseg_pms_best_pq.pth",
+  "checkpoint_sha256": "6616c24626a162580d79aa7035d0b6c1a4ae6240a6c2f4599960dd4efac95db1",
+  "selection_history": "unknown_in_current_reviewed_records",
+  "training_manifest": "unknown_in_current_reviewed_records",
+  "test14_exposure": "unknown",
+  "allowed_phase1_use": "historical exploratory training-set mechanism analysis only; not clean-baseline, model-selection, or unseen-domain evidence",
+  "source_note": "Checkpoint identity and SHA256 are verified. Its train/test selection provenance must not be inferred from the filename."
+}
