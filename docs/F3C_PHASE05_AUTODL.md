@@ -70,6 +70,10 @@ conda run -n agentseg python main.py \
   --smoke_output "$phase05_root/reports/tnbc_p1_6_smoke_1batch.json" \
   --sam_ckpt /root/autodl-tmp/projects/CA-SAM2-HRC/checkpoints/sam2_hiera_large.pt \
   --sam_config sam2_hiera_l \
+  --texture --context \
+  --overlap 32 \
+  --test_nms_thr 12 \
+  --b 1 \
   --evaluator_mode strict \
   --exp_name f3c_phase05_tnbc_smoke
 ```
