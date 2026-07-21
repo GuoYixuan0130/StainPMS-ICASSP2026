@@ -219,13 +219,14 @@ def _manifest(
     records: list[dict[str, Any]],
     access_policy: str,
     created_at: str,
+    status: str = "identity_complete",
 ) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "dataset": "monuseg",
         "protocol_id": protocol_id,
         "role": role,
-        "status": "identity_complete",
+        "status": status,
         "access_policy": access_policy,
         "created_at_utc": created_at,
         "source_case_config": str(source_config),
@@ -236,13 +237,66 @@ def _manifest(
     }
 
 
+def _expected_train_records(
+    *,
+    config: dict[str, Any],
+    metadata: dict[str, dict[str, Any]],
+    classic_order: list[str],
+    extended_order: list[str],
+    prepared_images: dict[str, Path],
+    legacy_labels: dict[str, Path],
+    source_images: dict[str, Path],
+    source_xml: dict[str, Path],
+) -> dict[str, dict[str, Any]]:
+    expected_train = set(classic_order) | set(extended_order)
+    if set(source_images) != expected_train:
+        raise ValueError(
+            "training source-image case mismatch: "
+            f"missing={sorted(expected_train - set(source_images))}, "
+            f"unexpected={sorted(set(source_images) - expected_train)}"
+        )
+    if set(source_xml) != expected_train:
+        raise ValueError(
+            "training source-XML case mismatch: "
+            f"missing={sorted(expected_train - set(source_xml))}, "
+            f"unexpected={sorted(set(source_xml) - expected_train)}"
+        )
+    records: dict[str, dict[str, Any]] = {}
+    classic_set = set(classic_order)
+    for sample_id in classic_order + extended_order:
+        if sample_id not in prepared_images or sample_id not in legacy_labels:
+            raise ValueError(f"prepared image/label missing for {sample_id}")
+        source_image = source_images[sample_id]
+        xml = source_xml[sample_id]
+        row = dict(metadata[sample_id])
+        row.update(
+            {
+                "subset": "classic30" if sample_id in classic_set else "extended7",
+                "source_image_member": source_image.name,
+                "source_image_path": str(source_image.resolve()),
+                "source_image_size_bytes": source_image.stat().st_size,
+                "source_image_crc32": None,
+                "source_image_sha256": _sha256_file(source_image),
+                "source_xml_member": xml.name,
+                "source_xml_path": str(xml.resolve()),
+                "source_xml_size_bytes": xml.stat().st_size,
+                "source_xml_crc32": None,
+                "source_xml_sha256": _sha256_file(xml),
+                "image_path": str(prepared_images[sample_id].resolve()),
+                "image_sha256": _sha256_file(prepared_images[sample_id]),
+                "label_path": str(legacy_labels[sample_id].resolve()),
+                "label_sha256": _sha256_file(legacy_labels[sample_id]),
+                "label_version": "legacy_prepared_pending_xml_audit",
+            }
+        )
+        records[sample_id] = row
+    return records
+
+
 def build_manifests(args: argparse.Namespace) -> dict[str, Any]:
-    downloaded_at_utc = _validate_utc_timestamp(args.downloaded_at_utc)
     config_path = Path(args.release_config)
     config = _load_json(config_path)
     config_sha = _sha256_file(config_path)
-    train_archive_path = Path(args.train_archive)
-    test_archive_path = Path(args.test_archive)
     prepared_images = _files_by_stem(
         Path(args.prepared_image_root), IMAGE_SUFFIXES
     )
@@ -260,84 +314,122 @@ def build_manifests(args: argparse.Namespace) -> dict[str, Any]:
     if len(classic_order) != 30 or len(extended_order) != 7 or len(test_order) != 14:
         raise ValueError("release config does not contain exact 30/7/14 identities")
 
-    train_archive_identity = _archive_identity(
-        train_archive_path, downloaded_at_utc=downloaded_at_utc
-    )
-    test_archive_identity = _archive_identity(
-        test_archive_path, downloaded_at_utc=downloaded_at_utc
-    )
     metadata = _metadata_by_sample(config)
 
-    train_records_by_id: dict[str, dict[str, Any]] = {}
-    with zipfile.ZipFile(train_archive_path, "r") as archive:
-        image_members = _zip_source_images_by_stem(archive)
-        xml_members = _zip_members_by_stem(archive, {".xml"})
-        image_ids = {_sample_id(stem): (stem, info) for stem, info in image_members.items()}
-        xml_ids = {_sample_id(stem): (stem, info) for stem, info in xml_members.items()}
-        if set(image_ids) != expected_train:
-            raise ValueError(
-                "training archive case mismatch: "
-                f"missing={sorted(expected_train - set(image_ids))}, "
-                f"unexpected={sorted(set(image_ids) - expected_train)}"
-            )
-        if set(xml_ids) != expected_train:
-            raise ValueError(
-                "training XML case mismatch: "
-                f"missing={sorted(expected_train - set(xml_ids))}, "
-                f"unexpected={sorted(set(xml_ids) - expected_train)}"
-            )
-        for sample_id in classic_order + extended_order:
-            image_stem, image_info = image_ids[sample_id]
-            _, xml_info = xml_ids[sample_id]
-            if image_stem not in prepared_images or image_stem not in legacy_labels:
-                raise ValueError(
-                    f"prepared image/label missing for {sample_id}: stem={image_stem}"
-                )
-            row = dict(metadata[sample_id])
-            row.update(
-                {
-                    "subset": "classic30" if sample_id in set(classic_order) else "extended7",
-                    "source_image_member": image_info.filename,
-                    "source_image_size_bytes": image_info.file_size,
-                    "source_image_crc32": f"{image_info.CRC:08x}",
-                    "source_image_sha256": _hash_zip_member(archive, image_info),
-                    "source_xml_member": xml_info.filename,
-                    "source_xml_size_bytes": xml_info.file_size,
-                    "source_xml_crc32": f"{xml_info.CRC:08x}",
-                    "source_xml_sha256": _hash_zip_member(archive, xml_info),
-                    "image_path": str(prepared_images[image_stem].resolve()),
-                    "image_sha256": _sha256_file(prepared_images[image_stem]),
-                    "label_path": str(legacy_labels[image_stem].resolve()),
-                    "label_sha256": _sha256_file(legacy_labels[image_stem]),
-                    "label_version": "legacy_prepared_pending_xml_audit",
-                }
-            )
-            train_records_by_id[sample_id] = row
+    train_archive_arg = str(getattr(args, "train_archive", "") or "")
+    source_image_root_arg = str(getattr(args, "train_source_image_root", "") or "")
+    source_xml_root_arg = str(getattr(args, "train_source_xml_root", "") or "")
+    archive_mode = bool(train_archive_arg)
+    directory_mode = bool(source_image_root_arg or source_xml_root_arg)
+    if archive_mode == directory_mode:
+        raise ValueError(
+            "provide exactly one training source: --train-archive or both "
+            "--train-source-image-root and --train-source-xml-root"
+        )
+    if directory_mode and (not source_image_root_arg or not source_xml_root_arg):
+        raise ValueError(
+            "local source-tree mode requires both --train-source-image-root and "
+            "--train-source-xml-root"
+        )
 
+    if archive_mode:
+        downloaded_at_utc = _validate_utc_timestamp(str(args.downloaded_at_utc))
+        train_archive_path = Path(train_archive_arg)
+        train_source_identity = _archive_identity(
+            train_archive_path, downloaded_at_utc=downloaded_at_utc
+        )
+        with zipfile.ZipFile(train_archive_path, "r") as archive:
+            image_members = _zip_source_images_by_stem(archive)
+            xml_members = _zip_members_by_stem(archive, {".xml"})
+            image_ids = {_sample_id(stem): (stem, info) for stem, info in image_members.items()}
+            xml_ids = {_sample_id(stem): (stem, info) for stem, info in xml_members.items()}
+            if set(image_ids) != expected_train or set(xml_ids) != expected_train:
+                raise ValueError("training archive image/XML case mismatch")
+            train_records_by_id = {}
+            for sample_id in classic_order + extended_order:
+                image_stem, image_info = image_ids[sample_id]
+                _, xml_info = xml_ids[sample_id]
+                if image_stem not in prepared_images or image_stem not in legacy_labels:
+                    raise ValueError(
+                        f"prepared image/label missing for {sample_id}: stem={image_stem}"
+                    )
+                row = dict(metadata[sample_id])
+                row.update(
+                    {
+                        "subset": "classic30" if sample_id in set(classic_order) else "extended7",
+                        "source_image_member": image_info.filename,
+                        "source_image_size_bytes": image_info.file_size,
+                        "source_image_crc32": f"{image_info.CRC:08x}",
+                        "source_image_sha256": _hash_zip_member(archive, image_info),
+                        "source_xml_member": xml_info.filename,
+                        "source_xml_size_bytes": xml_info.file_size,
+                        "source_xml_crc32": f"{xml_info.CRC:08x}",
+                        "source_xml_sha256": _hash_zip_member(archive, xml_info),
+                        "image_path": str(prepared_images[image_stem].resolve()),
+                        "image_sha256": _sha256_file(prepared_images[image_stem]),
+                        "label_path": str(legacy_labels[image_stem].resolve()),
+                        "label_sha256": _sha256_file(legacy_labels[image_stem]),
+                        "label_version": "legacy_prepared_pending_xml_audit",
+                    }
+                )
+                train_records_by_id[sample_id] = row
+    else:
+        source_images = _files_by_stem(Path(source_image_root_arg), IMAGE_SUFFIXES)
+        source_xml = _files_by_stem(Path(source_xml_root_arg), {".xml"})
+        train_source_identity = {
+            "kind": "local_training_source_tree_snapshot",
+            "archive_identity_status": "missing_not_official_download_verified",
+            "image_root": str(Path(source_image_root_arg).resolve()),
+            "xml_root": str(Path(source_xml_root_arg).resolve()),
+            "policy": (
+                "local source files are hash-verified for train-side audit only; "
+                "they are not asserted to be the official-download archive"
+            ),
+        }
+        train_records_by_id = _expected_train_records(
+            config=config,
+            metadata=metadata,
+            classic_order=classic_order,
+            extended_order=extended_order,
+            prepared_images=prepared_images,
+            legacy_labels=legacy_labels,
+            source_images=source_images,
+            source_xml=source_xml,
+        )
+
+    test_archive_arg = str(getattr(args, "test_archive", "") or "")
     test_records_by_id: dict[str, dict[str, Any]] = {}
-    with zipfile.ZipFile(test_archive_path, "r") as archive:
-        # Deliberately enumerate and hash image members only.  XML, MAT and
-        # other annotation-like members are not opened by this code path.
-        image_members = _zip_source_images_by_stem(archive)
-        image_ids = {_sample_id(stem): info for stem, info in image_members.items()}
-        if set(image_ids) != expected_test:
-            raise ValueError(
-                "sealed test image identity mismatch: "
-                f"missing={sorted(expected_test - set(image_ids))}, "
-                f"unexpected={sorted(set(image_ids) - expected_test)}"
-            )
-        for configured in config["test14_expected_identities"]:
-            sample_id = str(configured["sample_id"]).upper()
-            info = image_ids[sample_id]
-            test_records_by_id[sample_id] = {
-                "sample_id": sample_id,
-                "case": _case_id(sample_id),
-                "subset": "sealed_test14_identity_only",
-                "source_image_member": info.filename,
-                "source_image_size_bytes": info.file_size,
-                "source_image_crc32": f"{info.CRC:08x}",
-                "source_image_sha256": _hash_zip_member(archive, info),
-            }
+    test_archive_identity: dict[str, Any] | None = None
+    if test_archive_arg:
+        if not archive_mode:
+            downloaded_at_utc = _validate_utc_timestamp(str(args.downloaded_at_utc))
+        test_archive_path = Path(test_archive_arg)
+        test_archive_identity = _archive_identity(
+            test_archive_path, downloaded_at_utc=downloaded_at_utc
+        )
+        with zipfile.ZipFile(test_archive_path, "r") as archive:
+            # Deliberately enumerate and hash image members only.  XML, MAT and
+            # other annotation-like members are not opened by this code path.
+            image_members = _zip_source_images_by_stem(archive)
+            image_ids = {_sample_id(stem): info for stem, info in image_members.items()}
+            if set(image_ids) != expected_test:
+                raise ValueError(
+                    "sealed test image identity mismatch: "
+                    f"missing={sorted(expected_test - set(image_ids))}, "
+                    f"unexpected={sorted(set(image_ids) - expected_test)}"
+                )
+            for configured in config["test14_expected_identities"]:
+                sample_id = str(configured["sample_id"]).upper()
+                info = image_ids[sample_id]
+                test_records_by_id[sample_id] = {
+                    "sample_id": sample_id,
+                    "case": _case_id(sample_id),
+                    "subset": "sealed_test14_identity_only",
+                    "source_image_member": info.filename,
+                    "source_image_size_bytes": info.file_size,
+                    "source_image_crc32": f"{info.CRC:08x}",
+                    "source_image_sha256": _hash_zip_member(archive, info),
+                }
 
     train_cases = {_case_id(value) for value in train_records_by_id}
     test_cases = {_case_id(value) for value in test_records_by_id}
@@ -351,7 +443,9 @@ def build_manifests(args: argparse.Namespace) -> dict[str, Any]:
         "case_ids": sorted(train_cases & test_cases),
         "source_image_sha256": sorted(train_image_hashes & test_image_hashes),
     }
-    if overlap["case_ids"] or overlap["source_image_sha256"]:
+    if test_archive_identity is not None and (
+        overlap["case_ids"] or overlap["source_image_sha256"]
+    ):
         raise ValueError(f"train/test identity overlap: {overlap}")
 
     created_at = datetime.now(timezone.utc).isoformat()
@@ -361,39 +455,56 @@ def build_manifests(args: argparse.Namespace) -> dict[str, Any]:
     ]
     classic_records = [train_records_by_id[value] for value in classic_order]
     extended_records = [train_records_by_id[value] for value in extended_order]
-    test_records = [test_records_by_id[value] for value in test_order]
     outputs = {
         "monuseg_download37_v1": _manifest(
             protocol_id="monuseg_download37_v1",
             role="stainpms_continuity_training_pool",
             source_config=config_path,
             source_config_sha256=config_sha,
-            archive=train_archive_identity,
+            archive=train_source_identity,
             records=download37_records,
             access_policy="train_annotations_allowed",
             created_at=created_at,
+            status=(
+                "identity_complete"
+                if archive_mode
+                else "local_source_tree_snapshot_archive_identity_pending"
+            ),
         ),
         "monuseg_challenge30_v1": _manifest(
             protocol_id="monuseg_challenge30_v1",
             role="original_challenge_training_pool",
             source_config=config_path,
             source_config_sha256=config_sha,
-            archive=train_archive_identity,
+            archive=train_source_identity,
             records=classic_records,
             access_policy="train_annotations_allowed_no_extended7_for_selection",
             created_at=created_at,
+            status=(
+                "identity_complete"
+                if archive_mode
+                else "local_source_tree_snapshot_archive_identity_pending"
+            ),
         ),
         "monuseg_extended7_v1": _manifest(
             protocol_id="monuseg_extended7_v1",
             role="candidate_development_identity_audit_only",
             source_config=config_path,
             source_config_sha256=config_sha,
-            archive=train_archive_identity,
+            archive=train_source_identity,
             records=extended_records,
             access_policy="train_annotations_allowed_not_locked_for_model_selection",
             created_at=created_at,
+            status=(
+                "identity_complete"
+                if archive_mode
+                else "local_source_tree_snapshot_archive_identity_pending"
+            ),
         ),
-        "monuseg_test14_identity_v1": _manifest(
+    }
+    if test_archive_identity is not None:
+        test_records = [test_records_by_id[value] for value in test_order]
+        outputs["monuseg_test14_identity_v1"] = _manifest(
             protocol_id="monuseg_test14_identity_v1",
             role="sealed_final_test_identity_only",
             source_config=config_path,
@@ -402,32 +513,51 @@ def build_manifests(args: argparse.Namespace) -> dict[str, Any]:
             records=test_records,
             access_policy="raw_image_identity_only_no_decode_no_annotation_access",
             created_at=created_at,
-        ),
-    }
+        )
     for protocol_id, payload in outputs.items():
         _write_json(out_dir / f"{protocol_id}.json", payload)
 
     report = {
         "schema_version": 1,
         "phase": "0.5",
-        "status": "complete",
+        "status": "complete" if test_archive_identity is not None and archive_mode else "partial_provenance",
         "created_at_utc": created_at,
         "git_branch": _git_value("branch", "--show-current"),
         "git_commit": _git_value("rev-parse", "HEAD"),
         "release_config": str(config_path),
         "release_config_sha256": config_sha,
         "official_page": config["official_page"],
-        "train_archive": train_archive_identity,
+        "train_source": train_source_identity,
         "test_archive": test_archive_identity,
         "official_organ_information_file": _auxiliary_identity(args.organ_info),
         "official_xml_converter_file": _auxiliary_identity(args.official_converter),
         "counts": {"classic30": 30, "extended7": 7, "download37": 37, "test14": 14},
-        "train_test_isolation": {"status": "isolated", "overlap": overlap},
+        "test14_identity_record_count": len(test_records_by_id),
+        "train_test_isolation": {
+            "status": "isolated" if test_archive_identity is not None else "pending_test_archive_identity",
+            "overlap": overlap,
+        },
         "test_access_attestation": {
             "decoded_images": False,
             "opened_annotation_members": False,
-            "hashed_raw_image_members": True,
+            "hashed_raw_image_members": test_archive_identity is not None,
         },
+        "unresolved_provenance": [
+            item
+            for item in [
+                (
+                    "official_training_archive_byte_identity_missing"
+                    if not archive_mode
+                    else None
+                ),
+                (
+                    "sealed_test14_raw_image_identity_missing"
+                    if test_archive_identity is None
+                    else None
+                ),
+            ]
+            if item is not None
+        ],
         "generated_manifests": {
             key: str((out_dir / f"{key}.json").resolve()) for key in outputs
         },
@@ -442,11 +572,13 @@ def parse_args() -> argparse.Namespace:
         "--release-config",
         default="configs/manifests/monuseg_release_v1.json",
     )
-    parser.add_argument("--train-archive", required=True)
-    parser.add_argument("--test-archive", required=True)
+    parser.add_argument("--train-archive", default="")
+    parser.add_argument("--train-source-image-root", default="")
+    parser.add_argument("--train-source-xml-root", default="")
+    parser.add_argument("--test-archive", default="")
     parser.add_argument("--prepared-image-root", required=True)
     parser.add_argument("--legacy-label-root", required=True)
-    parser.add_argument("--downloaded-at-utc", required=True)
+    parser.add_argument("--downloaded-at-utc", default="")
     parser.add_argument("--organ-info", default="")
     parser.add_argument("--official-converter", default="")
     parser.add_argument("--output-dir", required=True)

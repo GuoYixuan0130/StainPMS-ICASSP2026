@@ -38,8 +38,23 @@ preserve the original downloaded filenames.  Required inputs are:
 
 Record the actual download time in UTC.  Do not extract or inspect test labels.
 
-The frozen environment has `requests` but not `gdown`.  Download all five
-approved assets without changing the environment; the command preserves server
+### Existing local 37-image training source tree
+
+If the approved training location already retains exactly 37 training TIFFs,
+37 XML files and the legacy MAT labels, do **not** download a replacement
+training archive.  Build the three training-side manifests from those files
+instead.  This mode hashes every local source TIFF/XML and marks the result
+`local_source_tree_snapshot_archive_identity_pending`: it is valid for the
+XML/legacy-label audit and train-only smoke, but it does not claim that the
+local tree proves the byte identity of the current official download ZIP.
+
+It deliberately does not create a test14 manifest or open any test file.
+The official training ZIP and the test ZIP remain separate provenance items to
+be obtained only if needed to close their respective identity checks.
+
+The frozen environment has `requests` but not `gdown`.  Use the approved
+download command only for source artifacts that are genuinely absent (for
+example, the test14 identity ZIP or TNBC v1.1 ZIP); it preserves server
 attachment filenames and writes hashes/timestamps.  It downloads no weights:
 
 ```bash
@@ -94,6 +109,18 @@ conda run -n agentseg python tools/build_monuseg_manifests.py \
   --organ-info /root/autodl-tmp/f3c_phase05/source/ORGAN_INFORMATION_FILE \
   --official-converter /root/autodl-tmp/f3c_phase05/source/XML_CONVERTER_FILE \
   --output-dir /root/autodl-tmp/f3c_phase05/manifests
+```
+
+For the existing local 37-image source tree, use this training-only manifest
+command instead of the archive command above:
+
+```bash
+conda run -n agentseg python tools/build_monuseg_manifests.py \
+  --train-source-image-root /root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/monuseg/train_12/images \
+  --train-source-xml-root /root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/monuseg/train_12/xml \
+  --prepared-image-root /root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/monuseg/train_12/images \
+  --legacy-label-root /root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/monuseg/train_12/labels \
+  --output-dir /root/autodl-tmp/f3c_phase05/manifests_local_tree
 ```
 
 Query GDC case metadata only (no image request) and retain the raw response:

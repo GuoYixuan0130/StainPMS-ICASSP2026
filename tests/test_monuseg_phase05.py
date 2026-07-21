@@ -6,8 +6,14 @@ import zipfile
 from pathlib import Path
 
 import numpy as np
+from scipy.io import savemat
+from skimage import io as skio
 
-from tools.audit_monuseg_xml_labels import audit_xml_label, polygon_self_intersects
+from tools.audit_monuseg_xml_labels import (
+    audit_manifest,
+    audit_xml_label,
+    polygon_self_intersects,
+)
 from tools.audit_tcga_metadata import audit_metadata
 from tools.build_monuseg_manifests import build_manifests
 
@@ -136,6 +142,107 @@ class MonusegPhase05Tests(unittest.TestCase):
             self.assertTrue(
                 all("label_path" not in record for record in test_manifest["records"])
             )
+
+    def test_local_source_tree_manifest_is_explicitly_provisional(self):
+        config = json.loads(
+            Path("configs/manifests/monuseg_release_v1.json").read_text(encoding="utf-8")
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_images = root / "source_images"
+            source_xml = root / "source_xml"
+            prepared = root / "prepared"
+            labels = root / "labels"
+            for directory in (source_images, source_xml, prepared, labels):
+                directory.mkdir()
+            for row in config["classic30"] + config["extended7"]:
+                sample = row["sample_id"]
+                (source_images / f"{sample}.tif").write_bytes(b"source-" + sample.encode())
+                (source_xml / f"{sample}.xml").write_bytes(b"<Annotations/>")
+                (prepared / f"{sample}.tif").write_bytes(b"prepared-" + sample.encode())
+                (labels / f"{sample}.mat").write_bytes(b"legacy-" + sample.encode())
+            output = root / "out"
+            report = build_manifests(
+                argparse.Namespace(
+                    release_config="configs/manifests/monuseg_release_v1.json",
+                    train_archive="",
+                    train_source_image_root=str(source_images),
+                    train_source_xml_root=str(source_xml),
+                    test_archive="",
+                    prepared_image_root=str(prepared),
+                    legacy_label_root=str(labels),
+                    downloaded_at_utc="",
+                    organ_info="",
+                    official_converter="",
+                    output_dir=str(output),
+                )
+            )
+            self.assertEqual(report["status"], "partial_provenance")
+            self.assertEqual(report["test14_identity_record_count"], 0)
+            self.assertIn(
+                "official_training_archive_byte_identity_missing",
+                report["unresolved_provenance"],
+            )
+            self.assertFalse((output / "monuseg_test14_identity_v1.json").exists())
+            manifest = json.loads(
+                (output / "monuseg_challenge30_v1.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                manifest["status"], "local_source_tree_snapshot_archive_identity_pending"
+            )
+
+    def test_xml_audit_accepts_hash_verified_local_source_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_image = root / "source.tif"
+            source_xml = root / "source.xml"
+            prepared = root / "prepared.tif"
+            label = root / "legacy.mat"
+            image = np.zeros((8, 8, 3), dtype=np.uint8)
+            skio.imsave(source_image, image, check_contrast=False)
+            skio.imsave(prepared, image, check_contrast=False)
+            source_xml.write_text(
+                "<Annotations><Region Id='1'><Vertex X='1' Y='1'/>"
+                "<Vertex X='3' Y='1'/><Vertex X='3' Y='3'/></Region></Annotations>",
+                encoding="utf-8",
+            )
+            savemat(label, {"inst_map": np.zeros((8, 8), dtype=np.int32)})
+            import hashlib
+
+            digest = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+            manifest_path = root / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "dataset": "monuseg",
+                        "role": "training_pool",
+                        "access_policy": "train_annotations_allowed",
+                        "source_archive": {"kind": "local_training_source_tree_snapshot"},
+                        "records": [
+                            {
+                                "sample_id": "TCGA-AA-0000-01Z-00-DX1",
+                                "subset": "classic30",
+                                "source_image_member": source_image.name,
+                                "source_image_path": str(source_image),
+                                "source_image_sha256": digest(source_image),
+                                "source_xml_member": source_xml.name,
+                                "source_xml_path": str(source_xml),
+                                "source_xml_sha256": digest(source_xml),
+                                "image_path": str(prepared),
+                                "image_sha256": digest(prepared),
+                                "label_path": str(label),
+                                "label_sha256": digest(label),
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            report = audit_manifest(
+                argparse.Namespace(manifest=str(manifest_path), regenerated_label_root="")
+            )
+        self.assertEqual(report["source_access_mode"], "local_source_tree")
+        self.assertEqual(report["aggregates"]["download37"]["image_count"], 1)
 
 
 if __name__ == "__main__":

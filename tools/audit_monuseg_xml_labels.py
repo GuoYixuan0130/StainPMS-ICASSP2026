@@ -411,15 +411,29 @@ def audit_manifest(args: argparse.Namespace) -> dict[str, Any]:
     records = manifest.get("records")
     if not isinstance(records, list) or not records:
         raise ValueError("manifest has no records")
-    archive_path = Path(str(manifest["source_archive"]["path"]))
+    source_descriptor = manifest["source_archive"]
+    archive_path_value = source_descriptor.get("path")
+    archive: zipfile.ZipFile | None = None
+    source_access_mode = "local_source_tree" if not archive_path_value else "archive"
+    if archive_path_value:
+        archive = zipfile.ZipFile(Path(str(archive_path_value)), "r")
     generated_root = Path(args.regenerated_label_root) if args.regenerated_label_root else None
     rows: list[dict[str, Any]] = []
-    with zipfile.ZipFile(archive_path, "r") as archive:
+    try:
         for record in records:
             sample_id = str(record["sample_id"])
             image_member = str(record["source_image_member"])
-            with archive.open(image_member, "r") as handle:
-                source_image_bytes = handle.read()
+            if archive is None:
+                source_image_path = Path(str(record["source_image_path"]))
+                xml_source_path = Path(str(record["source_xml_path"]))
+                source_image_bytes = source_image_path.read_bytes()
+                xml_bytes = xml_source_path.read_bytes()
+            else:
+                with archive.open(image_member, "r") as handle:
+                    source_image_bytes = handle.read()
+                xml_member = str(record["source_xml_member"])
+                with archive.open(xml_member, "r") as handle:
+                    xml_bytes = handle.read()
             source_image_sha = hashlib.sha256(source_image_bytes).hexdigest()
             if source_image_sha != record.get("source_image_sha256"):
                 raise ValueError(f"source image hash mismatch for {sample_id}")
@@ -430,8 +444,6 @@ def audit_manifest(args: argparse.Namespace) -> dict[str, Any]:
                 source_image_bytes, prepared_image_path
             )
             xml_member = str(record["source_xml_member"])
-            with archive.open(xml_member, "r") as handle:
-                xml_bytes = handle.read()
             xml_sha = hashlib.sha256(xml_bytes).hexdigest()
             if xml_sha != record.get("source_xml_sha256"):
                 raise ValueError(f"XML hash mismatch for {sample_id}")
@@ -466,6 +478,9 @@ def audit_manifest(args: argparse.Namespace) -> dict[str, Any]:
                     "label_audit": label_audit,
                 }
             )
+    finally:
+        if archive is not None:
+            archive.close()
 
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -504,7 +519,8 @@ def audit_manifest(args: argparse.Namespace) -> dict[str, Any]:
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "source_manifest": str(manifest_path),
         "source_manifest_sha256": _sha256_file(manifest_path),
-        "source_archive": manifest["source_archive"],
+        "source_archive": source_descriptor,
+        "source_access_mode": source_access_mode,
         "rasterization_protocol": {
             "id": "xml_region_skimage_polygon_last_wins_v1",
             "identity_unit": "one XML Region per instance ID",
