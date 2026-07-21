@@ -18,6 +18,7 @@ from tools.audit_monuseg_xml_labels import (
 from tools.audit_tcga_metadata import audit_metadata
 from tools.build_monuseg_manifests import build_manifests
 from tools.summarize_monuseg_xml_audit import render_summary
+from tools.audit_monuseg_xml_schema import analyze_xml_bytes
 
 
 class MonusegPhase05Tests(unittest.TestCase):
@@ -316,6 +317,19 @@ class MonusegPhase05Tests(unittest.TestCase):
         text = render_summary(report)
         self.assertIn("review", text)
         self.assertNotIn('"sample_id": "clean"', text)
+
+    def test_xml_schema_audit_separates_closure_crossing_and_touch(self):
+        xml = b"""<Annotations><Annotation Id='1' Type='1'><Regions>
+        <Region Id='1' Type='0'><Vertices>
+          <Vertex X='0' Y='0'/><Vertex X='2' Y='2'/>
+          <Vertex X='0' Y='2'/><Vertex X='2' Y='0'/><Vertex X='0' Y='0'/>
+        </Vertices></Region>
+        </Regions></Annotation></Annotations>"""
+        report = analyze_xml_bytes(xml)
+        self.assertEqual(report["annotation_count"], 1)
+        self.assertEqual(report["region_count"], 1)
+        self.assertEqual(report["explicit_closing_vertex_region_count"], 1)
+        self.assertEqual(report["proper_crossing_region_count"], 1)
 
 
 if __name__ == "__main__":
