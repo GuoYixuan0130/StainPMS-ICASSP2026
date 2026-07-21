@@ -225,6 +225,7 @@ def diagnose_image(
     net,
     texture_memory_bank: list,
     args: argparse.Namespace,
+    main_match_iou: float,
     device: torch.device,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     full_h, full_w = inst_map.shape
@@ -461,7 +462,7 @@ def diagnose_image(
         inst_map.shape,
         args.instance_nms_iou,
     )
-    final_info = strict_final_pairing(inst_map, pred_map, args.main_match_iou)
+    final_info = strict_final_pairing(inst_map, pred_map, main_match_iou)
     pairs = final_info["pairs"]
     point_counts = Counter(value for value in point_gt.values() if value != 0)
     for instance_id, row in rows_by_id.items():
@@ -472,7 +473,7 @@ def diagnose_image(
         row["final_max_iou"] = float(final_max_iou)
         row["final_best_pred_id"] = final_best_pred_id
         row["final_matched_pred_id"] = pairs.get(instance_id)
-    rows = attach_gt_error_classes(rows_by_id.values(), args.main_match_iou)
+    rows = attach_gt_error_classes(rows_by_id.values(), main_match_iou)
     auto_point_total = len(point_gt)
     background_points = sum(value == 0 for value in point_gt.values())
     image_record = {
@@ -483,7 +484,7 @@ def diagnose_image(
         "background_auto_point_count": background_points,
         "background_auto_point_fraction": float(background_points / auto_point_total) if auto_point_total else None,
         "final_metrics": final_info["evaluator"],
-        "structural_errors": structural_errors(inst_map, pred_map, args.main_match_iou),
+        "structural_errors": structural_errors(inst_map, pred_map, main_match_iou),
         "error_classes": dict(Counter(row["error_class"] for row in rows)),
     }
     return rows, image_record
@@ -670,6 +671,7 @@ def main() -> int:
             net=net,
             texture_memory_bank=texture_memory_bank,
             args=args,
+            main_match_iou=main_match_iou,
             device=device,
         )
         gt_rows.extend(rows)
