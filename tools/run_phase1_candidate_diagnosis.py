@@ -614,9 +614,17 @@ def main() -> int:
         raise FileNotFoundError(f"checkpoint not found: {checkpoint}")
     declaration = load_checkpoint_declaration(Path(args.checkpoint_declaration).resolve(), checkpoint, args.dataset)
     set_determinism(args.seed)
-    device = torch.device(f"cuda:{args.gpu_device}" if torch.cuda.is_available() else "cpu")
+    cuda_device_index: int | None = None
     if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats(device)
+        torch.cuda.set_device(args.gpu_device)
+        cuda_device_index = int(torch.cuda.current_device())
+        device = torch.device("cuda", cuda_device_index)
+    else:
+        device = torch.device("cpu")
+    if torch.cuda.is_available():
+        # PyTorch 2.7's CUDA memory API on this environment accepts an integer
+        # device index here, whereas a torch.device object is rejected.
+        torch.cuda.reset_peak_memory_stats(cuda_device_index)
 
     model_config = Config.fromfile(str(Path(args.model_config).resolve()))
     net = build_sam2(args.sam_config, str(checkpoint), device=device)
@@ -722,7 +730,7 @@ def main() -> int:
             "python": platform.python_version(),
             "torch": torch.__version__,
             "torch_cuda": torch.version.cuda,
-            "gpu": torch.cuda.get_device_name(device) if torch.cuda.is_available() else None,
+            "gpu": torch.cuda.get_device_name(cuda_device_index) if torch.cuda.is_available() else None,
             "seed": args.seed,
             "cudnn_deterministic": bool(torch.backends.cudnn.deterministic),
             "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
@@ -730,8 +738,8 @@ def main() -> int:
         "runtime": {
             "wall_seconds": elapsed,
             "wall_seconds_per_image": elapsed / maximum if maximum else None,
-            "peak_memory_allocated_mib": torch.cuda.max_memory_allocated(device) / (1024 ** 2) if torch.cuda.is_available() else 0.0,
-            "peak_memory_reserved_mib": torch.cuda.max_memory_reserved(device) / (1024 ** 2) if torch.cuda.is_available() else 0.0,
+            "peak_memory_allocated_mib": torch.cuda.max_memory_allocated(cuda_device_index) / (1024 ** 2) if torch.cuda.is_available() else 0.0,
+            "peak_memory_reserved_mib": torch.cuda.max_memory_reserved(cuda_device_index) / (1024 ** 2) if torch.cuda.is_available() else 0.0,
         },
         "overall": aggregate_rows(gt_rows, image_records, thresholds, main_match_iou),
         "groups": group_summaries(gt_rows, image_records, thresholds, main_match_iou),
