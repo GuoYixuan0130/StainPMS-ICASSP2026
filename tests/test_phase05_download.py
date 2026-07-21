@@ -1,6 +1,14 @@
 import unittest
+from io import BytesIO
+from pathlib import Path
+from unittest.mock import patch
 
-from tools.download_phase05_sources import attachment_filename, build_session
+from tools.download_phase05_sources import (
+    attachment_filename,
+    build_session,
+    parse_registered_asset,
+    register_existing_asset,
+)
 
 
 class Phase05DownloadTests(unittest.TestCase):
@@ -28,6 +36,25 @@ class Phase05DownloadTests(unittest.TestCase):
         self.assertEqual(retry.read, 3)
         self.assertIn(503, retry.status_forcelist)
         self.assertIn("GET", retry.allowed_methods)
+
+    def test_registered_source_hashes_without_copying(self):
+        path = Path("/approved/Training Data.zip")
+        with (
+            patch.object(Path, "is_file", return_value=True),
+            patch.object(Path, "open", return_value=BytesIO(b"raw archive bytes")),
+            patch.object(Path, "resolve", return_value=path),
+        ):
+            record = register_existing_asset("monuseg_train", path)
+        self.assertEqual(record["acquisition"], "manual_browser_upload")
+        self.assertEqual(record["filename"], "Training Data.zip")
+        self.assertEqual(record["size_bytes"], len(b"raw archive bytes"))
+
+    def test_register_existing_argument_requires_known_asset_and_path(self):
+        asset, path = parse_registered_asset("monuseg_train=/tmp/train.zip")
+        self.assertEqual(asset, "monuseg_train")
+        self.assertEqual(path, Path("/tmp/train.zip"))
+        with self.assertRaisesRegex(ValueError, "ASSET=PATH"):
+            parse_registered_asset("unknown=/tmp/train.zip")
 
 
 if __name__ == "__main__":

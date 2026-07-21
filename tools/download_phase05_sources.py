@@ -80,6 +80,62 @@ def _asset_url(spec: dict[str, object]) -> str:
     return str(spec["url"])
 
 
+def hash_file(path: Path) -> tuple[int, str, str]:
+    """Return byte count, MD5, and SHA256 without decoding an archive."""
+    md5 = hashlib.md5()  # noqa: S324 - publisher identity includes MD5
+    sha256 = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        while block := handle.read(1024 * 1024):
+            md5.update(block)
+            sha256.update(block)
+            size += len(block)
+    return size, md5.hexdigest(), sha256.hexdigest()
+
+
+def validate_expected_identity(
+    asset: str,
+    spec: dict[str, object],
+    filename: str,
+    size: int,
+    md5: str,
+) -> None:
+    expected_filename = spec.get("expected_filename")
+    if expected_filename and filename != expected_filename:
+        raise RuntimeError(
+            f"{asset} filename {filename!r} != expected {expected_filename!r}"
+        )
+    expected_size = spec.get("expected_size_bytes")
+    if expected_size is not None and size != expected_size:
+        raise RuntimeError(f"{asset} size {size} != expected {expected_size}")
+    expected_md5 = spec.get("expected_md5")
+    if expected_md5 is not None and md5 != expected_md5:
+        raise RuntimeError(f"{asset} publisher MD5 mismatch")
+
+
+def register_existing_asset(asset: str, path: Path) -> dict[str, object]:
+    """Register a browser-uploaded approved source without copying or decoding it."""
+    spec = ASSETS[asset]
+    if not path.is_file():
+        raise FileNotFoundError(f"{asset} supplied path is not a regular file: {path}")
+    filename = attachment_filename(f'attachment; filename="{path.name}"')
+    size, md5, sha256 = hash_file(path)
+    validate_expected_identity(asset, spec, filename, size, md5)
+    return {
+        "asset": asset,
+        "provider": spec["provider"],
+        "file_id": spec.get("file_id"),
+        "request_url": _asset_url(spec),
+        "acquisition": "manual_browser_upload",
+        "registered_at_utc": datetime.now(timezone.utc).isoformat(),
+        "filename": filename,
+        "path": str(path.resolve()),
+        "size_bytes": size,
+        "md5": md5,
+        "sha256": sha256,
+    }
+
+
 def build_session(retries: int, backoff_seconds: float) -> requests.Session:
     """Return a session that retries transient connection and HTTP failures."""
     retry = Retry(
@@ -124,11 +180,6 @@ def download_asset(
             )
         disposition = response.headers.get("Content-Disposition", "")
         filename = attachment_filename(disposition)
-        expected_filename = spec.get("expected_filename")
-        if expected_filename and filename != expected_filename:
-            raise RuntimeError(
-                f"{asset} filename {filename!r} != expected {expected_filename!r}"
-            )
         output_dir.mkdir(parents=True, exist_ok=True)
         final_path = output_dir / filename
         partial_path = output_dir / f".{filename}.{asset}.part"
@@ -147,12 +198,7 @@ def download_asset(
                 md5.update(block)
                 sha256.update(block)
                 size += len(block)
-        expected_size = spec.get("expected_size_bytes")
-        expected_md5 = spec.get("expected_md5")
-        if expected_size is not None and size != expected_size:
-            raise RuntimeError(f"{asset} size {size} != expected {expected_size}")
-        if expected_md5 is not None and md5.hexdigest() != expected_md5:
-            raise RuntimeError(f"{asset} publisher MD5 mismatch")
+        validate_expected_identity(asset, spec, filename, size, md5.hexdigest())
         partial_path.replace(final_path)
         return {
             "asset": asset,
@@ -177,9 +223,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--asset",
         action="append",
-        required=True,
         choices=sorted(ASSETS),
         help="Repeat to download multiple approved assets.",
+    )
+    parser.add_argument(
+        "--register-existing",
+        action="append",
+        metavar="ASSET=PATH",
+        help=(
+            "Register one approved, browser-uploaded raw source file without copying "
+            "or decoding it. Repeat as needed."
+        ),
     )
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--report", required=True, type=Path)
@@ -210,9 +264,24 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def parse_registered_asset(value: str) -> tuple[str, Path]:
+    asset, separator, raw_path = value.partition("=")
+    if not separator or asset not in ASSETS or not raw_path:
+        raise ValueError(
+            "--register-existing must be ASSET=PATH, with ASSET one of: "
+            + ", ".join(sorted(ASSETS))
+        )
+    return asset, Path(raw_path)
+
+
 def main() -> int:
     args = parse_args()
     rows: list[dict[str, object]] = []
+    requested_assets = args.asset or []
+    registrations = args.register_existing or []
+    if not requested_assets and not registrations:
+        print(json.dumps({"status": "issues_found", "error": "provide --asset or --register-existing"}))
+        return 2
     if args.report.exists():
         print(
             json.dumps(
@@ -235,7 +304,7 @@ def main() -> int:
         "retry_backoff_seconds": args.retry_backoff_seconds,
     }
     try:
-        for asset in args.asset:
+        for asset in requested_assets:
             rows.append(
                 download_asset(
                     asset,
@@ -245,6 +314,9 @@ def main() -> int:
                     read_timeout_seconds=args.read_timeout_seconds,
                 )
             )
+        for registration in registrations:
+            asset, path = parse_registered_asset(registration)
+            rows.append(register_existing_asset(asset, path))
         report = {
             "schema_version": 1,
             "phase": "0.5",
