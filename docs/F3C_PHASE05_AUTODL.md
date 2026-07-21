@@ -1,7 +1,7 @@
 # F3C-StainPMS Phase 0.5 AutoDL runbook
 
 This runbook validates only the existing TNBC p1--p6 data path for one or two
-training updates.  It is not authorization for baseline training, model
+optimizer updates.  It is not authorization for baseline training, model
 selection, Phase 1 diagnosis, or any MoNuSeg internal split.
 
 ## Fixed boundary
@@ -56,7 +56,7 @@ conda run -n agentseg python tools/freeze_tnbc_smoke_manifest.py \
   --output "$phase05_root/manifests/tnbc_p1_6_smoke_prepared_labels_v1.json"
 ```
 
-Run exactly one update first.  It uses only generic SAM2 initialization and
+Run exactly one optimizer update first.  It uses only generic SAM2 initialization and
 records peak memory, iteration time, hashes, command, and sealed-data
 attestation in the JSON output.
 
@@ -78,8 +78,8 @@ conda run -n agentseg python main.py \
   --exp_name f3c_phase05_tnbc_smoke
 ```
 
-If—and only if—the one-batch JSON reports finite losses and at least one
-optimizer step, repeat the same command with
+If—and only if—the one-update JSON reports finite losses, exactly one optimizer
+step, and no skip counters, repeat the same command with
 `--train_only_smoke_steps 2` and change only `--smoke_output` to
 `tnbc_p1_6_smoke_2batch.json`.
 

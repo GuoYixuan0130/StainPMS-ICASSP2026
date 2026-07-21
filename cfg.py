@@ -100,7 +100,10 @@ def parse_args():
         "--train_only_smoke_steps",
         default=0,
         type=int,
-        help="Run only the first N manifest-ordered training images for one update smoke and exit.",
+        help=(
+            "Run exactly N successful optimizer updates from a manifest-ordered "
+            "training loader for a smoke test, then exit."
+        ),
     )
     parser.add_argument(
         "--smoke_output",

@@ -223,7 +223,10 @@ def train_on_epoch(
     texture_memory_bank_list,
     device,
     runtime_stats=None,
+    max_optimizer_steps=None,
 ):
+    if max_optimizer_steps is not None and int(max_optimizer_steps) <= 0:
+        raise ValueError("max_optimizer_steps must be positive when specified")
     if runtime_stats is not None:
         runtime_stats.setdefault("images_seen", 0)
         runtime_stats.setdefault("crop_batches_seen", 0)
@@ -243,6 +246,7 @@ def train_on_epoch(
     feat_sizes = [(64, 64), (32, 32), (16, 16)]
 
     with tqdm(total=len(train_loader), desc=f"Epoch {epoch}", unit="img") as pbar:
+        stop_after_step_limit = False
         for data_iter_step, batch in enumerate(
             metric_logger.log_every(train_loader, cfgs.print_freq, header)
         ):
@@ -271,6 +275,13 @@ def train_on_epoch(
             k_crops = images_lists.size(0)
             cumulative_sums = np.cumsum(cell_nums_lists)
             for start_idx in range(0, k_crops, cfgs.b):
+                if (
+                    max_optimizer_steps is not None
+                    and runtime_stats is not None
+                    and runtime_stats["optimizer_steps"] >= int(max_optimizer_steps)
+                ):
+                    stop_after_step_limit = True
+                    break
                 if runtime_stats is not None:
                     runtime_stats["crop_batches_seen"] += 1
                 end_idx = min(start_idx + cfgs.b, k_crops)
@@ -684,9 +695,24 @@ def train_on_epoch(
                     runtime_stats["optimizer_steps"] += 1
                 metric_logger.update(loss=losses_reduced, **loss_dict_reduced)
 
-            pbar.update()
+                if (
+                    max_optimizer_steps is not None
+                    and runtime_stats is not None
+                    and runtime_stats["optimizer_steps"] >= int(max_optimizer_steps)
+                ):
+                    stop_after_step_limit = True
+                    break
 
-    return {key: value / max(1, len(train_loader)) for key, value in log_info.items()}
+            pbar.update()
+            if stop_after_step_limit:
+                break
+
+    denominator = (
+        int(runtime_stats["images_seen"])
+        if runtime_stats is not None
+        else len(train_loader)
+    )
+    return {key: value / max(1, denominator) for key, value in log_info.items()}
 
 
 def validation_on_epoch(

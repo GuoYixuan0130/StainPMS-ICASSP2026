@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from mmengine.config import Config
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 
 import cfg
 from conf import settings
@@ -216,20 +216,16 @@ def build_dataloaders(cfgs, args):
         verify_manifest_hashes=cfgs.verify_manifest_hashes,
     )
     smoke_steps = int(cfgs.train_only_smoke_steps or 0)
-    train_loader_dataset = train_dataset
     if smoke_steps > 0:
         if not cfgs.train_manifest:
             raise ValueError("train-only smoke requires --train_manifest")
-        if smoke_steps > len(train_dataset):
-            raise ValueError(
-                f"smoke steps {smoke_steps} exceed manifest size {len(train_dataset)}"
-            )
-        train_loader_dataset = Subset(train_dataset, range(smoke_steps))
     train_loader = DataLoader(
-        train_loader_dataset,
+        train_dataset,
         batch_size=1,
         shuffle=False,
-        num_workers=cfgs.num_workers,
+        # A smoke must not prefetch unreported samples.  Full training retains
+        # the configured worker count below its separate branch.
+        num_workers=0 if smoke_steps > 0 else cfgs.num_workers,
         pin_memory=True,
         collate_fn=collate_fn,
     )
@@ -288,15 +284,13 @@ def run_train_only_smoke(
         [],
         device,
         runtime_stats=runtime_stats,
+        max_optimizer_steps=int(cfgs.train_only_smoke_steps),
     )
     if torch.cuda.is_available():
         torch.cuda.synchronize(device)
     elapsed = time.perf_counter() - started
     images_seen = int(runtime_stats.get("images_seen", 0))
     optimizer_steps = int(runtime_stats.get("optimizer_steps", 0))
-    full_epoch_seconds = (
-        elapsed * len(train_dataset) / images_seen if images_seen > 0 else None
-    )
     checkpoint_path = Path(cfgs.sam_ckpt).resolve()
     try:
         driver = subprocess.check_output(
@@ -317,17 +311,27 @@ def run_train_only_smoke(
     peak_reserved = (
         int(torch.cuda.max_memory_reserved(device)) if torch.cuda.is_available() else 0
     )
-    estimates = {}
-    if full_epoch_seconds is not None:
-        for epochs in (50, 100, 200, 300):
-            estimates[str(epochs)] = {
-                "train_only_gpu_hours": full_epoch_seconds * epochs / 3600.0,
-                "validation_and_checkpoint_overhead_included": False,
-            }
+    requested_optimizer_steps = int(cfgs.train_only_smoke_steps)
+    all_losses_finite = bool(log_info) and all(
+        np.isfinite(value) for value in log_info.values()
+    )
+    skip_count = sum(
+        int(runtime_stats.get(name, 0))
+        for name in (
+            "shape_skips",
+            "nonfinite_loss_skips",
+            "nonfinite_gradient_skips",
+        )
+    )
+    smoke_complete = (
+        optimizer_steps == requested_optimizer_steps
+        and skip_count == 0
+        and all_losses_finite
+    )
     report = {
         "schema_version": 1,
         "phase": "0.5",
-        "status": "complete" if optimizer_steps > 0 else "issues_found",
+        "status": "complete" if smoke_complete else "issues_found",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "protocol": "train_only_smoke_no_development_or_test_loader",
         "command": list(sys.argv),
@@ -360,6 +364,7 @@ def run_train_only_smoke(
             "protocol_id": train_dataset.manifest.get("protocol_id"),
             "full_manifest_image_count": len(train_dataset),
             "smoke_image_count": images_seen,
+            "smoke_requested_optimizer_steps": requested_optimizer_steps,
             "sample_ids": train_dataset.sample_names[:images_seen],
             "hashes_verified": bool(cfgs.verify_manifest_hashes),
         },
@@ -376,7 +381,7 @@ def run_train_only_smoke(
             "wall_seconds_per_optimizer_step": (
                 elapsed / optimizer_steps if optimizer_steps else None
             ),
-            "extrapolated_full_train_epoch_seconds": full_epoch_seconds,
+            "extrapolated_full_train_epoch_seconds": None,
             "peak_memory_allocated_bytes": peak_allocated,
             "peak_memory_reserved_bytes": peak_reserved,
             "peak_memory_allocated_mib": peak_allocated / (1024 ** 2),
@@ -384,12 +389,15 @@ def run_train_only_smoke(
         },
         "numerics": {
             "losses": {key: float(value) for key, value in log_info.items()},
-            "all_losses_finite": all(np.isfinite(value) for value in log_info.values()),
+            "all_losses_finite": all_losses_finite,
         },
         "preliminary_budget": {
-            "basis": "linear extrapolation from 1-2 manifest-ordered images; train path only",
-            "estimates_by_epoch_count": estimates,
-            "formal_budget_status": "preliminary_until_owner_locks_epochs_and_validation_cadence",
+            "basis": "per-optimizer-step measurement from an exact 1-2 update train-only smoke",
+            "estimates_by_epoch_count": None,
+            "formal_budget_status": (
+                "not_estimated_until the owner locks total crop/update budget, "
+                "epoch count, and validation cadence"
+            ),
         },
         "sealed_data_attestation": {
             "eval_manifest": None,
