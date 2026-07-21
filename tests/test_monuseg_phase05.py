@@ -19,6 +19,7 @@ from tools.audit_tcga_metadata import audit_metadata
 from tools.build_monuseg_manifests import build_manifests
 from tools.summarize_monuseg_xml_audit import render_summary
 from tools.audit_monuseg_xml_schema import analyze_xml_bytes
+from tools.audit_monuseg_xml_schema import render_summary as render_schema_summary
 
 
 class MonusegPhase05Tests(unittest.TestCase):
@@ -330,6 +331,24 @@ class MonusegPhase05Tests(unittest.TestCase):
         self.assertEqual(report["region_count"], 1)
         self.assertEqual(report["explicit_closing_vertex_region_count"], 1)
         self.assertEqual(report["proper_crossing_region_count"], 1)
+
+    def test_xml_schema_summary_caps_high_cardinality_signatures(self):
+        aggregate = {
+            "image_count": 1,
+            "annotation_count": 1,
+            "region_count": 1,
+            "explicit_closing_vertex_region_count": 0,
+            "proper_crossing_region_count": 0,
+            "nonadjacent_path_touch_region_count": 0,
+            "annotation_attribute_key_counts": {},
+            "region_attribute_key_counts": {},
+            "annotation_semantic_signature_counts": {str(index): 1 for index in range(9)},
+            "region_semantic_signature_counts": {str(index): 1 for index in range(9)},
+        }
+        text = render_schema_summary(
+            {"aggregates": {"classic30": aggregate, "extended7": aggregate}}
+        )
+        self.assertIn("__omitted_distinct_signatures__", text)
 
 
 if __name__ == "__main__":

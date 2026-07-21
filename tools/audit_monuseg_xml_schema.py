@@ -175,6 +175,13 @@ def audit_manifest(manifest_path: Path) -> dict[str, Any]:
 
 
 def render_summary(report: dict[str, Any]) -> str:
+    def top_signatures(values: dict[str, int], limit: int = 8) -> dict[str, int]:
+        ordered = sorted(values.items(), key=lambda item: (-item[1], item[0]))
+        selected = dict(ordered[:limit])
+        if len(ordered) > limit:
+            selected["__omitted_distinct_signatures__"] = len(ordered) - limit
+        return selected
+
     lines = [
         "# MoNuSeg XML schema audit",
         "",
@@ -199,16 +206,32 @@ def render_summary(report: dict[str, Any]) -> str:
             lines.extend(
                 [
                     "",
-                    f"## {subset} annotation semantic signatures",
+                    f"## {subset} XML attribute keys",
                     "",
                     "```json",
-                    json.dumps(aggregate["annotation_semantic_signature_counts"], indent=2),
+                    json.dumps(
+                        {
+                            "annotation": aggregate["annotation_attribute_key_counts"],
+                            "region": aggregate["region_attribute_key_counts"],
+                        },
+                        indent=2,
+                    ),
                     "```",
                     "",
-                    f"## {subset} region semantic signatures",
+                    f"## {subset} most frequent semantic signatures",
                     "",
                     "```json",
-                    json.dumps(aggregate["region_semantic_signature_counts"], indent=2),
+                    json.dumps(
+                        {
+                            "annotation": top_signatures(
+                                aggregate["annotation_semantic_signature_counts"]
+                            ),
+                            "region": top_signatures(
+                                aggregate["region_semantic_signature_counts"]
+                            ),
+                        },
+                        indent=2,
+                    ),
                     "```",
                 ]
             )
