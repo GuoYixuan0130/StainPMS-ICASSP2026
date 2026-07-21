@@ -24,14 +24,19 @@ AGGREGATE_KEYS = (
 
 
 def _sample_requires_review(audit: dict[str, Any]) -> bool:
+    """Keep the human review list focused on instance-affecting differences.
+
+    Boundary-coordinate and path-geometry fields remain in the JSON for every
+    image.  They are deliberately excluded here because their interpretation
+    depends on the XML coordinate convention and otherwise obscure the small
+    set of samples whose instance identities actually differ.
+    """
     return bool(
         audit.get("candidate_effective_instance_count")
         != audit.get("legacy_instance_count")
         or audit.get("candidate_fully_occluded_region_count")
         or audit.get("xml_empty_region_count")
-        or audit.get("xml_out_of_bounds_region_count")
-        or audit.get("xml_self_intersection_region_count")
-        or audit.get("xml_nonadjacent_path_touch_region_count")
+        or audit.get("xml_invalid_vertex_region_count")
         or audit.get("xml_disconnected_raster_region_count")
         or audit.get("legacy_disconnected_instance_ids")
     )
@@ -69,6 +74,8 @@ def render_summary(report: dict[str, Any]) -> str:
             f"- Delta: `{comparison.get('delta')}`",
             "",
             "## Samples requiring source/conversion review",
+            "",
+            "Per-image coordinate and path-geometry values remain in the JSON; this list is limited to instance-affecting discrepancies.",
             "",
         ]
     )
