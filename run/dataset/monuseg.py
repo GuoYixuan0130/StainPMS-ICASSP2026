@@ -13,6 +13,9 @@ from stainpms.candidate import compute_b_candidates_oncrop, compute_baseline_cen
 
 
 class MONUSEG(Dataset):
+    manifest_dataset = "monuseg"
+    manifest_log_name = "MONUSEG"
+
     def __init__(
         self,
         args,
@@ -23,10 +26,12 @@ class MONUSEG(Dataset):
         manifest_path=None,
         data_split=None,
         verify_manifest_hashes=False,
+        manifest_dataset=None,
     ):
         self.data_path = data_path
         self.mode = mode
         self.data_split = data_split or mode
+        self.manifest_dataset = str(manifest_dataset or self.manifest_dataset).lower()
         if self.data_split == 'train':
             self.image_root = data_path + '/train_12/images'
             self.label_root = data_path + '/train_12/labels'
@@ -40,14 +45,14 @@ class MONUSEG(Dataset):
         if manifest_path:
             self.manifest, self.records = load_dataset_manifest(
                 manifest_path,
-                expected_dataset="monuseg",
+                expected_dataset=self.manifest_dataset,
                 require_labels=True,
                 verify_hashes=bool(verify_manifest_hashes),
             )
             self.paths = [os.path.basename(record["image_path"]) for record in self.records]
             self.sample_names = [record["sample_id"] for record in self.records]
             print(
-                f"[MONUSEG manifest] mode={mode} split={self.data_split} "
+                f"[{self.manifest_log_name} manifest] mode={mode} split={self.data_split} "
                 f"protocol={self.manifest.get('protocol_id')} n={len(self.records)} "
                 f"sha256={self.manifest.get('manifest_sha256')}"
             )

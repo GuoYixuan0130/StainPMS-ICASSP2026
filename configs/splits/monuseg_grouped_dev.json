@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "dataset": "monuseg",
-  "protocol_id": "monuseg_grouped_dev_v1",
-  "status": "phase05_pending_download_xml_metadata_and_test_identity_audit",
+  "protocol_id": "monuseg_download37_continuity_v1",
+  "status": "continuity_protocol_no_internal_development_split_authorized",
   "protocol": {
     "official_test_access": "identity_only_case_filename_size_and_raw_image_sha256_until_final_evaluation",
     "group_unit": "patient_or_tcga_case",
@@ -27,44 +27,7 @@
   "grouped_development": {
     "selected_candidate": null,
     "selection_locked": false,
-    "required_metadata": [
-      "sample_id",
-      "patient_or_case_id",
-      "organ",
-      "tcga_project",
-      "disease",
-      "tissue_source_site",
-      "source_release",
-      "image_sha256",
-      "label_sha256"
-    ],
-    "candidates": [
-      {
-        "id": "classic30_train_extended7_development_candidate",
-        "optimization_protocol": "monuseg_challenge30_v1",
-        "development_protocol": "monuseg_extended7_v1",
-        "final_training_protocol": "monuseg_download37_v1",
-        "lock_status": "pending_owner_decision_after_phase05_evidence",
-        "scientific_interpretation": "Diagnose differences between the classic training release and seven cases later present in the current official Training Data download; not a random holdout.",
-        "required_gates": [
-          "no case filename or raw image SHA256 overlap with sealed test14",
-          "complete and conversion-compatible XML annotations",
-          "reliable TCGA project organ disease and tissue-source-site metadata",
-          "no evidence that extended7 derives from test14"
-        ]
-      }
-    ]
+    "policy": "No subdivision of the 37-image continuity training set is authorized. This file records the named 37/14 protocol only; it cannot be interpreted as a development manifest."
   },
-  "frozen_monuseg_lite_reference": {
-    "path": "/root/autodl-tmp/projects/StainPMS-ICASSP2026/.setpms/logs/setpms/stage1_dual_dev/20260714_172429_6a40ce194788",
-    "status": "required_manifest_and_patch_files_validated_full_historical_artifact_incomplete",
-    "required_files": [
-      "monuseg_lite_manifest.json",
-      "monuseg_lite_patches.json",
-      "SHA256SUMS"
-    ],
-    "policy": "Reference only after every required file matches SHA256SUMS; it cannot silently define the new grouped development split."
-  },
-  "release_config": "configs/manifests/monuseg_release_v1.json",
-  "provenance_note": "Two MoNuSeg version scopes are retained: the original 2018 Challenge paper 30/14 protocol and the current official-download 37/14 protocol used for StainPMS continuity. The seven added cases are called extended7 until Phase 0.5 provenance and metadata audit is complete."
+  "provenance_note": "The active scope is the current official-download 37/14 StainPMS-continuity protocol. This configuration must not create an internal development split or select on official test14."
 }

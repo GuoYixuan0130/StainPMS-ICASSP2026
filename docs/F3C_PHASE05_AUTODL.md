@@ -1,193 +1,84 @@
-# F3C-StainPMS Phase 0.5 AutoDL protocol
+# F3C-StainPMS Phase 0.5 AutoDL runbook
 
-This runbook materializes evidence and performs a 1--2 image train-only smoke.
-It is not authorization for baseline training or Phase 1.  It must be run on
-`research/f3c-stainpms` in the frozen `agentseg` environment.
+This runbook validates only the existing TNBC p1--p6 data path for one or two
+training updates.  It is not authorization for baseline training, model
+selection, Phase 1 diagnosis, or any MoNuSeg internal split.
 
-## Safety boundary
+## Fixed boundary
 
-- MoNuSeg test14: the manifest tool may read ZIP directory metadata and raw
-  source-TIFF bytes only to record filename, size, CRC and SHA256.  It does not
-  decode test images and never opens test XML/PNG/MAT annotations.
-- TNBC patients 9--11 member contents are never opened, extracted, counted or
-  reported.  The official all-patient ZIP central directory is examined only
-  to select the explicitly allowed p1--8 folders.
-- XML and prepared-label audit is accepted only for a training manifest; the
-  tool rejects a test-role manifest before opening its archive.
-- Smoke mode requires a hash-verified train manifest, constructs no evaluation
-  loader, writes no checkpoint and exits after the requested manifest-ordered
-  training images.
-- All generated reports, regenerated candidate labels, archives, logs and
-  checkpoints remain outside Git.
-
-## Inputs to place outside the repository
-
-Use a dedicated directory such as `/root/autodl-tmp/f3c_phase05/source` and
-preserve the original downloaded filenames.  Required inputs are:
-
-1. current official MoNuSeg Training Data ZIP, Drive file ID
-   `1ZgqFJomqQGNnsx7w7QBzQQMVA16lbVCA`;
-2. current official MoNuSeg test ZIP, Drive file ID
-   `1NKkSQ5T0ZNQ8aUhh0a8Dt2YKYCQXIViw`;
-3. preferably, official training-organ information and XML-to-mask MATLAB
-   converter files, Drive IDs `1xYyQ31CHFRnvTCTuuHdconlJCMk2SK7Z` and
-   `1YDtIiLZX0lQzZp_JbqneHXHvRo45ZWGX`.
-4. official TNBC v1.1 `TNBC_NucleiSegmentation.zip` from Zenodo record
-   `2579118`; keep the original filename.  The expected size is 25,232,361
-   bytes and the publisher MD5 is `1605712a752b201b57eacc8f866adb4f`.
-
-Record the actual download time in UTC.  Do not extract or inspect test labels.
-
-### Existing local 37-image training source tree
-
-If the approved training location already retains exactly 37 training TIFFs,
-37 XML files and the legacy MAT labels, do **not** download a replacement
-training archive.  Build the three training-side manifests from those files
-instead.  This mode hashes every local source TIFF/XML and marks the result
-`local_source_tree_snapshot_archive_identity_pending`: it is valid for the
-XML/legacy-label audit and train-only smoke, but it does not claim that the
-local tree proves the byte identity of the current official download ZIP.
-
-It deliberately does not create a test14 manifest or open any test file.
-The official training ZIP and the test ZIP remain separate provenance items to
-be obtained only if needed to close their respective identity checks.
-
-The frozen environment has `requests` but not `gdown`.  Use the approved
-download command only for source artifacts that are genuinely absent (for
-example, the test14 identity ZIP or TNBC v1.1 ZIP); it preserves server
-attachment filenames and writes hashes/timestamps.  It downloads no weights:
-
-```bash
-cd /root/autodl-tmp/projects/StainPMS-ICASSP2026-f3c
-mkdir -p /root/autodl-tmp/f3c_phase05/reports
-
-conda run -n agentseg python tools/download_phase05_sources.py \
-  --asset monuseg_train \
-  --asset monuseg_test \
-  --asset monuseg_organ \
-  --asset monuseg_converter \
-  --asset tnbc_v1_1 \
-  --output-dir /root/autodl-tmp/f3c_phase05/source \
-  --report /root/autodl-tmp/f3c_phase05/reports/source_downloads.json
-```
-
-If Google Drive returns HTML or blocks the automated request, the tool exits
-with `issues_found`.  In that case download those files in a browser, upload
-them with their original filenames, and do not rerun with overwrite flags.
+- Use the existing prepared TNBC data at
+  `/root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/tnbc/train_12`.
+- The source manifest is the existing p1--p6 manifest only.  p7--p8 are not
+  opened by this command; p9--p11 are rejected before file access.
+- The smoke does not construct an evaluation loader, load task-specific TNBC
+  weights, write a checkpoint, or run an epoch loop.
+- The prepared MAT labels are labelled `smoke_only_pending_raw_binary_gt_audit`.
+  This does not decide the eventual TNBC ground-truth protocol.
+- MoNuSeg remains the current 37/14 continuity protocol.  No internal 37-image
+  train/development split is created or used here.
 
 ## Commands
 
-Create local output directories and capture the frozen environment:
+Run from the clean F3C worktree after pulling the current branch.
 
 ```bash
 cd /root/autodl-tmp/projects/StainPMS-ICASSP2026-f3c
-mkdir -p /root/autodl-tmp/f3c_phase05/reports
+phase05_root=/root/autodl-tmp/f3c_phase05
+mkdir -p "$phase05_root/manifests" "$phase05_root/reports"
 
 conda run -n agentseg python tools/capture_phase05_environment.py \
-  --output /root/autodl-tmp/f3c_phase05/reports/environment.json \
-  --pip-freeze-output /root/autodl-tmp/f3c_phase05/reports/pip_freeze.txt
+  --output "$phase05_root/reports/environment_phase05.json" \
+  --pip-freeze-output "$phase05_root/reports/pip_freeze_phase05.txt"
+
+conda run -n agentseg python -m unittest discover \
+  -s tests -p 'test_strict_evaluator.py' -v \
+  2>&1 | tee "$phase05_root/reports/strict_evaluator_tests.txt"
+
+conda run -n agentseg python -m unittest discover \
+  -s tests -p 'test_manifest_loader.py' -v \
+  2>&1 | tee "$phase05_root/reports/manifest_loader_tests.txt"
+
+conda run -n agentseg python -m unittest discover \
+  -s tests -p 'test_tnbc_smoke_manifest.py' -v \
+  2>&1 | tee "$phase05_root/reports/tnbc_smoke_manifest_tests.txt"
 ```
 
-Run all CPU tests in `agentseg`:
+Freeze the existing p1--p6 source manifest into a loader-runnable manifest.
+This is explicit-list only: it never enumerates the TNBC image directory.
 
 ```bash
-conda run -n agentseg python -m unittest discover -s tests -p 'test_*.py' -v \
-  2>&1 | tee /root/autodl-tmp/f3c_phase05/reports/unit_tests.txt
+conda run -n agentseg python tools/freeze_tnbc_smoke_manifest.py \
+  --source-manifest /root/autodl-tmp/resimix_tnbc_train.json \
+  --image-root /root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/tnbc/train_12/images \
+  --label-root /root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/tnbc/train_12/labels \
+  --allowed-patients 1 2 3 4 5 6 \
+  --expected-count 30 \
+  --output "$phase05_root/manifests/tnbc_p1_6_smoke_prepared_labels_v1.json"
 ```
 
-Materialize the four versioned manifests.  Replace the four source filenames
-and timestamp with the actual values; omit the two optional arguments if those
-official auxiliary files are not present.
-
-```bash
-conda run -n agentseg python tools/build_monuseg_manifests.py \
-  --train-archive /root/autodl-tmp/f3c_phase05/source/TRAIN_ARCHIVE.zip \
-  --test-archive /root/autodl-tmp/f3c_phase05/source/TEST_ARCHIVE.zip \
-  --prepared-image-root /root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/monuseg/train_12/images \
-  --legacy-label-root /root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/monuseg/train_12/labels \
-  --downloaded-at-utc 2026-07-21T00:00:00Z \
-  --organ-info /root/autodl-tmp/f3c_phase05/source/ORGAN_INFORMATION_FILE \
-  --official-converter /root/autodl-tmp/f3c_phase05/source/XML_CONVERTER_FILE \
-  --output-dir /root/autodl-tmp/f3c_phase05/manifests
-```
-
-For the existing local 37-image source tree, use this training-only manifest
-command instead of the archive command above:
-
-```bash
-conda run -n agentseg python tools/build_monuseg_manifests.py \
-  --train-source-image-root /root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/monuseg/train_12/images \
-  --train-source-xml-root /root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/monuseg/train_12/xml \
-  --prepared-image-root /root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/monuseg/train_12/images \
-  --legacy-label-root /root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/monuseg/train_12/labels \
-  --output-dir /root/autodl-tmp/f3c_phase05/manifests_local_tree
-```
-
-Query GDC case metadata only (no image request) and retain the raw response:
-
-```bash
-conda run -n agentseg python tools/audit_tcga_metadata.py \
-  --output /root/autodl-tmp/f3c_phase05/reports/extended7_tcga_metadata.json \
-  --save-raw-response /root/autodl-tmp/f3c_phase05/reports/extended7_gdc_raw.json
-```
-
-Audit source XML, legacy labels and train-image preprocessing.  Candidate labels
-are deliberately written to a new directory and never overwrite legacy labels:
-
-```bash
-conda run -n agentseg python tools/audit_monuseg_xml_labels.py \
-  --manifest /root/autodl-tmp/f3c_phase05/manifests/monuseg_download37_v1.json \
-  --output /root/autodl-tmp/f3c_phase05/reports/monuseg_xml_label_audit.json \
-  --summary-output /root/autodl-tmp/f3c_phase05/reports/monuseg_xml_label_audit.md \
-  --regenerated-label-root /root/autodl-tmp/f3c_phase05/candidate_labels/xml_region_skimage_v1
-```
-
-Verify the TNBC v1.1 archive and selectively extract patients 1--8.  The tool
-does not open, extract, count or report patient 9--11 member content:
-
-```bash
-conda run -n agentseg python tools/extract_tnbc_p1_8.py \
-  --archive /root/autodl-tmp/f3c_phase05/source/TNBC_NucleiSegmentation.zip \
-  --downloaded-at-utc 2026-07-21T00:00:00Z \
-  --output-root /root/autodl-tmp/f3c_phase05/tnbc_p1_8 \
-  --output /root/autodl-tmp/f3c_phase05/reports/tnbc_selective_extract.json
-```
-
-Compare official binary GT, 4/8-connected components, the current watershed
-conversion and prepared labels on p1--8 only:
-
-```bash
-conda run -n agentseg python tools/audit_dataset.py \
-  --config configs/splits/tnbc_p1_6_dev_p7_8.json \
-  --tnbc-raw-label-root /root/autodl-tmp/f3c_phase05/tnbc_p1_8 \
-  --output /root/autodl-tmp/f3c_phase05/reports/tnbc_raw_label_audit.json \
-  --summary-output /root/autodl-tmp/f3c_phase05/reports/tnbc_raw_label_audit.md
-```
-
-Run the train-only smoke from generic SAM2 initialization on the first one or
-two classic30 manifest records.  This command does not load extended7 or test14:
+Run exactly one update first.  It uses only generic SAM2 initialization and
+records peak memory, iteration time, hashes, command, and sealed-data
+attestation in the JSON output.
 
 ```bash
 conda run -n agentseg python main.py \
-  --dataset monuseg \
-  --data_path /root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/monuseg \
-  --train_manifest /root/autodl-tmp/f3c_phase05/manifests/monuseg_challenge30_v1.json \
+  --dataset tnbc \
+  --data_path /root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/tnbc \
+  --train_manifest "$phase05_root/manifests/tnbc_p1_6_smoke_prepared_labels_v1.json" \
   --verify_manifest_hashes \
   --train_only_smoke_steps 1 \
-  --smoke_output /root/autodl-tmp/f3c_phase05/reports/monuseg_classic30_smoke.json \
+  --smoke_output "$phase05_root/reports/tnbc_p1_6_smoke_1batch.json" \
   --sam_ckpt /root/autodl-tmp/projects/CA-SAM2-HRC/checkpoints/sam2_hiera_large.pt \
+  --sam_config sam2_hiera_l \
   --evaluator_mode strict \
-  --exp_name f3c_phase05_monuseg_smoke
+  --exp_name f3c_phase05_tnbc_smoke
 ```
 
-Stop after the smoke.  Do not add `--eval`, do not provide an eval manifest,
-and do not run any baseline epoch loop.
+If—and only if—the one-batch JSON reports finite losses and at least one
+optimizer step, repeat the same command with
+`--train_only_smoke_steps 2` and change only `--smoke_output` to
+`tnbc_p1_6_smoke_2batch.json`.
 
-## Return bundle
-
-Return the whole `/root/autodl-tmp/f3c_phase05/reports` directory and the five
-JSON files under `/root/autodl-tmp/f3c_phase05/manifests`.  The candidate-label
-MAT files are large and need not be returned unless a discrepancy requires
-pixel-level inspection.  The selectively extracted TNBC p1--8 images/GT also
-need not be returned; the extraction and audit JSON contain their hashes.  Do
-not commit or push any generated file.
+Stop after the smoke.  Do not add `--eval`, `--eval_manifest`, task-specific
+TNBC checkpoints, or extra epochs.  Generated manifests and reports remain
+outside Git.

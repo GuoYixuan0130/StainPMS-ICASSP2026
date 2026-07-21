@@ -51,7 +51,15 @@ def parse_args():
     parser.add_argument("--gpu", default=True, type=bool)
     parser.add_argument("--gpu_device", default=0, type=int)
     parser.add_argument("--distributed", default="none", type=str)
-    parser.add_argument("--dataset", default="monuseg", choices=["monuseg"])
+    parser.add_argument(
+        "--dataset",
+        default="monuseg",
+        choices=["monuseg", "tnbc"],
+        help=(
+            "Dataset loader identity. TNBC is manifest-only for Phase 0.5 "
+            "smoke runs; it never discovers a directory or selects p9--11."
+        ),
+    )
     parser.add_argument("--data_path", default="./data/monuseg", type=str)
     parser.add_argument(
         "--train_manifest",

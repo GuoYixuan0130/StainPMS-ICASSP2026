@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader, Subset
 import cfg
 from conf import settings
 from run.dataset.monuseg import MONUSEG
+from run.dataset.tnbc import TNBC
 from run.run_on_epoch import train_on_epoch, validation_on_epoch
 from run.utils import create_logger, get_network, set_log_dir
 from sam2_train.modeling.criterion import build_criterion
@@ -167,6 +168,19 @@ def apply_cli_overrides(args, cfgs):
         args.test.filtering = cfgs.test_filtering == "true"
 
 
+DATASET_CLASSES = {
+    "monuseg": MONUSEG,
+    "tnbc": TNBC,
+}
+
+
+def dataset_class_for(dataset_name):
+    try:
+        return DATASET_CLASSES[str(dataset_name).lower()]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported dataset: {dataset_name}") from exc
+
+
 def build_eval_dataset(cfgs, args, *, split):
     if split == "train":
         manifest_path = cfgs.train_manifest
@@ -176,7 +190,8 @@ def build_eval_dataset(cfgs, args, *, split):
         data_split = "train" if manifest_path else "test"
     else:
         raise ValueError(f"Unsupported evaluation split selector: {split}")
-    return MONUSEG(
+    dataset_class = dataset_class_for(cfgs.dataset)
+    return dataset_class(
         cfgs,
         args,
         cfgs.data_path,
@@ -189,10 +204,8 @@ def build_eval_dataset(cfgs, args, *, split):
 
 
 def build_dataloaders(cfgs, args):
-    if cfgs.dataset != "monuseg":
-        raise ValueError(f"Unsupported dataset: {cfgs.dataset}")
-
-    train_dataset = MONUSEG(
+    dataset_class = dataset_class_for(cfgs.dataset)
+    train_dataset = dataset_class(
         cfgs,
         args,
         cfgs.data_path,
