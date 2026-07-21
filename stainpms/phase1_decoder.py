@@ -69,13 +69,19 @@ def prepare_image_for_all_token_decode(
             vision_feats[-1] = vision_feats[-1] + zero
             vision_pos_embeds[-1] = vision_pos_embeds[-1] + zero
         else:
-            memory_flat = [item[0].reshape(-1).to(device) for item in texture_memory_bank]
-            bank = torch.stack(memory_flat)
-            bank = F.normalize(bank, p=2, dim=1)
-            current = F.normalize(
-                vision_feats[-1].permute(1, 0, 2).reshape(batch_size, -1), p=2, dim=1
+            # This is the original validation inference's retrieval key: the
+            # image embedding saved in entry 3, rather than the mask-memory
+            # tensor in entry 0.  Those tensors have different dimensions.
+            # Using entry 0 here both changed the baseline route and fails as
+            # soon as the first texture-bank item is consulted.
+            image_embed_bank = torch.stack(
+                [item[3].to(device, non_blocking=True) for item in texture_memory_bank]
             )
-            similarities = torch.mm(bank, current.t()).t()
+            current = vision_feats[-1].permute(1, 0, 2).reshape(batch_size, -1, 64, 64)
+            current = current.reshape(batch_size, -1)
+            image_embed_bank = F.normalize(image_embed_bank, p=2, dim=1)
+            current = F.normalize(current, p=2, dim=1)
+            similarities = torch.mm(image_embed_bank, current.t()).t()
             indices = torch.topk(F.softmax(similarities, dim=1), batch_size, dim=1).indices.squeeze(1)
             stacks = torch.stack(
                 [item[0].to(device, non_blocking=True).flatten(2).permute(2, 0, 1) for item in texture_memory_bank],
@@ -229,7 +235,9 @@ def update_validation_texture_memory(
         scores = torch.mm(bank_norm, key).squeeze()
         minimum = torch.argmin(scores)
         replace = torch.argmax(similarity_no_diag[minimum])
-        if score > texture_memory_bank[int(replace)][2] - 0.1:
+        # Preserve the regular validation replacement gate: only consider a
+        # redundant bank entry and then require the same quality margin.
+        if scores[minimum] < similarity_no_diag[minimum][replace] and score > texture_memory_bank[int(replace)][2] - 0.1:
             texture_memory_bank.pop(int(replace))
             texture_memory_bank.append(
                 [

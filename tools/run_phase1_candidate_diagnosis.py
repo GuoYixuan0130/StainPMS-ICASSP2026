@@ -447,7 +447,10 @@ def diagnose_image(
         # In regular inference the context entry is created in this crop but
         # only affects future crops. Appending after both diagnostic decodes is
         # therefore equivalent and keeps GT-point probes side-effect free.
-        if args.context and prepared.context_entry is not None:
+        # The standard route reaches the decoder only when this crop retains
+        # automatic prompts.  A GT-only diagnostic probe must not alter the
+        # context available to later automatic-prompt crops.
+        if args.context and len(auto_points) and prepared.context_entry is not None:
             context_memory_bank.append(prepared.context_entry)
 
     pred_map = _assemble_instance_map(
