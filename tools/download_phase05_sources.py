@@ -17,6 +17,8 @@ from pathlib import Path
 from urllib.parse import unquote
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 
 ASSETS = {
@@ -78,14 +80,39 @@ def _asset_url(spec: dict[str, object]) -> str:
     return str(spec["url"])
 
 
-def download_asset(asset: str, output_dir: Path) -> dict[str, object]:
+def build_session(retries: int, backoff_seconds: float) -> requests.Session:
+    """Return a session that retries transient connection and HTTP failures."""
+    retry = Retry(
+        total=retries,
+        connect=retries,
+        read=retries,
+        status=retries,
+        backoff_factor=backoff_seconds,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+        raise_on_status=False,
+    )
+    session = requests.Session()
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    return session
+
+
+def download_asset(
+    asset: str,
+    output_dir: Path,
+    *,
+    session: requests.Session,
+    connect_timeout_seconds: float,
+    read_timeout_seconds: float,
+) -> dict[str, object]:
     spec = ASSETS[asset]
     url = _asset_url(spec)
     started = datetime.now(timezone.utc).isoformat()
-    with requests.get(
+    with session.get(
         url,
         stream=True,
-        timeout=(30, 300),
+        timeout=(connect_timeout_seconds, read_timeout_seconds),
         allow_redirects=True,
         headers={"User-Agent": "F3C-StainPMS-Phase0.5/1.0"},
     ) as response:
@@ -156,6 +183,30 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--report", required=True, type=Path)
+    parser.add_argument(
+        "--connect-timeout-seconds",
+        type=float,
+        default=120.0,
+        help="Per-attempt HTTPS connection timeout (default: 120).",
+    )
+    parser.add_argument(
+        "--read-timeout-seconds",
+        type=float,
+        default=900.0,
+        help="Per-attempt HTTPS read timeout after connection (default: 900).",
+    )
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=3,
+        help="Retries after the initial transient HTTPS failure (default: 3).",
+    )
+    parser.add_argument(
+        "--retry-backoff-seconds",
+        type=float,
+        default=5.0,
+        help="Exponential retry backoff factor in seconds (default: 5).",
+    )
     return parser.parse_args()
 
 
@@ -169,15 +220,37 @@ def main() -> int:
             )
         )
         return 2
+    if args.connect_timeout_seconds <= 0 or args.read_timeout_seconds <= 0:
+        print(json.dumps({"status": "issues_found", "error": "timeouts must be positive"}))
+        return 2
+    if args.retries < 0 or args.retry_backoff_seconds < 0:
+        print(json.dumps({"status": "issues_found", "error": "retry values must be non-negative"}))
+        return 2
     args.report.parent.mkdir(parents=True, exist_ok=True)
+    session = build_session(args.retries, args.retry_backoff_seconds)
+    request_policy = {
+        "connect_timeout_seconds": args.connect_timeout_seconds,
+        "read_timeout_seconds": args.read_timeout_seconds,
+        "retries": args.retries,
+        "retry_backoff_seconds": args.retry_backoff_seconds,
+    }
     try:
         for asset in args.asset:
-            rows.append(download_asset(asset, args.output_dir))
+            rows.append(
+                download_asset(
+                    asset,
+                    args.output_dir,
+                    session=session,
+                    connect_timeout_seconds=args.connect_timeout_seconds,
+                    read_timeout_seconds=args.read_timeout_seconds,
+                )
+            )
         report = {
             "schema_version": 1,
             "phase": "0.5",
             "status": "complete",
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "request_policy": request_policy,
             "assets": rows,
         }
         args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
@@ -187,6 +260,7 @@ def main() -> int:
             "phase": "0.5",
             "status": "issues_found",
             "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "request_policy": request_policy,
             "completed_assets": rows,
             "error": str(exc),
         }
@@ -197,6 +271,8 @@ def main() -> int:
             )
         )
         return 2
+    finally:
+        session.close()
     print(json.dumps({"status": "complete", "assets": len(rows)}))
     return 0
 
