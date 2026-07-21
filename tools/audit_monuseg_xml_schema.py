@@ -16,13 +16,22 @@ from typing import Any
 
 import numpy as np
 
-from tools.audit_monuseg_xml_labels import (
-    _children_named,
-    _local_name,
-    _normalize_polygon_vertices,
-    _region_vertices,
-    polygon_intersection_diagnostics,
-)
+try:  # Supports both ``python tools/script.py`` and ``python -m tools.script``.
+    from tools.audit_monuseg_xml_labels import (
+        _children_named,
+        _local_name,
+        _normalize_polygon_vertices,
+        _region_vertices,
+        polygon_intersection_diagnostics,
+    )
+except ModuleNotFoundError:  # pragma: no cover - exercised by direct CLI use
+    from audit_monuseg_xml_labels import (  # type: ignore[no-redef]
+        _children_named,
+        _local_name,
+        _normalize_polygon_vertices,
+        _region_vertices,
+        polygon_intersection_diagnostics,
+    )
 
 
 def _read_json(path: Path) -> dict[str, Any]:
