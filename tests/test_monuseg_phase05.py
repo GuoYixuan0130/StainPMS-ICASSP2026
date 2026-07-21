@@ -85,8 +85,12 @@ class MonusegPhase05Tests(unittest.TestCase):
     def test_polygon_self_intersection(self):
         bow_tie = np.asarray([(1, 1), (4, 4), (1, 4), (4, 1)], dtype=float)
         square = np.asarray([(1, 1), (4, 1), (4, 4), (1, 4)], dtype=float)
+        closed_square = np.asarray(
+            [(1, 1), (4, 1), (4, 4), (1, 4), (1, 1)], dtype=float
+        )
         self.assertTrue(polygon_self_intersects(bow_tie))
         self.assertFalse(polygon_self_intersects(square))
+        self.assertFalse(polygon_self_intersects(closed_square))
 
     def test_release_builder_materializes_30_7_14_and_ignores_test_png(self):
         config = json.loads(

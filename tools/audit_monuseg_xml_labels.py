@@ -87,6 +87,22 @@ def _orientation(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float:
     return float((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
 
 
+def _normalize_polygon_vertices(vertices: np.ndarray, eps: float = 1.0e-9) -> np.ndarray:
+    """Remove zero-length edges, including an explicit repeated closing vertex."""
+    if len(vertices) <= 1:
+        return vertices
+    kept = [vertices[0]]
+    for vertex in vertices[1:]:
+        if not np.allclose(vertex, kept[-1], atol=eps, rtol=0.0):
+            kept.append(vertex)
+    normalized = np.asarray(kept, dtype=np.float64)
+    if len(normalized) > 1 and np.allclose(
+        normalized[0], normalized[-1], atol=eps, rtol=0.0
+    ):
+        normalized = normalized[:-1]
+    return normalized
+
+
 def _on_segment(a: np.ndarray, b: np.ndarray, p: np.ndarray, eps: float = 1.0e-9) -> bool:
     return (
         min(a[0], b[0]) - eps <= p[0] <= max(a[0], b[0]) + eps
@@ -115,6 +131,7 @@ def _segments_intersect(
 
 
 def polygon_self_intersects(vertices: np.ndarray) -> bool:
+    vertices = _normalize_polygon_vertices(vertices)
     count = len(vertices)
     if count < 4:
         return False
@@ -377,6 +394,9 @@ def _aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "candidate_effective_instance_count": _sum_field(
             rows, "candidate_effective_instance_count"
+        ),
+        "candidate_fully_occluded_region_count": _sum_field(
+            rows, "candidate_fully_occluded_region_count"
         ),
         "legacy_instance_count": _sum_field(rows, "legacy_instance_count"),
         "legacy_disconnected_image_count": sum(
