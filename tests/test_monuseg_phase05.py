@@ -12,6 +12,7 @@ from skimage import io as skio
 from tools.audit_monuseg_xml_labels import (
     audit_manifest,
     audit_xml_label,
+    polygon_intersection_diagnostics,
     polygon_self_intersects,
 )
 from tools.audit_tcga_metadata import audit_metadata
@@ -91,6 +92,16 @@ class MonusegPhase05Tests(unittest.TestCase):
         self.assertTrue(polygon_self_intersects(bow_tie))
         self.assertFalse(polygon_self_intersects(square))
         self.assertFalse(polygon_self_intersects(closed_square))
+        self.assertEqual(
+            polygon_intersection_diagnostics(bow_tie)["proper_crossing_count"], 1
+        )
+        touching = np.asarray([(0, 0), (2, 0), (2, 2), (0, 2), (2, 0)], dtype=float)
+        self.assertEqual(
+            polygon_intersection_diagnostics(touching)["proper_crossing_count"], 0
+        )
+        self.assertGreater(
+            polygon_intersection_diagnostics(touching)["nonadjacent_touch_count"], 0
+        )
 
     def test_release_builder_materializes_30_7_14_and_ignores_test_png(self):
         config = json.loads(
@@ -257,6 +268,7 @@ class MonusegPhase05Tests(unittest.TestCase):
                 "classic30": {key: 0 for key in [
                     "xml_empty_region_count", "xml_invalid_vertex_region_count",
                     "xml_out_of_bounds_region_count", "xml_self_intersection_region_count",
+                    "xml_nonadjacent_path_touch_region_count",
                     "xml_disconnected_raster_region_count", "candidate_fully_occluded_region_count",
                     "candidate_effective_instance_count", "legacy_instance_count",
                     "exact_instance_map_equal_image_count", "legacy_disconnected_image_count",
@@ -278,6 +290,7 @@ class MonusegPhase05Tests(unittest.TestCase):
                         "xml_empty_region_count": 0,
                         "xml_out_of_bounds_region_count": 0,
                         "xml_self_intersection_region_count": 0,
+                        "xml_nonadjacent_path_touch_region_count": 0,
                         "xml_disconnected_raster_region_count": 0,
                         "legacy_disconnected_instance_ids": {},
                     },
@@ -292,6 +305,7 @@ class MonusegPhase05Tests(unittest.TestCase):
                         "xml_empty_region_count": 0,
                         "xml_out_of_bounds_region_count": 0,
                         "xml_self_intersection_region_count": 0,
+                        "xml_nonadjacent_path_touch_region_count": 0,
                         "xml_disconnected_raster_region_count": 0,
                         "legacy_disconnected_instance_ids": {},
                         "xml_region_count": 1,

@@ -130,11 +130,27 @@ def _segments_intersect(
     )
 
 
-def polygon_self_intersects(vertices: np.ndarray) -> bool:
+def _segments_properly_cross(
+    a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndarray, eps: float = 1.0e-9
+) -> bool:
+    """True only for an interior crossing, not endpoint touches or collinear overlap."""
+    o1 = _orientation(a, b, c)
+    o2 = _orientation(a, b, d)
+    o3 = _orientation(c, d, a)
+    o4 = _orientation(c, d, b)
+    return ((o1 > eps and o2 < -eps) or (o1 < -eps and o2 > eps)) and (
+        (o3 > eps and o4 < -eps) or (o3 < -eps and o4 > eps)
+    )
+
+
+def polygon_intersection_diagnostics(vertices: np.ndarray) -> dict[str, int]:
+    """Separate strict polygon crossings from non-crossing path contacts."""
     vertices = _normalize_polygon_vertices(vertices)
     count = len(vertices)
     if count < 4:
-        return False
+        return {"proper_crossing_count": 0, "nonadjacent_touch_count": 0}
+    proper_crossings = 0
+    nonadjacent_touches = 0
     for left in range(count):
         left_next = (left + 1) % count
         for right in range(left + 1, count):
@@ -143,11 +159,20 @@ def polygon_self_intersects(vertices: np.ndarray) -> bool:
                 continue
             if left == 0 and right_next == 0:
                 continue
-            if _segments_intersect(
-                vertices[left], vertices[left_next], vertices[right], vertices[right_next]
-            ):
-                return True
-    return False
+            a, b = vertices[left], vertices[left_next]
+            c, d = vertices[right], vertices[right_next]
+            if _segments_properly_cross(a, b, c, d):
+                proper_crossings += 1
+            elif _segments_intersect(a, b, c, d):
+                nonadjacent_touches += 1
+    return {
+        "proper_crossing_count": proper_crossings,
+        "nonadjacent_touch_count": nonadjacent_touches,
+    }
+
+
+def polygon_self_intersects(vertices: np.ndarray) -> bool:
+    return bool(polygon_intersection_diagnostics(vertices)["proper_crossing_count"])
 
 
 def _rasterize_region(vertices: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
@@ -250,6 +275,7 @@ def audit_xml_label(
     empty_count = 0
     out_of_bounds_count = 0
     self_intersection_count = 0
+    self_touching_count = 0
     disconnected_count = 0
     invalid_vertex_regions = 0
     overlap_pixels_written = 0
@@ -267,7 +293,9 @@ def audit_xml_label(
                 or (vertices[:, 1] > shape[0] - 1).any()
             )
         )
-        self_intersection = polygon_self_intersects(vertices)
+        intersection_diagnostics = polygon_intersection_diagnostics(vertices)
+        self_intersection = bool(intersection_diagnostics["proper_crossing_count"])
+        self_touching = bool(intersection_diagnostics["nonadjacent_touch_count"])
         mask = _rasterize_region(vertices, shape)
         _, components = ndi.label(mask, structure=CONNECTIVITY_8)
         empty = not bool(mask.any())
@@ -277,9 +305,18 @@ def audit_xml_label(
             out_of_bounds_count += 1
         if self_intersection:
             self_intersection_count += 1
+        if self_touching:
+            self_touching_count += 1
         if components > 1:
             disconnected_count += 1
-        if vertex_errors or empty or out_of_bounds or self_intersection or components > 1:
+        if (
+            vertex_errors
+            or empty
+            or out_of_bounds
+            or self_intersection
+            or self_touching
+            or components > 1
+        ):
             anomalies.append(
                 {
                     "region_index": region_index,
@@ -289,6 +326,9 @@ def audit_xml_label(
                     "empty": empty,
                     "out_of_bounds": out_of_bounds,
                     "self_intersection": self_intersection,
+                    "nonadjacent_path_touch": self_touching,
+                    "proper_crossing_count": intersection_diagnostics["proper_crossing_count"],
+                    "nonadjacent_touch_count": intersection_diagnostics["nonadjacent_touch_count"],
                     "raster_components_8": int(components),
                     "raster_area": int(mask.sum()),
                 }
@@ -334,6 +374,7 @@ def audit_xml_label(
         "xml_invalid_vertex_region_count": invalid_vertex_regions,
         "xml_out_of_bounds_region_count": out_of_bounds_count,
         "xml_self_intersection_region_count": self_intersection_count,
+        "xml_nonadjacent_path_touch_region_count": self_touching_count,
         "xml_disconnected_raster_region_count": disconnected_count,
         "xml_region_overlap_pixels_written": overlap_pixels_written,
         "xml_region_overlap_unique_pixels": int((coverage > 1).sum()),
@@ -388,6 +429,9 @@ def _aggregate(rows: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "xml_self_intersection_region_count": _sum_field(
             rows, "xml_self_intersection_region_count"
+        ),
+        "xml_nonadjacent_path_touch_region_count": _sum_field(
+            rows, "xml_nonadjacent_path_touch_region_count"
         ),
         "xml_disconnected_raster_region_count": _sum_field(
             rows, "xml_disconnected_raster_region_count"
@@ -527,6 +571,7 @@ def audit_manifest(args: argparse.Namespace) -> dict[str, Any]:
             "xml_invalid_vertex_region_count",
             "xml_out_of_bounds_region_count",
             "xml_self_intersection_region_count",
+            "xml_nonadjacent_path_touch_region_count",
             "xml_disconnected_raster_region_count",
         }
     )

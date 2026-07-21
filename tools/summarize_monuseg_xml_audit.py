@@ -13,6 +13,7 @@ AGGREGATE_KEYS = (
     "xml_invalid_vertex_region_count",
     "xml_out_of_bounds_region_count",
     "xml_self_intersection_region_count",
+    "xml_nonadjacent_path_touch_region_count",
     "xml_disconnected_raster_region_count",
     "candidate_fully_occluded_region_count",
     "candidate_effective_instance_count",
@@ -30,6 +31,7 @@ def _sample_requires_review(audit: dict[str, Any]) -> bool:
         or audit.get("xml_empty_region_count")
         or audit.get("xml_out_of_bounds_region_count")
         or audit.get("xml_self_intersection_region_count")
+        or audit.get("xml_nonadjacent_path_touch_region_count")
         or audit.get("xml_disconnected_raster_region_count")
         or audit.get("legacy_disconnected_instance_ids")
     )
@@ -85,6 +87,9 @@ def render_summary(report: dict[str, Any]) -> str:
                     "empty": audit.get("xml_empty_region_count"),
                     "out_of_bounds": audit.get("xml_out_of_bounds_region_count"),
                     "self_intersections": audit.get("xml_self_intersection_region_count"),
+                    "nonadjacent_path_touches": audit.get(
+                        "xml_nonadjacent_path_touch_region_count"
+                    ),
                     "disconnected_xml": audit.get("xml_disconnected_raster_region_count"),
                     "disconnected_legacy_ids": audit.get("legacy_disconnected_instance_ids"),
                 }
