@@ -7,6 +7,7 @@ from tools.download_phase05_sources import (
     attachment_filename,
     build_session,
     parse_registered_asset,
+    parse_source_acquired_at,
     register_existing_asset,
 )
 
@@ -55,6 +56,15 @@ class Phase05DownloadTests(unittest.TestCase):
         self.assertEqual(path, Path("/tmp/train.zip"))
         with self.assertRaisesRegex(ValueError, "ASSET=PATH"):
             parse_registered_asset("unknown=/tmp/train.zip")
+
+    def test_source_acquired_timestamp_requires_timezone(self):
+        asset, timestamp = parse_source_acquired_at(
+            "monuseg_train=2026-07-21T12:00:00+08:00"
+        )
+        self.assertEqual(asset, "monuseg_train")
+        self.assertEqual(timestamp, "2026-07-21T12:00:00+08:00")
+        with self.assertRaisesRegex(ValueError, "UTC offset"):
+            parse_source_acquired_at("monuseg_train=2026-07-21T12:00:00")
 
 
 if __name__ == "__main__":

@@ -235,6 +235,15 @@ def parse_args() -> argparse.Namespace:
             "or decoding it. Repeat as needed."
         ),
     )
+    parser.add_argument(
+        "--source-acquired-at-utc",
+        action="append",
+        metavar="ASSET=ISO8601",
+        help=(
+            "Required once per --register-existing asset. Records the actual browser "
+            "download time as an ISO-8601 timestamp with a UTC offset."
+        ),
+    )
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--report", required=True, type=Path)
     parser.add_argument(
@@ -274,11 +283,39 @@ def parse_registered_asset(value: str) -> tuple[str, Path]:
     return asset, Path(raw_path)
 
 
+def parse_source_acquired_at(value: str) -> tuple[str, str]:
+    asset, separator, raw_timestamp = value.partition("=")
+    if not separator or asset not in ASSETS or not raw_timestamp:
+        raise ValueError(
+            "--source-acquired-at-utc must be ASSET=ISO8601, with ASSET one of: "
+            + ", ".join(sorted(ASSETS))
+        )
+    try:
+        parsed = datetime.fromisoformat(raw_timestamp.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(
+            "--source-acquired-at-utc requires an ISO-8601 timestamp"
+        ) from exc
+    if parsed.tzinfo is None:
+        raise ValueError("--source-acquired-at-utc timestamp must include a UTC offset")
+    return asset, parsed.isoformat()
+
+
 def main() -> int:
     args = parse_args()
     rows: list[dict[str, object]] = []
     requested_assets = args.asset or []
     registrations = args.register_existing or []
+    acquisition_times: dict[str, str] = {}
+    try:
+        for value in args.source_acquired_at_utc or []:
+            asset, timestamp = parse_source_acquired_at(value)
+            if asset in acquisition_times:
+                raise ValueError(f"duplicate --source-acquired-at-utc asset: {asset}")
+            acquisition_times[asset] = timestamp
+    except ValueError as exc:
+        print(json.dumps({"status": "issues_found", "error": str(exc)}))
+        return 2
     if not requested_assets and not registrations:
         print(json.dumps({"status": "issues_found", "error": "provide --asset or --register-existing"}))
         return 2
@@ -316,7 +353,14 @@ def main() -> int:
             )
         for registration in registrations:
             asset, path = parse_registered_asset(registration)
-            rows.append(register_existing_asset(asset, path))
+            if asset not in acquisition_times:
+                raise ValueError(
+                    f"browser-registered {asset} requires --source-acquired-at-utc "
+                    f"{asset}=ISO8601"
+                )
+            row = register_existing_asset(asset, path)
+            row["source_downloaded_at_utc"] = acquisition_times[asset]
+            rows.append(row)
         report = {
             "schema_version": 1,
             "phase": "0.5",
