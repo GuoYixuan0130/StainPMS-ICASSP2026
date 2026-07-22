@@ -111,6 +111,39 @@ def parse_args():
         type=str,
         help="Required JSON output path when --train_only_smoke_steps is non-zero.",
     )
+    parser.add_argument(
+        "--phase2a_timing_profile",
+        default="",
+        choices=["", "base", "pms_active"],
+        help=(
+            "Run the Phase 2A train-only timing protocol and exit. 'base' "
+            "measures the pre-PMS objective; 'pms_active' first creates a "
+            "train-only coverage cache and measures the active PMS objective."
+        ),
+    )
+    parser.add_argument("--phase2a_timing_output", default="", type=str)
+    parser.add_argument("--phase2a_warmup_updates", default=10, type=int)
+    parser.add_argument("--phase2a_timed_updates", default=100, type=int)
+    parser.add_argument(
+        "--phase2a_generic_checkpoint_sha256",
+        default="7442e4e9b732a508f80e141e7c2913437a3610ee0c77381a66658c3a445df87b",
+        type=str,
+        help="Required byte identity of the generic SAM2 initialization in Phase 2A.",
+    )
+    parser.add_argument(
+        "--phase2a_baseline",
+        action="store_true",
+        help="Run the frozen Phase 2A protocol-clean StainPMS baseline.",
+    )
+    parser.add_argument("--phase2a_recipe", default="", type=str)
+    parser.add_argument("--phase2a_output_dir", default="", type=str)
+    parser.add_argument(
+        "--phase2a_eval_policy",
+        default="",
+        choices=["", "tnbc_patient_macro", "none"],
+    )
+    parser.add_argument("--phase2a_resume_checkpoint", default="", type=str)
+    parser.add_argument("--phase2a_budget_gate_report", default="", type=str)
 
     parser.add_argument("--use_pms", action="store_true")
     parser.add_argument("--pms_loss_coef", default=-1.0, type=float)

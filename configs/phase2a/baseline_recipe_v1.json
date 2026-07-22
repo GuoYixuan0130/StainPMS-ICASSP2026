@@ -1,0 +1,89 @@
+{
+  "schema_version": 1,
+  "phase": "2A",
+  "protocol_id": "f3c_phase2a_protocol_clean_stainpms_baseline_v1",
+  "initialization": {
+    "kind": "generic_sam2_hiera_large",
+    "sha256": "7442e4e9b732a508f80e141e7c2913437a3610ee0c77381a66658c3a445df87b",
+    "task_checkpoint_allowed": false
+  },
+  "determinism": {
+    "seed": 3407,
+    "cudnn_deterministic": true,
+    "cudnn_benchmark": false
+  },
+  "optimization": {
+    "epochs": 200,
+    "optimizer": "AdamW",
+    "learning_rate": 0.0001,
+    "minimum_learning_rate": 0.000001,
+    "cosine_t_max_epochs": 200,
+    "weight_decay": 0.0001,
+    "crop_size": 256,
+    "crop_batch_size": 1
+  },
+  "stainpms": {
+    "start_epoch": 50,
+    "coverage_refresh_interval_epochs": 20,
+    "coverage_accumulate": true,
+    "expected_refresh_count": 8,
+    "pms_loss_coefficient": 0.5,
+    "object_weight": 1.0,
+    "residual_mask_weight": 0.3,
+    "preservation_loss_coefficient": 1.0,
+    "preservation_max_prompts": 20,
+    "gt_match_radius": 8,
+    "stain_peak_min_distance": 12,
+    "stain_top_k": 20
+  },
+  "inference": {
+    "point_nms_threshold": 12,
+    "instance_iou_threshold": 0.5,
+    "tta": false,
+    "filtering": true,
+    "texture": true,
+    "context": true,
+    "load": "unclockwise",
+    "evaluator_mode": "strict"
+  },
+  "timing": {
+    "warmup_optimizer_updates": 10,
+    "timed_optimizer_updates": 100,
+    "cuda_synchronized": true,
+    "single_dataset_stop_gpu_hours": 12.0,
+    "combined_stop_gpu_hours": 24.0
+  },
+  "datasets": {
+    "tnbc": {
+      "train_protocol_id": "tnbc_stainpms_prepared_continuity_v1_phase1_train",
+      "train_image_count": 30,
+      "development_protocol_id": "tnbc_stainpms_prepared_continuity_v1_phase1_development",
+      "development_image_count": 7,
+      "image_shape": [512, 512],
+      "overlap": 32,
+      "crops_per_image": 9,
+      "optimizer_updates_per_epoch": 270,
+      "planned_optimizer_updates": 54000,
+      "checkpoint_interval_updates": 5400,
+      "checkpoint_count": 10,
+      "selection": "0.5 * macro_patient_AJI + 0.5 * macro_patient_PQ; ties within 0.001 choose earlier",
+      "evaluation_seconds_per_checkpoint_proxy": 136.2942552845925,
+      "evaluation_proxy_note": "Conservative proxy from the slower Phase 1 four-candidate p7-p8 diagnosis; formal baseline timing must report actual evaluation time."
+    },
+    "monuseg": {
+      "train_protocol_id": "monuseg_download37_continuity_v1_phase1_trainonly",
+      "train_image_count": 37,
+      "evaluation_manifest": null,
+      "image_shape": [1000, 1000],
+      "overlap": 92,
+      "crops_per_image": 36,
+      "optimizer_updates_per_epoch": 1332,
+      "planned_optimizer_updates": 266400,
+      "checkpoint_interval_updates": 26640,
+      "checkpoint_count": 10,
+      "selection": "last planned optimizer update; intermediate checkpoints are recovery-only",
+      "evaluation_seconds_per_checkpoint_proxy": 0.0
+    }
+  },
+  "budget_source_note": "The 200-epoch generic-SAM2 from-scratch StainPMS recipe is the tracked public repository recipe. Phase 2A converts it to explicit optimizer-update, crop, and coverage-refresh budgets before execution."
+}

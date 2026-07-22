@@ -230,6 +230,7 @@ def train_on_epoch(
     if runtime_stats is not None:
         runtime_stats.setdefault("images_seen", 0)
         runtime_stats.setdefault("crop_batches_seen", 0)
+        runtime_stats.setdefault("crops_seen", 0)
         runtime_stats.setdefault("optimizer_steps", 0)
         runtime_stats.setdefault("shape_skips", 0)
         runtime_stats.setdefault("nonfinite_loss_skips", 0)
@@ -285,6 +286,8 @@ def train_on_epoch(
                 if runtime_stats is not None:
                     runtime_stats["crop_batches_seen"] += 1
                 end_idx = min(start_idx + cfgs.b, k_crops)
+                if runtime_stats is not None:
+                    runtime_stats["crops_seen"] += int(end_idx - start_idx)
                 start_cell = 0 if start_idx == 0 else cumulative_sums[start_idx - 1]
                 end_cell = cumulative_sums[end_idx - 1]
 
