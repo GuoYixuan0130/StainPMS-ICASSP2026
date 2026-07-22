@@ -43,7 +43,7 @@ not agree with point recall, final TP, or the five-class error partition.
 conda run -n agentseg python tools/export_phase1_tables.py \
   --input-dir "$phase1_root/diagnostics/tnbc_p1_6_full" \
   --input-dir "$phase1_root/diagnostics/tnbc_p7_8_full" \
-  --input-dir "$phase1_root/diagnostics/monuseg_train37_full" \
+  --input-dir "$(python tools/resolve_phase1_output.py --root "$phase1_root/diagnostics" --dataset monuseg --processed-records 37 --require-file gt_instances.csv --require-file images.json)" \
   --output-dir "$phase2a_root/phase1_tables"
 ```
 

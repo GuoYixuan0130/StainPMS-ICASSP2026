@@ -16,10 +16,18 @@ conda run -n agentseg python -m unittest discover \
 conda run -n agentseg python -m unittest discover \
   -s tests -p 'test_phase2a_*.py' -v
 
+monuseg_phase1_dir=$(python tools/resolve_phase1_output.py \
+  --root "$phase1_root/diagnostics" \
+  --dataset monuseg \
+  --processed-records 37 \
+  --require-file gt_instances.csv \
+  --require-file images.json)
+printf 'Resolved MoNuSeg Phase 1 output: %s\n' "$monuseg_phase1_dir"
+
 conda run -n agentseg python tools/export_phase1_tables.py \
   --input-dir "$phase1_root/diagnostics/tnbc_p1_6_full" \
   --input-dir "$phase1_root/diagnostics/tnbc_p7_8_full" \
-  --input-dir "$phase1_root/diagnostics/monuseg_train37_full" \
+  --input-dir "$monuseg_phase1_dir" \
   --output-dir "$phase2a_root/phase1_tables"
 
 conda run -n agentseg python main.py \
