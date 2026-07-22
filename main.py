@@ -1095,7 +1095,10 @@ def run_warmstart_formal_tnbc_5epoch(
         if not checkpoints_dir.is_dir() or not declarations_dir.is_dir():
             raise RuntimeError("formal TNBC recovery requires existing checkpoint and declaration directories")
 
-        resume_state = torch.load(resume_path, map_location="cpu")
+        # Formal recovery checkpoints are written locally by this audited run and
+        # deliberately include Python/NumPy/CUDA RNG state, which PyTorch 2.6+
+        # refuses under its new weights_only=True default.
+        resume_state = torch.load(resume_path, map_location="cpu", weights_only=False)
         required = {
             "phase": "2A-warmstart-formal-screen",
             "protocol": "tnbc_c0_c1_5epoch_exploratory_v1",
@@ -1137,7 +1140,11 @@ def run_warmstart_formal_tnbc_5epoch(
         epoch_records = []
         prior_states = []
         for path in stored_paths:
-            state = resume_state if path == resume_path else torch.load(path, map_location="cpu")
+            state = (
+                resume_state
+                if path == resume_path
+                else torch.load(path, map_location="cpu", weights_only=False)
+            )
             state_mismatched = {
                 name: (state.get(name), expected)
                 for name, expected in required.items()
