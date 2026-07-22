@@ -1,9 +1,10 @@
-"""Fail closed unless one new PQ-best ablation arm matches preserved C0 training.
+"""Fail closed unless a candidate TNBC arm matches the C0 execution contract.
 
-The existing C0 was produced under the former fixed-epoch retention protocol;
-the approved coverage-only/quality-only arms use the new low-storage PQ-best
-protocol.  This verifier therefore compares only the invariant execution
-contract, not the intentionally different retention/model-selection fields.
+The verifier is intentionally agnostic to the candidate loss. It compares
+only the invariants that must match for a fair C0 comparison: data identity,
+seed, crop traversal, no-prompt skips, optimizer updates, and scheduler state.
+An optional expected protocol additionally enforces a same-protocol C0/C1
+reproduction run.
 """
 
 from __future__ import annotations
@@ -29,7 +30,9 @@ def stable_hash(value: Any) -> str:
     ).hexdigest()
 
 
-def verify(reference: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+def verify(
+    reference: dict[str, Any], candidate: dict[str, Any], *, expected_protocol: str = ""
+) -> dict[str, Any]:
     failures: list[dict[str, Any]] = []
 
     def same(label: str, left: Any, right: Any) -> None:
@@ -37,6 +40,16 @@ def verify(reference: dict[str, Any], candidate: dict[str, Any]) -> dict[str, An
             failures.append({"field": label, "c0": left, "candidate": right})
 
     same("dataset", reference.get("dataset"), candidate.get("dataset"))
+    if expected_protocol:
+        for label, report in (("c0", reference), ("candidate", candidate)):
+            if report.get("protocol") != expected_protocol:
+                failures.append(
+                    {
+                        "field": f"{label}_protocol",
+                        "observed": report.get("protocol"),
+                        "expected": expected_protocol,
+                    }
+                )
     same(
         "train_manifest_sha256",
         reference.get("data", {}).get("manifest_sha256"),
@@ -111,9 +124,10 @@ def verify(reference: dict[str, Any], candidate: dict[str, Any]) -> dict[str, An
             )
     return {
         "schema_version": 1,
-        "protocol": "tnbc_loss_ablation_pqbest_v1",
+        "protocol": expected_protocol or candidate.get("protocol"),
         "status": "pass" if not failures else "fail",
-        "reference": "preserved_C0_continued_training_control",
+        "reference": "C0_continued_training_control",
+        "reference_arm": reference.get("training_configuration", {}).get("arm"),
         "candidate_arm": candidate.get("training_configuration", {}).get("arm"),
         "checks": checks,
         "failures": failures,
@@ -130,8 +144,13 @@ def main() -> int:
     parser.add_argument("--c0-summary", required=True)
     parser.add_argument("--candidate-summary", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--expected-protocol", default="")
     args = parser.parse_args()
-    result = verify(read_json(Path(args.c0_summary)), read_json(Path(args.candidate_summary)))
+    result = verify(
+        read_json(Path(args.c0_summary)),
+        read_json(Path(args.candidate_summary)),
+        expected_protocol=str(args.expected_protocol),
+    )
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_name(output.name + ".tmp")
