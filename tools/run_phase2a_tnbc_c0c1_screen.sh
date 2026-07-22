@@ -31,6 +31,9 @@ conda run -n agentseg python -m unittest discover \
 conda run -n agentseg python -m unittest discover \
   -s tests -p 'test_phase2a_tnbc_screen.py' -v \
   2>&1 | tee "$screen_root/reports/test_phase2a_tnbc_screen_preflight.txt"
+conda run -n agentseg python -m unittest discover \
+  -s tests -p 'test_phase2a_tnbc_fairness.py' -v \
+  2>&1 | tee "$screen_root/reports/test_phase2a_tnbc_fairness_preflight.txt"
 
 python - "$smoke_root" <<'PY'
 import json
@@ -112,10 +115,33 @@ run_arm() {
     --exp_name "f3c_phase2a_tnbc_${arm}_formal5" \
     2>&1 | tee "$screen_root/reports/${arm}_train.log"
 
+}
+
+epoch_checkpoint_paths() {
+  local arm="$1"
+  local epoch="$2"
+  python - "$screen_root/$arm/training_summary.json" "$epoch" <<'PY'
+import json
+import pathlib
+import sys
+
+summary = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+epoch = int(sys.argv[2])
+matches = [record for record in summary.get("epochs", []) if int(record["epoch"]) == epoch]
+if len(matches) != 1:
+    raise SystemExit(f"expected one epoch record for epoch {epoch}")
+print(matches[0]["checkpoint_path"])
+print(matches[0]["checkpoint_declaration"])
+PY
+}
+
+evaluate_arm() {
+  local arm="$1"
   local epoch checkpoint declaration
   for epoch in 1 2 3 4 5; do
-    checkpoint="$arm_root/checkpoints/epoch_$(printf '%04d' "$epoch")_update_$(printf '%06d' "$((epoch * 270))").pth"
-    declaration="$arm_root/checkpoint_declarations/epoch_$(printf '%04d' "$epoch")_update_$(printf '%06d' "$((epoch * 270))").json"
+    readarray -t paths < <(epoch_checkpoint_paths "$arm" "$epoch")
+    checkpoint="${paths[0]}"
+    declaration="${paths[1]}"
     diagnose_checkpoint "$checkpoint" "$declaration" "$screen_root/diagnostics/${arm}_epoch_$(printf '%04d' "$epoch")" "tnbc_p7_8_${arm}_epoch_${epoch}"
   done
 }
@@ -124,6 +150,15 @@ run_arm() {
 # RNG, crop ordering, and coverage consumption independent by construction.
 run_arm c0
 run_arm c1
+
+conda run -n agentseg python tools/verify_phase2a_tnbc_fairness.py \
+  --c0-summary "$screen_root/c0/training_summary.json" \
+  --c1-summary "$screen_root/c1/training_summary.json" \
+  --output "$screen_root/reports/c0_c1_fairness_gate.json" \
+  2>&1 | tee "$screen_root/reports/c0_c1_fairness_gate.log"
+
+evaluate_arm c0
+evaluate_arm c1
 
 summary_args=(
   --epoch0-dir "$screen_root/diagnostics/epoch_000_shared"

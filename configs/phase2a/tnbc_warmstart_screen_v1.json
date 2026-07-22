@@ -18,8 +18,9 @@
   "optimization": {
     "seed": 3407,
     "epochs": 5,
-    "optimizer_updates_per_epoch": 270,
-    "planned_optimizer_updates": 1350,
+    "attempted_crop_batches_per_epoch": 270,
+    "planned_attempted_crop_batches": 1350,
+    "effective_optimizer_updates": "reported after execution; no-prompt batches preserve legacy no-step behavior",
     "optimizer": "AdamW",
     "learning_rate": 1e-05,
     "weight_decay": 0.0001,

@@ -1084,11 +1084,12 @@ def run_warmstart_formal_tnbc_5epoch(
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     declarations_dir.mkdir(parents=True, exist_ok=True)
 
-    updates_per_epoch = 270
-    planned_updates = 1350
+    attempted_crop_batches_per_epoch = 270
+    planned_attempted_crop_batches = 1350
     if len(train_dataset) != 30:
         raise RuntimeError("formal TNBC screen requires exactly 30 p1-p6 images")
     runtime_stats = new_timing_runtime_stats()
+    runtime_stats["record_no_prompt_batches"] = True
     epoch_records = []
     coverage_before = dict(coverage_identity)
     cuda_index = _cuda_device_index(device) if torch.cuda.is_available() else None
@@ -1100,6 +1101,10 @@ def run_warmstart_formal_tnbc_5epoch(
     training_started = time.perf_counter()
 
     for epoch in range(5):
+        crop_batches_before = int(runtime_stats.get("crop_batches_seen", 0))
+        optimizer_updates_before = int(runtime_stats.get("optimizer_steps", 0))
+        no_prompt_before = int(runtime_stats.get("no_prompt_batch_count", 0))
+        no_prompt_positions_before = len(runtime_stats.get("no_prompt_batches", []))
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats(cuda_index)
             torch.cuda.synchronize(cuda_index)
@@ -1129,11 +1134,23 @@ def run_warmstart_formal_tnbc_5epoch(
             for key in ("shape_skips", "nonfinite_loss_skips", "nonfinite_gradient_skips")
         )
         actual_updates = int(runtime_stats.get("optimizer_steps", 0))
-        expected_updates = (epoch + 1) * updates_per_epoch
-        if skipped != 0 or actual_updates != expected_updates:
+        attempted_crop_batches = int(runtime_stats.get("crop_batches_seen", 0)) - crop_batches_before
+        effective_optimizer_updates = actual_updates - optimizer_updates_before
+        no_prompt_count = int(runtime_stats.get("no_prompt_batch_count", 0)) - no_prompt_before
+        no_prompt_positions = list(runtime_stats.get("no_prompt_batches", []))[no_prompt_positions_before:]
+        no_prompt_positions_sha256 = hashlib.sha256(
+            json.dumps(no_prompt_positions, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if (
+            skipped != 0
+            or attempted_crop_batches != attempted_crop_batches_per_epoch
+            or effective_optimizer_updates + no_prompt_count != attempted_crop_batches
+        ):
             raise RuntimeError(
-                "formal TNBC update contract failed at epoch "
-                f"{epoch + 1}: updates={actual_updates}/{expected_updates}, skips={skipped}"
+                "formal TNBC crop-batch contract failed at epoch "
+                f"{epoch + 1}: attempted={attempted_crop_batches}/"
+                f"{attempted_crop_batches_per_epoch}, effective_updates={effective_optimizer_updates}, "
+                f"no_prompt={no_prompt_count}, other_skips={skipped}"
             )
         if int(runtime_stats.get("native_mask_token_count", 0)) != 4:
             raise RuntimeError("formal TNBC screen did not use four native mask tokens")
@@ -1161,6 +1178,11 @@ def run_warmstart_formal_tnbc_5epoch(
             "model1": model1.state_dict(),
             "epoch": int(epoch + 1),
             "optimizer_updates": actual_updates,
+            "attempted_crop_batches": attempted_crop_batches,
+            "effective_optimizer_updates": effective_optimizer_updates,
+            "no_prompt_batch_count": no_prompt_count,
+            "no_prompt_batch_indices": no_prompt_positions,
+            "no_prompt_batch_indices_sha256": no_prompt_positions_sha256,
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict(),
             "rng_state": _capture_rng_state(),
@@ -1210,17 +1232,25 @@ def run_warmstart_formal_tnbc_5epoch(
             {
                 "epoch": epoch + 1,
                 "optimizer_updates": actual_updates,
+                "attempted_crop_batches": attempted_crop_batches,
+                "effective_optimizer_updates": effective_optimizer_updates,
+                "no_prompt_batch_count": no_prompt_count,
+                "no_prompt_batch_indices": no_prompt_positions,
+                "no_prompt_batch_indices_sha256": no_prompt_positions_sha256,
                 "checkpoint_path": str(checkpoint_path),
                 "checkpoint_sha256": checkpoint_sha,
                 "checkpoint_declaration": str(declaration_path),
                 "losses": {key: float(value) for key, value in losses.items()},
                 "runtime": checkpoint_payload["epoch_runtime"],
                 "learning_rate_after_scheduler_step": float(optimizer.param_groups[0]["lr"]),
+                "scheduler_state_after_step": scheduler.state_dict(),
             }
         )
         print(
             f"[formal-tnbc-screen] arm={cfgs.warmstart_candidate_arm} "
-            f"epoch={epoch + 1}/5 updates={actual_updates}/{planned_updates}"
+            f"epoch={epoch + 1}/5 attempted={attempted_crop_batches}/"
+            f"{attempted_crop_batches_per_epoch} effective_updates={effective_optimizer_updates} "
+            f"cumulative_updates={actual_updates} no_prompt={no_prompt_count}"
         )
 
     if torch.cuda.is_available():
@@ -1240,9 +1270,11 @@ def run_warmstart_formal_tnbc_5epoch(
             "stage": "formal_tnbc_5epoch",
             "protocol": "tnbc_c0_c1_5epoch_exploratory_v1",
             "planned_epochs": 5,
-            "updates_per_epoch": updates_per_epoch,
-            "planned_optimizer_updates": planned_updates,
+            "attempted_crop_batches_per_epoch": attempted_crop_batches_per_epoch,
+            "planned_attempted_crop_batches": planned_attempted_crop_batches,
+            "actual_attempted_crop_batches": int(runtime_stats.get("crop_batches_seen", 0)),
             "actual_optimizer_updates": int(runtime_stats.get("optimizer_steps", 0)),
+            "actual_no_prompt_batch_count": int(runtime_stats.get("no_prompt_batch_count", 0)),
             "coverage_refresh_events": [],
             "coverage_integrity": {"before": coverage_before, "after": coverage_after},
             "screen_config": getattr(cfgs, "warmstart_screen_config_identity", None),
@@ -1266,8 +1298,8 @@ def run_warmstart_formal_tnbc_5epoch(
             },
         }
     )
-    if report["actual_optimizer_updates"] != planned_updates:
-        raise RuntimeError("formal TNBC screen ended with incorrect optimizer update count")
+    if int(runtime_stats.get("crop_batches_seen", 0)) != planned_attempted_crop_batches:
+        raise RuntimeError("formal TNBC screen ended with incorrect attempted crop-batch count")
     _json_write_atomic(output, report)
     print(json.dumps({"status": "complete", "output": str(output)}))
     return report
@@ -2089,8 +2121,8 @@ def _validate_warmstart_preflight(cfgs, args):
         screen_config = json.loads(screen_config_path.read_text(encoding="utf-8"))
         if screen_config.get("protocol_id") != "tnbc_c0_c1_5epoch_exploratory_v1":
             raise ValueError("formal_tnbc_5epoch screen config protocol mismatch")
-        if int(screen_config.get("optimization", {}).get("planned_optimizer_updates", -1)) != 1350:
-            raise ValueError("formal_tnbc_5epoch screen config must freeze 1350 updates")
+        if int(screen_config.get("optimization", {}).get("planned_attempted_crop_batches", -1)) != 1350:
+            raise ValueError("formal_tnbc_5epoch screen config must freeze 1350 attempted crop batches")
         cfgs.warmstart_screen_config_identity = {
             "path": str(screen_config_path),
             "sha256": sha256_file(screen_config_path),

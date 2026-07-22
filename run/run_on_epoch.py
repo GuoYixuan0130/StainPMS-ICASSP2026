@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 import os
@@ -439,6 +440,9 @@ def train_on_epoch(
         runtime_stats.setdefault("nonfinite_gradient_skips", 0)
         runtime_stats.setdefault("native_candidate_decoder_calls", 0)
         runtime_stats.setdefault("native_candidate_prompt_count", 0)
+        runtime_stats.setdefault("no_prompt_batch_count", 0)
+        if runtime_stats.get("record_no_prompt_batches", False):
+            runtime_stats.setdefault("no_prompt_batches", [])
     point_net.train()
     net.train()
     criterion.train()
@@ -537,6 +541,21 @@ def train_on_epoch(
 
                 if nearest_points_cat.shape[0] == 0:
                     print("[skip] no prompts in batch")
+                    if runtime_stats is not None:
+                        runtime_stats["no_prompt_batch_count"] += 1
+                        if runtime_stats.get("record_no_prompt_batches", False):
+                            position = {
+                                "epoch_index": int(epoch),
+                                "image_loader_index": int(data_iter_step),
+                                "crop_start_index": int(start_idx),
+                                "crop_end_index": int(end_idx),
+                                "global_crop_batch_index": int(runtime_stats["crop_batches_seen"]) - 1,
+                            }
+                            canonical = json.dumps(
+                                position, sort_keys=True, separators=(",", ":")
+                            ).encode("utf-8")
+                            position["index_sha256"] = hashlib.sha256(canonical).hexdigest()
+                            runtime_stats["no_prompt_batches"].append(position)
                     optimizer.zero_grad(set_to_none=True)
                     continue
 

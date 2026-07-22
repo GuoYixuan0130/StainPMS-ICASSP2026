@@ -8,7 +8,8 @@ Run `tools/run_phase2a_tnbc_c0c1_screen.sh SMOKE_ROOT` on AutoDL. It:
 
 - requires a clean, committed worktree and the previously passing TNBC C0/C1 smoke gate;
 - computes one shared p7–8 epoch-0 strict diagnosis before training;
-- runs C0 and C1 in separate processes, each for exactly 1,350 updates;
+- runs C0 and C1 in separate processes, each for exactly 1,350 attempted crop batches (five complete epochs); no-prompt batches retain the legacy no-step behavior and actual optimizer updates are reported afterward;
+- fails closed if the arms have different no-prompt positions, attempted crop counts, effective optimizer updates, or scheduler states;
 - saves model, point head, optimizer, scheduler, RNG, runtime state, checkpoint SHA256, and declaration after every epoch;
 - evaluates all ten immutable epoch checkpoints with the same frozen Phase 1 decoder, NMS, assembly, and strict evaluator;
 - creates p7, p8, equal patient-macro, and C1−C0 tables; and
