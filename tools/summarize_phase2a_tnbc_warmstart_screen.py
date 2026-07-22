@@ -60,7 +60,9 @@ def diagnosis_record(arm: str, epoch: int, directory: Path) -> dict[str, Any]:
     if missing:
         raise FileNotFoundError(f"diagnosis directory missing {missing}: {directory}")
     summary = read_json(directory / "summary.json")
-    images = read_json(directory / "images.json")
+    # `summary.json` is an object, whereas the Phase-1 diagnosis writes
+    # `images.json` as an ordered list of per-image records.
+    images = json.loads((directory / "images.json").read_text(encoding="utf-8"))
     if not isinstance(images, list):
         raise ValueError(f"images.json must be a list: {directory}")
     record = build_epoch_record(
