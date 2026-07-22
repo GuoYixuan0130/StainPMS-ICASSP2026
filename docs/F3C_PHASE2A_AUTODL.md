@@ -159,3 +159,21 @@ issued:
 - `tnbc_timing_base.json`
 - `tnbc_timing_pms_active.json`
 - `tnbc_budget_gate.json`
+
+## 6. Measure MoNuSeg and apply the combined gate
+
+The TNBC gate alone is not authorization for the long run because the frozen
+protocol also caps either dataset at 12 GPU hours and their combined estimate
+at 24 GPU hours. Run the train37-only timing and combined check without
+constructing a test14 loader:
+
+```bash
+bash tools/run_phase2a_monuseg_gate.sh
+```
+
+The script writes `monuseg_timing_base.json`,
+`monuseg_timing_pms_active.json`, `monuseg_budget_gate.json`, and
+`combined_budget_gate.json` under `/root/autodl-tmp/f3c_phase2a/reports`.
+Exit code `2` is an intentional budget stop, not a training failure. In that
+case no formal baseline may be started until the project owner revises the
+budget or recipe.

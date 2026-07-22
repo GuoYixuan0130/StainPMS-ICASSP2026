@@ -1,6 +1,6 @@
 import unittest
 
-from stainpms.phase2a_budget import estimate_dataset_budget
+from stainpms.phase2a_budget import assess_combined_budget, estimate_dataset_budget
 
 
 def timing(profile, seconds, refresh=0.0):
@@ -47,6 +47,34 @@ class Phase2ABudgetTests(unittest.TestCase):
         active["data"]["manifest_sha256"] = "different"
         with self.assertRaisesRegex(ValueError, "manifest_sha256"):
             estimate_dataset_budget(self.recipe(), "tnbc", timing("base", 1.0), active)
+
+    def test_combined_gate_checks_individual_and_total_limits(self):
+        recipe = {"timing": {"combined_stop_gpu_hours": 24.0}}
+        passed = assess_combined_budget(
+            recipe,
+            [
+                {"dataset": "tnbc", "status": "gate_pass", "estimated_total_gpu_hours": 11.0},
+                {"dataset": "monuseg", "status": "gate_pass", "estimated_total_gpu_hours": 12.0},
+            ],
+        )
+        self.assertEqual(passed["status"], "gate_pass")
+        stopped = assess_combined_budget(
+            recipe,
+            [
+                {"dataset": "tnbc", "status": "gate_pass", "estimated_total_gpu_hours": 11.0},
+                {"dataset": "monuseg", "status": "gate_stop", "estimated_total_gpu_hours": 13.1},
+            ],
+        )
+        self.assertEqual(stopped["status"], "gate_stop")
+        self.assertTrue(stopped["stop_reasons"]["individual_dataset_limit_exceeded"])
+        self.assertTrue(stopped["stop_reasons"]["combined_limit_exceeded"])
+
+    def test_combined_gate_rejects_missing_dataset(self):
+        with self.assertRaisesRegex(ValueError, "exactly one"):
+            assess_combined_budget(
+                {"timing": {"combined_stop_gpu_hours": 24.0}},
+                [{"dataset": "tnbc", "status": "gate_pass", "estimated_total_gpu_hours": 1.0}],
+            )
 
 
 if __name__ == "__main__":

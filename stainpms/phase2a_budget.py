@@ -80,3 +80,43 @@ def estimate_dataset_budget(
         "single_dataset_stop_gpu_hours": limit_hours,
         "gate_basis": "10 warm-up + 100 CUDA-synchronized updates for each objective profile",
     }
+
+
+def assess_combined_budget(
+    recipe: dict[str, Any],
+    dataset_reports: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Apply the frozen per-dataset and combined Phase 2A stop rules."""
+
+    reports_by_dataset = {str(report.get("dataset")): report for report in dataset_reports}
+    expected = {"tnbc", "monuseg"}
+    if set(reports_by_dataset) != expected or len(dataset_reports) != len(expected):
+        raise ValueError("combined gate requires exactly one TNBC and one MoNuSeg report")
+    for dataset, report in reports_by_dataset.items():
+        if report.get("status") not in {"gate_pass", "gate_stop"}:
+            raise ValueError(f"{dataset} budget report has invalid status")
+
+    individual_hours = {
+        dataset: float(reports_by_dataset[dataset]["estimated_total_gpu_hours"])
+        for dataset in sorted(expected)
+    }
+    combined_hours = sum(individual_hours.values())
+    combined_limit = float(recipe["timing"]["combined_stop_gpu_hours"])
+    individual_stop = any(
+        reports_by_dataset[dataset]["status"] == "gate_stop" for dataset in expected
+    )
+    combined_stop = combined_hours > combined_limit
+    return {
+        "status": "gate_stop" if individual_stop or combined_stop else "gate_pass",
+        "individual_status": {
+            dataset: reports_by_dataset[dataset]["status"] for dataset in sorted(expected)
+        },
+        "individual_estimated_gpu_hours": individual_hours,
+        "estimated_combined_gpu_hours": combined_hours,
+        "combined_stop_gpu_hours": combined_limit,
+        "stop_reasons": {
+            "individual_dataset_limit_exceeded": individual_stop,
+            "combined_limit_exceeded": combined_stop,
+        },
+        "gate_basis": "both dataset-specific gates plus the frozen combined GPU-hour limit",
+    }
