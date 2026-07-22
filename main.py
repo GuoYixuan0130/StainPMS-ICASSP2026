@@ -1052,6 +1052,227 @@ def run_warmstart_timing(
     return report
 
 
+def run_warmstart_formal_tnbc_5epoch(
+    cfgs,
+    args,
+    train_dataset,
+    train_loader,
+    model1,
+    model1_encoder,
+    net,
+    criterion,
+    optimizer,
+    scheduler,
+    device,
+    coverage_identity,
+    train_manifest_identity,
+):
+    """Run the owner-approved fixed-budget exploratory TNBC C0/C1 screen.
+
+    This intentionally constructs no development loader.  Evaluation is run
+    subsequently against each immutable saved epoch checkpoint, which keeps
+    p7--p8 out of the optimizer process and makes C0/C1 state isolation
+    auditable.  The shared coverage cache is verified before and after the
+    five epochs and is never refreshed in this stage.
+    """
+    output = Path(cfgs.warmstart_output).resolve()
+    output_dir = output.parent
+    checkpoints_dir = output_dir / "checkpoints"
+    declarations_dir = output_dir / "checkpoint_declarations"
+    if checkpoints_dir.exists() and any(checkpoints_dir.iterdir()):
+        raise FileExistsError(f"formal TNBC output already has checkpoints: {checkpoints_dir}")
+    checkpoints_dir.mkdir(parents=True, exist_ok=True)
+    declarations_dir.mkdir(parents=True, exist_ok=True)
+
+    updates_per_epoch = 270
+    planned_updates = 1350
+    if len(train_dataset) != 30:
+        raise RuntimeError("formal TNBC screen requires exactly 30 p1-p6 images")
+    runtime_stats = new_timing_runtime_stats()
+    epoch_records = []
+    coverage_before = dict(coverage_identity)
+    cuda_index = _cuda_device_index(device) if torch.cuda.is_available() else None
+    peak_allocated_mib = 0.0
+    peak_reserved_mib = 0.0
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize(cuda_index)
+    training_started = time.perf_counter()
+
+    for epoch in range(5):
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(cuda_index)
+            torch.cuda.synchronize(cuda_index)
+        epoch_started = time.perf_counter()
+        # Empty bank is deliberate: the approved run discards the checkpoint's
+        # opaque bank and never transfers any C0 state to C1.
+        losses = train_on_epoch(
+            cfgs,
+            model1,
+            model1_encoder,
+            net,
+            train_loader,
+            criterion,
+            optimizer,
+            epoch,
+            [],
+            device,
+            runtime_stats=runtime_stats,
+        )
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(cuda_index)
+        epoch_seconds = time.perf_counter() - epoch_started
+        if not losses or not all(np.isfinite(float(value)) for value in losses.values()):
+            raise RuntimeError(f"formal TNBC epoch {epoch + 1} has empty or non-finite losses")
+        skipped = sum(
+            int(runtime_stats.get(key, 0))
+            for key in ("shape_skips", "nonfinite_loss_skips", "nonfinite_gradient_skips")
+        )
+        actual_updates = int(runtime_stats.get("optimizer_steps", 0))
+        expected_updates = (epoch + 1) * updates_per_epoch
+        if skipped != 0 or actual_updates != expected_updates:
+            raise RuntimeError(
+                "formal TNBC update contract failed at epoch "
+                f"{epoch + 1}: updates={actual_updates}/{expected_updates}, skips={skipped}"
+            )
+        if int(runtime_stats.get("native_mask_token_count", 0)) != 4:
+            raise RuntimeError("formal TNBC screen did not use four native mask tokens")
+        scheduler.step()
+        epoch_peak_allocated = (
+            torch.cuda.max_memory_allocated(cuda_index) / (1024**2)
+            if torch.cuda.is_available()
+            else 0.0
+        )
+        epoch_peak_reserved = (
+            torch.cuda.max_memory_reserved(cuda_index) / (1024**2)
+            if torch.cuda.is_available()
+            else 0.0
+        )
+        peak_allocated_mib = max(peak_allocated_mib, epoch_peak_allocated)
+        peak_reserved_mib = max(peak_reserved_mib, epoch_peak_reserved)
+        checkpoint_path = checkpoints_dir / f"epoch_{epoch + 1:04d}_update_{actual_updates:06d}.pth"
+        checkpoint_payload = {
+            "schema_version": 1,
+            "phase": "2A-warmstart-formal-screen",
+            "protocol": "tnbc_c0_c1_5epoch_exploratory_v1",
+            "dataset": "tnbc",
+            "arm": str(cfgs.warmstart_candidate_arm),
+            "model": net.state_dict(),
+            "model1": model1.state_dict(),
+            "epoch": int(epoch + 1),
+            "optimizer_updates": actual_updates,
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "rng_state": _capture_rng_state(),
+            "texture_memory_bank_list": [],
+            "embedded_texture_bank_loaded": False,
+            "coverage_refresh_events": [],
+            "train_manifest": train_manifest_identity,
+            "coverage": coverage_identity,
+            "screen_config": getattr(cfgs, "warmstart_screen_config_identity", None),
+            "epoch_losses": {key: float(value) for key, value in losses.items()},
+            "epoch_runtime": {
+                "wall_seconds": epoch_seconds,
+                "peak_memory_allocated_mib": epoch_peak_allocated,
+                "peak_memory_reserved_mib": epoch_peak_reserved,
+            },
+            "runtime_stats": dict(runtime_stats),
+            "repository": _repository_identity(),
+            "command": list(sys.argv),
+        }
+        _torch_save_atomic(checkpoint_path, checkpoint_payload)
+        checkpoint_sha = sha256_file(checkpoint_path)
+        declaration_path = declarations_dir / f"{checkpoint_path.stem}.json"
+        _json_write_atomic(
+            declaration_path,
+            {
+                "schema_version": 1,
+                "dataset": "tnbc",
+                "classification": "historical_exploratory",
+                "checkpoint_path": str(checkpoint_path),
+                "checkpoint_sha256": checkpoint_sha,
+                "selection_history": (
+                    "approved fixed five-epoch C0/C1 exploratory warm-start screen; "
+                    "development is evaluated only on the immutable saved epoch state"
+                ),
+                "training_manifest": train_manifest_identity,
+                "p7_p8_exposure": "none during optimizer updates; fixed development evaluation only",
+                "p9_p11_exposure": "none",
+                "test_metric_selection": "not applicable; epoch 5 is pre-specified primary",
+                "allowed_phase1_use": (
+                    "exploratory TNBC p7-p8 fixed-epoch diagnosis only; not a clean "
+                    "baseline, model-selection, or final-performance checkpoint"
+                ),
+                "source_note": "model/model1 warm-start only; fresh optimizer, scheduler, and RNG; texture bank discarded",
+            },
+        )
+        epoch_records.append(
+            {
+                "epoch": epoch + 1,
+                "optimizer_updates": actual_updates,
+                "checkpoint_path": str(checkpoint_path),
+                "checkpoint_sha256": checkpoint_sha,
+                "checkpoint_declaration": str(declaration_path),
+                "losses": {key: float(value) for key, value in losses.items()},
+                "runtime": checkpoint_payload["epoch_runtime"],
+                "learning_rate_after_scheduler_step": float(optimizer.param_groups[0]["lr"]),
+            }
+        )
+        print(
+            f"[formal-tnbc-screen] arm={cfgs.warmstart_candidate_arm} "
+            f"epoch={epoch + 1}/5 updates={actual_updates}/{planned_updates}"
+        )
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize(cuda_index)
+    coverage_after = verify_coverage_manifest(
+        Path(cfgs.warmstart_coverage_manifest),
+        train_manifest_identity=train_manifest_identity,
+        checkpoint_sha256=sha256_file(Path(cfgs.sam_ckpt).resolve()),
+        dataset="tnbc",
+    )
+    report = _warmstart_base_report(
+        cfgs, args, train_dataset, model1, net, optimizer, scheduler, coverage_identity
+    )
+    report.update(
+        {
+            "status": "complete",
+            "stage": "formal_tnbc_5epoch",
+            "protocol": "tnbc_c0_c1_5epoch_exploratory_v1",
+            "planned_epochs": 5,
+            "updates_per_epoch": updates_per_epoch,
+            "planned_optimizer_updates": planned_updates,
+            "actual_optimizer_updates": int(runtime_stats.get("optimizer_steps", 0)),
+            "coverage_refresh_events": [],
+            "coverage_integrity": {"before": coverage_before, "after": coverage_after},
+            "screen_config": getattr(cfgs, "warmstart_screen_config_identity", None),
+            "epochs": epoch_records,
+            "runtime": {
+                **finalize_runtime_audits(runtime_stats),
+                "wall_seconds": time.perf_counter() - training_started,
+                "peak_memory_allocated_mib": peak_allocated_mib,
+                "peak_memory_reserved_mib": peak_reserved_mib,
+            },
+            "sealed_data_attestation": {
+                "development_loader_constructed": False,
+                "test_loader_constructed": False,
+                "TNBC_p7_p11_accessed": False,
+                "MoNuSeg_test14_accessed": False,
+            },
+            "evaluation_plan": {
+                "epoch_0": "shared p7-p8 diagnosis before either arm trains",
+                "epochs_1_to_5": "strict p7-p8 diagnosis from each immutable epoch checkpoint",
+                "primary_comparison": "fixed epoch 5 C1-C0 patient-macro delta",
+            },
+        }
+    )
+    if report["actual_optimizer_updates"] != planned_updates:
+        raise RuntimeError("formal TNBC screen ended with incorrect optimizer update count")
+    _json_write_atomic(output, report)
+    print(json.dumps({"status": "complete", "output": str(output)}))
+    return report
+
+
 def _json_write_atomic(path, payload):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1696,6 +1917,8 @@ def _validate_warmstart_preflight(cfgs, args):
         "sam_ckpt": cfgs.sam_ckpt,
         "warmstart_checkpoint_sha256": cfgs.warmstart_checkpoint_sha256,
     }
+    if stage == "formal_tnbc_5epoch":
+        required_paths["warmstart_screen_config"] = cfgs.warmstart_screen_config
     missing_paths = [name for name, value in required_paths.items() if not value]
     if missing_paths:
         raise ValueError("warm-start feasibility missing: " + ", ".join(missing_paths))
@@ -1729,9 +1952,10 @@ def _validate_warmstart_preflight(cfgs, args):
             f"{expected_checkpoint_sha}"
         )
 
+    approved_epochs = 5 if stage == "formal_tnbc_5epoch" else 10
     exact_values = {
         "seed": (int(cfgs.seed), 3407),
-        "epochs": (int(cfgs.epochs), 10),
+        "epochs": (int(cfgs.epochs), approved_epochs),
         "crop_size": (int(cfgs.crop_size), 256),
         "out_size": (int(cfgs.out_size), 256),
         "crop_batch_size": (int(cfgs.b), 1),
@@ -1858,6 +2082,24 @@ def _validate_warmstart_preflight(cfgs, args):
             raise ValueError("warm-start timing requires exactly 10 warm-up updates")
         if int(cfgs.phase2a_timed_updates) != 100:
             raise ValueError("warm-start timing requires exactly 100 timed updates")
+    if stage == "formal_tnbc_5epoch":
+        if str(cfgs.dataset) != "tnbc":
+            raise ValueError("formal_tnbc_5epoch rejects all non-TNBC datasets")
+        screen_config_path = Path(cfgs.warmstart_screen_config).resolve()
+        screen_config = json.loads(screen_config_path.read_text(encoding="utf-8"))
+        if screen_config.get("protocol_id") != "tnbc_c0_c1_5epoch_exploratory_v1":
+            raise ValueError("formal_tnbc_5epoch screen config protocol mismatch")
+        if int(screen_config.get("optimization", {}).get("planned_optimizer_updates", -1)) != 1350:
+            raise ValueError("formal_tnbc_5epoch screen config must freeze 1350 updates")
+        cfgs.warmstart_screen_config_identity = {
+            "path": str(screen_config_path),
+            "sha256": sha256_file(screen_config_path),
+            "protocol_id": screen_config["protocol_id"],
+        }
+        if int(cfgs.warmstart_smoke_updates) != 0:
+            raise ValueError("formal_tnbc_5epoch cannot set warmstart smoke updates")
+        if int(cfgs.phase2a_warmup_updates) != 10 or int(cfgs.phase2a_timed_updates) != 100:
+            raise ValueError("formal_tnbc_5epoch requires the approved 10/100 timing provenance")
     return train_manifest_identity, coverage_identity
 
 
@@ -2103,6 +2345,24 @@ def main():
             scheduler,
             device,
             warmstart_coverage_identity,
+        )
+        return
+
+    if cfgs.warmstart_stage == "formal_tnbc_5epoch":
+        run_warmstart_formal_tnbc_5epoch(
+            cfgs,
+            args,
+            train_dataset,
+            train_loader,
+            model1,
+            model1_encoder,
+            net,
+            criterion,
+            optimizer,
+            scheduler,
+            device,
+            warmstart_coverage_identity,
+            warmstart_manifest_identity,
         )
         return
 

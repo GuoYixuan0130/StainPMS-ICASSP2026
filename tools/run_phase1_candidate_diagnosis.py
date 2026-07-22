@@ -55,6 +55,7 @@ from stainpms.phase1_metrics import (
     structural_errors,
     summarize_gt_rows,
 )
+from stainpms.evaluator import evaluate_instance_pair
 
 
 def sha256_file(path: Path) -> str:
@@ -274,6 +275,7 @@ def diagnose_image(
     args: argparse.Namespace,
     main_match_iou: float,
     device: torch.device,
+    include_final_task_metrics: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     full_h, full_w = inst_map.shape
     gt_points = choose_edt_interior_points(inst_map)
@@ -512,6 +514,20 @@ def diagnose_image(
     final_overlap = final_instance_overlap_table(inst_map, pred_map)
     final_iou_by_gt = final_max_iou_by_gt(final_overlap)
     final_info = strict_final_pairing(inst_map, pred_map, main_match_iou)
+    # Phase 1's vectorised pairing record is sufficient for error attribution.
+    # The formal TNBC screen also needs frozen strict Dice/AJI/DQ/SQ/PQ on the
+    # completed image; this optional calculation does not alter inference.
+    final_task_metrics = (
+        evaluate_instance_pair(
+            inst_map,
+            pred_map,
+            mode="strict",
+            match_iou=main_match_iou,
+            sample_id=sample_id,
+        )
+        if include_final_task_metrics
+        else None
+    )
     pairs = final_info["pairs"]
     point_counts = Counter(value for value in point_gt.values() if value != 0)
     for instance_id, row in rows_by_id.items():
@@ -532,6 +548,7 @@ def diagnose_image(
         "background_auto_point_count": background_points,
         "background_auto_point_fraction": float(background_points / auto_point_total) if auto_point_total else None,
         "final_metrics": final_info["evaluator"],
+        "final_task_metrics": final_task_metrics,
         "structural_errors": structural_errors(
             inst_map,
             pred_map,
@@ -650,9 +667,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--point-filtering", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--texture", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--context", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--discard-checkpoint-texture-bank",
+        action="store_true",
+        help=(
+            "Start texture-memory inference state empty even if a historical "
+            "checkpoint embeds a bank; used by the approved C0/C1 warm start."
+        ),
+    )
     parser.add_argument("--gpu-device", type=int, default=0)
     parser.add_argument("--resume", action="store_true", help="Resume only from this tool's manifest-matched per-image state.")
     parser.add_argument("--max-images", type=int, default=0, help="Nonzero produces a labelled smoke-only output, never a Phase 1 result.")
+    parser.add_argument(
+        "--include-final-task-metrics",
+        action="store_true",
+        help=(
+            "Calculate frozen strict Dice/AJI/DQ/SQ/PQ for each complete "
+            "image; required by the approved formal TNBC screen."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -695,7 +728,9 @@ def main() -> int:
     if "model1" not in checkpoint_payload:
         raise ValueError("checkpoint has no CA-SAM2/StainPMS point-head state ('model1')")
     missing, unexpected = point_net.load_state_dict(checkpoint_payload["model1"], strict=False)
-    texture_memory_bank = list(checkpoint_payload.get("texture_memory_bank_list", []) or [])
+    texture_memory_bank = [] if args.discard_checkpoint_texture_bank else list(
+        checkpoint_payload.get("texture_memory_bank_list", []) or []
+    )
     runtime = runtime_cfg(args)
     dataset_cls = TNBC if args.dataset == "tnbc" else MONUSEG
     dataset = dataset_cls(
@@ -791,6 +826,7 @@ def main() -> int:
             args=args,
             main_match_iou=main_match_iou,
             device=device,
+            include_final_task_metrics=bool(args.include_final_task_metrics),
         )
         image_wall_seconds = time.perf_counter() - image_started
         image_record["wall_seconds"] = image_wall_seconds
@@ -879,6 +915,7 @@ def main() -> int:
             "context": args.context,
             "context_atten_k": args.context_atten_k,
             "native_mask_token_count": 4,
+            "checkpoint_texture_memory_bank_discarded": bool(args.discard_checkpoint_texture_bank),
             "standard_single_mask_selection": "token0_with_existing_dynamic_stability_fallback",
         },
         "repository": {"branch": git_value("branch", "--show-current"), "commit": git_value("rev-parse", "HEAD")},

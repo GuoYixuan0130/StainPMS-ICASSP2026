@@ -148,8 +148,11 @@ def parse_args():
     parser.add_argument(
         "--warmstart_stage",
         default="",
-        choices=["", "prepare_coverage", "smoke", "timing"],
-        help="Exploratory train-only C0/C1 implementation and timing stage.",
+        choices=["", "prepare_coverage", "smoke", "timing", "formal_tnbc_5epoch"],
+        help=(
+            "Exploratory train-only C0/C1 stage. formal_tnbc_5epoch is the "
+            "owner-approved fixed five-epoch TNBC screening run."
+        ),
     )
     parser.add_argument(
         "--warmstart_candidate_arm",
@@ -163,6 +166,12 @@ def parse_args():
     parser.add_argument("--warmstart_output", default="", type=str)
     parser.add_argument("--warmstart_checkpoint_sha256", default="", type=str)
     parser.add_argument("--warmstart_coverage_manifest", default="", type=str)
+    parser.add_argument(
+        "--warmstart_screen_config",
+        default="",
+        type=str,
+        help="Hash-recorded frozen config required only by formal_tnbc_5epoch.",
+    )
     parser.add_argument("--warmstart_smoke_updates", default=0, type=int)
     parser.add_argument("--candidate_coverage_tau", default=0.1, type=float)
     parser.add_argument("--candidate_coverage_coefficient", default=1.0, type=float)

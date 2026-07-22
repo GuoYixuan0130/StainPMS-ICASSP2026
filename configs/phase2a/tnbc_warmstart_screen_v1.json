@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "protocol_id": "tnbc_c0_c1_5epoch_exploratory_v1",
+  "approval_scope": "TNBC only; MoNuSeg is explicitly not approved in this run.",
+  "initialization": {
+    "checkpoint_sha256": "44a3cb3e93051301d789e44f93769588abfa727d7a174b0270f55305ef023781",
+    "weight_loading": ["model", "model1"],
+    "optimizer_scheduler_rng": "fresh per arm",
+    "texture_memory_bank": "discarded"
+  },
+  "data": {
+    "train_protocol": "tnbc_stainpms_prepared_continuity_v1_phase1_train",
+    "train_patients": [1, 2, 3, 4, 5, 6],
+    "development_patients": [7, 8],
+    "sealed_patients": [9, 10, 11],
+    "coverage": "same frozen shared train-only coverage manifest for C0 and C1"
+  },
+  "optimization": {
+    "seed": 3407,
+    "epochs": 5,
+    "optimizer_updates_per_epoch": 270,
+    "planned_optimizer_updates": 1350,
+    "optimizer": "AdamW",
+    "learning_rate": 1e-05,
+    "weight_decay": 0.0001,
+    "scheduler": "MultiStepLR",
+    "milestones": [80, 140, 200],
+    "gradient_clip_norm": 0.1
+  },
+  "c1_addition": {
+    "candidate_coverage_tau": 0.1,
+    "coverage_coefficient": 1.0,
+    "quality_coefficient": 1.0,
+    "name": "native best-of-K coverage plus quality calibration"
+  },
+  "evaluation": {
+    "evaluator": "strict_empty_handling_v1",
+    "match_iou": 0.5,
+    "primary_epoch": 5,
+    "patient_macro": "equal-weight mean of p7 and p8 after per-image macro",
+    "no_early_stopping": true,
+    "metrics": ["dice1", "dice2", "aji", "dq", "sq", "pq", "best_candidate_iou", "best_candidate_ccr_at_0_5", "selected_candidate_iou", "selected_candidate_ccr_at_0_5", "selection_regret"]
+  },
+  "promotion_rule_epoch_5": {
+    "best_candidate_ccr": "both patients non-decrease, at least one strictly increases, equal patient macro strictly increases",
+    "patient_macro_aji_delta_minimum": 0.005,
+    "patient_macro_pq_delta_minimum": -0.002
+  }
+}
