@@ -69,6 +69,66 @@ def max_iou_with_final_prediction(gt_mask: np.ndarray, pred_map: np.ndarray) -> 
     return best_iou, best_id
 
 
+def final_instance_overlap_table(gt_map: np.ndarray, pred_map: np.ndarray) -> dict[str, Any]:
+    """Build exact GT/pred intersection counts with one image-wide pass.
+
+    The Phase 1 runner used to materialize a complete boolean prediction map
+    for every GT instance, then scan all of them one at a time.  For dense
+    MoNuSeg images that is O(|G|*|P|*H*W).  This table has the identical
+    intersections and areas, but is built once in O(H*W) plus a compact label
+    table.  Input labels are the frozen StainPMS prepared maps, whose IDs are
+    non-negative and continuous; the implementation nevertheless tolerates
+    unused IDs.
+    """
+
+    gt = np.asarray(gt_map, dtype=np.int64)
+    pred = np.asarray(pred_map, dtype=np.int64)
+    if gt.shape != pred.shape or gt.ndim != 2:
+        raise ValueError(f"expected same-shape 2-D maps, received {gt.shape} and {pred.shape}")
+    if (gt < 0).any() or (pred < 0).any():
+        raise ValueError("instance maps must have non-negative IDs")
+    max_gt = int(gt.max()) if gt.size else 0
+    max_pred = int(pred.max()) if pred.size else 0
+    width = max_pred + 1
+    encoded = gt.reshape(-1) * width + pred.reshape(-1)
+    table = np.bincount(encoded, minlength=(max_gt + 1) * width).reshape(max_gt + 1, width)
+    gt_ids = np.flatnonzero(table.sum(axis=1))
+    gt_ids = gt_ids[gt_ids != 0].astype(np.int64, copy=False)
+    pred_ids = np.flatnonzero(table.sum(axis=0))
+    pred_ids = pred_ids[pred_ids != 0].astype(np.int64, copy=False)
+    return {
+        "intersections": table,
+        "gt_areas": table.sum(axis=1),
+        "pred_areas": table.sum(axis=0),
+        "gt_ids": gt_ids,
+        "pred_ids": pred_ids,
+    }
+
+
+def final_max_iou_by_gt(overlap: dict[str, Any]) -> dict[int, tuple[float, int | None]]:
+    """Return the exact best final-prediction IoU for every GT instance."""
+
+    table = np.asarray(overlap["intersections"])
+    gt_areas = np.asarray(overlap["gt_areas"])
+    pred_areas = np.asarray(overlap["pred_areas"])
+    pred_ids = np.asarray(overlap["pred_ids"], dtype=np.int64)
+    output: dict[int, tuple[float, int | None]] = {}
+    for raw_gt_id in np.asarray(overlap["gt_ids"], dtype=np.int64):
+        gt_id = int(raw_gt_id)
+        if pred_ids.size == 0:
+            output[gt_id] = (0.0, None)
+            continue
+        intersections = table[gt_id, pred_ids].astype(np.float64, copy=False)
+        unions = float(gt_areas[gt_id]) + pred_areas[pred_ids] - intersections
+        ious = np.divide(intersections, unions, out=np.zeros_like(intersections), where=unions > 0)
+        best_index = int(np.argmax(ious))
+        best_iou = float(ious[best_index])
+        # Match max_iou_with_final_prediction: no overlapping prediction has
+        # a score of zero and a None prediction ID.
+        output[gt_id] = (best_iou, int(pred_ids[best_index]) if best_iou > 0.0 else None)
+    return output
+
+
 def strict_final_pairing(gt_map: np.ndarray, pred_map: np.ndarray, match_iou: float) -> dict[str, Any]:
     """Return the existing strict evaluator record plus unambiguous GT matches."""
 
@@ -175,26 +235,37 @@ def summarize_gt_rows(rows: Iterable[dict[str, Any]], *, thresholds: Iterable[fl
     }
 
 
-def structural_errors(gt_map: np.ndarray, pred_map: np.ndarray, match_iou: float) -> dict[str, Any]:
+def structural_errors(
+    gt_map: np.ndarray,
+    pred_map: np.ndarray,
+    match_iou: float,
+    *,
+    pairing_info: dict[str, Any] | None = None,
+    overlap: dict[str, Any] | None = None,
+    best_iou_by_gt: dict[int, tuple[float, int | None]] | None = None,
+) -> dict[str, Any]:
     """Supplementary final-map FP/FN, split, merge and boundary accounting."""
 
-    pairing_info = strict_final_pairing(gt_map, pred_map, match_iou)
+    pairing_info = pairing_info or strict_final_pairing(gt_map, pred_map, match_iou)
+    overlap = overlap or final_instance_overlap_table(gt_map, pred_map)
+    best_iou_by_gt = best_iou_by_gt or final_max_iou_by_gt(overlap)
     pairing = pairing_info["evaluator"]["pairing"] or {}
     unmatched_gt = [int(value) for value in pairing.get("unpaired_true", [])]
     unmatched_pred = [int(value) for value in pairing.get("unpaired_pred", [])]
+    table = np.asarray(overlap["intersections"])
+    pred_ids = np.asarray(overlap["pred_ids"], dtype=np.int64)
+    gt_ids = np.asarray(overlap["gt_ids"], dtype=np.int64)
     boundary = 0
     split = 0
     for gt_id in unmatched_gt:
-        gt_mask = np.asarray(gt_map) == gt_id
-        max_iou, _ = max_iou_with_final_prediction(gt_mask, pred_map)
+        max_iou, _ = best_iou_by_gt.get(gt_id, (0.0, None))
         boundary += int(0.0 < max_iou < match_iou)
-        overlaps = sum(bool(np.logical_and(gt_mask, np.asarray(pred_map) == pred_id).any()) for pred_id in instance_ids(pred_map))
-        split += int(overlaps >= 2)
+        if gt_id < table.shape[0] and pred_ids.size:
+            split += int(np.count_nonzero(table[gt_id, pred_ids]) >= 2)
     merge = 0
     for pred_id in unmatched_pred:
-        pred_mask = np.asarray(pred_map) == pred_id
-        overlaps = sum(bool(np.logical_and(pred_mask, np.asarray(gt_map) == gt_id).any()) for gt_id in instance_ids(gt_map))
-        merge += int(overlaps >= 2)
+        if pred_id < table.shape[1] and gt_ids.size:
+            merge += int(np.count_nonzero(table[gt_ids, pred_id]) >= 2)
     return {
         "tp": int(pairing.get("tp", 0)),
         "fp": int(pairing.get("fp", 0)),

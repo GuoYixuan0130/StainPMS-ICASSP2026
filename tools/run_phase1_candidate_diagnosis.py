@@ -47,9 +47,10 @@ from stainpms.phase1_decoder import (
 from stainpms.phase1_metrics import (
     attach_gt_error_classes,
     choose_edt_interior_points,
+    final_instance_overlap_table,
+    final_max_iou_by_gt,
     iou_against_label,
     mask_iou,
-    max_iou_with_final_prediction,
     strict_final_pairing,
     structural_errors,
     summarize_gt_rows,
@@ -94,6 +95,52 @@ def load_json(path: Path, label: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(f"{label} must be a JSON object: {path}")
     return payload
+
+
+def write_json_atomic(path: Path, payload: Any) -> None:
+    """Write a small audit record without exposing a partial JSON file."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def torch_save_atomic(path: Path, payload: Any) -> None:
+    """Persist read-only inference state so an interrupted diagnosis resumes exactly."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    torch.save(payload, temporary)
+    os.replace(temporary, path)
+
+
+def load_completed_image_outputs(
+    directory: Path,
+    *,
+    expected_indices: list[int],
+    manifest_sha256: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], float]:
+    """Load completed image records and reject gaps or foreign-manifest state."""
+
+    rows: list[dict[str, Any]] = []
+    images: list[dict[str, Any]] = []
+    elapsed = 0.0
+    for index in expected_indices:
+        path = directory / f"{index:05d}.json"
+        payload = load_json(path, f"completed image output {path}")
+        if int(payload.get("record_index", -1)) != index:
+            raise ValueError(f"completed image index mismatch: {path}")
+        if payload.get("manifest_sha256") != manifest_sha256:
+            raise ValueError(f"completed image belongs to a different manifest: {path}")
+        child_rows = payload.get("gt_rows")
+        image_record = payload.get("image_record")
+        if not isinstance(child_rows, list) or not isinstance(image_record, dict):
+            raise ValueError(f"invalid completed image payload: {path}")
+        rows.extend(child_rows)
+        images.append(image_record)
+        elapsed += float(payload.get("wall_seconds", 0.0))
+    return rows, images, elapsed
 
 
 def validate_scope(dataset: str, manifest: dict[str, Any], records: list[dict[str, Any]]) -> None:
@@ -462,14 +509,15 @@ def diagnose_image(
         inst_map.shape,
         args.instance_nms_iou,
     )
+    final_overlap = final_instance_overlap_table(inst_map, pred_map)
+    final_iou_by_gt = final_max_iou_by_gt(final_overlap)
     final_info = strict_final_pairing(inst_map, pred_map, main_match_iou)
     pairs = final_info["pairs"]
     point_counts = Counter(value for value in point_gt.values() if value != 0)
     for instance_id, row in rows_by_id.items():
         row["auto_point_count"] = int(point_counts.get(instance_id, 0))
         row["final_matched"] = bool(instance_id in pairs)
-        gt_mask = inst_map == instance_id
-        final_max_iou, final_best_pred_id = max_iou_with_final_prediction(gt_mask, pred_map)
+        final_max_iou, final_best_pred_id = final_iou_by_gt.get(instance_id, (0.0, None))
         row["final_max_iou"] = float(final_max_iou)
         row["final_best_pred_id"] = final_best_pred_id
         row["final_matched_pred_id"] = pairs.get(instance_id)
@@ -484,7 +532,14 @@ def diagnose_image(
         "background_auto_point_count": background_points,
         "background_auto_point_fraction": float(background_points / auto_point_total) if auto_point_total else None,
         "final_metrics": final_info["evaluator"],
-        "structural_errors": structural_errors(inst_map, pred_map, main_match_iou),
+        "structural_errors": structural_errors(
+            inst_map,
+            pred_map,
+            main_match_iou,
+            pairing_info=final_info,
+            overlap=final_overlap,
+            best_iou_by_gt=final_iou_by_gt,
+        ),
         "error_classes": dict(Counter(row["error_class"] for row in rows)),
     }
     return rows, image_record
@@ -596,6 +651,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--texture", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--context", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--gpu-device", type=int, default=0)
+    parser.add_argument("--resume", action="store_true", help="Resume only from this tool's manifest-matched per-image state.")
     parser.add_argument("--max-images", type=int, default=0, help="Nonzero produces a labelled smoke-only output, never a Phase 1 result.")
     return parser.parse_args()
 
@@ -653,10 +709,72 @@ def main() -> int:
         verify_manifest_hashes=True,
     )
     maximum = len(dataset) if args.max_images == 0 else min(int(args.max_images), len(dataset))
+    output_dir = Path(args.output_dir).resolve()
+    completed_dir = output_dir / "completed_images"
+    progress_path = output_dir / "progress.json"
+    texture_state_path = output_dir / "texture_memory_bank.pt"
+    fingerprint_payload = {
+        "dataset": args.dataset,
+        "scope_label": args.scope_label,
+        "manifest_sha256": manifest["manifest_sha256"],
+        "checkpoint_sha256": declaration["checkpoint_sha256"],
+        "metric_spec_sha256": sha256_file(spec_path),
+        "maximum": maximum,
+        "frozen_inference": {
+            "sam_config": args.sam_config,
+            "crop_size": args.crop_size,
+            "out_size": args.out_size,
+            "overlap": args.overlap,
+            "load": args.load,
+            "point_nms_thr": args.point_nms_thr,
+            "instance_nms_iou": args.instance_nms_iou,
+            "prompt_chunk_size": args.prompt_chunk_size,
+            "texture": args.texture,
+            "context": args.context,
+            "context_atten_k": args.context_atten_k,
+        },
+    }
+    run_fingerprint = json_sha256(fingerprint_payload)
+    completed_indices: list[int] = []
+    previous_elapsed = 0.0
     gt_rows: list[dict[str, Any]] = []
     image_records: list[dict[str, Any]] = []
-    started = time.perf_counter()
-    for index in range(maximum):
+    if args.resume:
+        progress = load_json(progress_path, "Phase 1 progress state")
+        if progress.get("run_fingerprint") != run_fingerprint:
+            raise ValueError("--resume state does not match this manifest/checkpoint/frozen inference configuration")
+        completed_indices = [int(value) for value in progress.get("completed_record_indices", [])]
+        if completed_indices != list(range(len(completed_indices))) or any(index >= maximum for index in completed_indices):
+            raise ValueError("--resume progress has non-contiguous or out-of-range completed indices")
+        gt_rows, image_records, previous_elapsed = load_completed_image_outputs(
+            completed_dir,
+            expected_indices=completed_indices,
+            manifest_sha256=manifest["manifest_sha256"],
+        )
+        if completed_indices:
+            if not texture_state_path.is_file():
+                raise FileNotFoundError("--resume requires texture_memory_bank.pt after completed images")
+            texture_memory_bank = list(torch.load(texture_state_path, map_location="cpu", weights_only=False))
+    else:
+        if progress_path.exists() or any(completed_dir.glob("*.json")) or (output_dir / "summary.json").exists():
+            raise FileExistsError("output directory already contains Phase 1 state; use --resume or choose a new directory")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        write_json_atomic(
+            progress_path,
+            {
+                "schema_version": 1,
+                "phase": 1,
+                "status": "in_progress",
+                "run_fingerprint": run_fingerprint,
+                "fingerprint": fingerprint_payload,
+                "completed_record_indices": [],
+                "completed_wall_seconds": 0.0,
+                "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+    for index in range(len(completed_indices), maximum):
+        image_started = time.perf_counter()
         image, inst_map, _, _, _, _, _, _, sample_id = dataset[index]
         inst_np = np.asarray(inst_map.cpu().numpy() if torch.is_tensor(inst_map) else inst_map, dtype=np.int32)
         record = records[index]
@@ -674,16 +792,49 @@ def main() -> int:
             main_match_iou=main_match_iou,
             device=device,
         )
+        image_wall_seconds = time.perf_counter() - image_started
+        image_record["wall_seconds"] = image_wall_seconds
         gt_rows.extend(rows)
         image_records.append(image_record)
-        print(f"[phase1] {index + 1}/{maximum} {sample_id}: gt={len(rows)} auto_points={image_record['auto_decoder_point_count']}", flush=True)
+        write_json_atomic(
+            completed_dir / f"{index:05d}.json",
+            {
+                "schema_version": 1,
+                "phase": 1,
+                "record_index": index,
+                "sample_id": str(sample_id),
+                "manifest_sha256": manifest["manifest_sha256"],
+                "wall_seconds": image_wall_seconds,
+                "gt_rows": rows,
+                "image_record": image_record,
+            },
+        )
+        torch_save_atomic(texture_state_path, texture_memory_bank)
+        completed_indices.append(index)
+        previous_elapsed += image_wall_seconds
+        write_json_atomic(
+            progress_path,
+            {
+                "schema_version": 1,
+                "phase": 1,
+                "status": "in_progress",
+                "run_fingerprint": run_fingerprint,
+                "fingerprint": fingerprint_payload,
+                "completed_record_indices": completed_indices,
+                "completed_wall_seconds": previous_elapsed,
+                "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        print(
+            f"[phase1] {index + 1}/{maximum} {sample_id}: gt={len(rows)} "
+            f"auto_points={image_record['auto_decoder_point_count']} wall_s={image_wall_seconds:.2f}",
+            flush=True,
+        )
 
-    elapsed = time.perf_counter() - started
-    output_dir = Path(args.output_dir).resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    elapsed = previous_elapsed
     write_csv(output_dir / "gt_instances.csv", gt_rows)
     write_csv(output_dir / "images.csv", image_records)
-    (output_dir / "images.json").write_text(json.dumps(image_records, indent=2) + "\n", encoding="utf-8")
+    write_json_atomic(output_dir / "images.json", image_records)
     examples: dict[str, list[dict[str, Any]]] = {}
     for error_class in sorted({row["error_class"] for row in gt_rows}):
         candidates = sorted(
@@ -751,8 +902,21 @@ def main() -> int:
         "fixed_examples": examples,
         "outputs": {"gt_instances_csv": "gt_instances.csv", "images_csv": "images.csv", "images_json": "images.json"},
     }
-    (output_dir / "summary.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    write_json_atomic(output_dir / "summary.json", report)
     write_summary_markdown(output_dir / "summary.md", report)
+    write_json_atomic(
+        progress_path,
+        {
+            "schema_version": 1,
+            "phase": 1,
+            "status": "complete",
+            "run_fingerprint": run_fingerprint,
+            "fingerprint": fingerprint_payload,
+            "completed_record_indices": completed_indices,
+            "completed_wall_seconds": previous_elapsed,
+            "completed_at_utc": datetime.now(timezone.utc).isoformat(),
+        },
+    )
     print(json.dumps({"status": report["status"], "output_dir": str(output_dir), "summary": str(output_dir / "summary.json")}))
     return 0
 

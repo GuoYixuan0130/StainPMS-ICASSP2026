@@ -5,6 +5,10 @@ import numpy as np
 from stainpms.phase1_metrics import (
     attach_gt_error_classes,
     choose_edt_interior_points,
+    final_instance_overlap_table,
+    final_max_iou_by_gt,
+    max_iou_with_final_prediction,
+    strict_final_pairing,
     structural_errors,
     summarize_gt_rows,
 )
@@ -67,6 +71,35 @@ class Phase1MetricTests(unittest.TestCase):
         self.assertEqual(report["fp"], 2)
         self.assertEqual(report["split_unmatched_gt_count"], 1)
         self.assertEqual(report["boundary_localization_unmatched_gt_count"], 1)
+
+    def test_final_overlap_table_matches_reference_per_gt_scans(self):
+        gt = np.zeros((8, 9), dtype=np.int32)
+        gt[1:4, 1:4] = 1
+        gt[4:7, 2:6] = 2
+        gt[2:6, 6:8] = 3
+        pred = np.zeros_like(gt)
+        pred[1:4, 1:3] = 1
+        pred[1:4, 3:4] = 2
+        pred[4:7, 2:6] = 3
+        pred[2:6, 6:8] = 4
+        overlap = final_instance_overlap_table(gt, pred)
+        fast = final_max_iou_by_gt(overlap)
+        for gt_id in (1, 2, 3):
+            expected = max_iou_with_final_prediction(gt == gt_id, pred)
+            self.assertEqual(fast[gt_id][1], expected[1])
+            self.assertAlmostEqual(fast[gt_id][0], expected[0], places=12)
+
+        reference = structural_errors(gt, pred, 0.5)
+        cached = structural_errors(
+            gt,
+            pred,
+            0.5,
+            pairing_info=strict_final_pairing(gt, pred, 0.5),
+            overlap=overlap,
+            best_iou_by_gt=fast,
+        )
+        for key in ("tp", "fp", "fn", "split_unmatched_gt_count", "merge_unmatched_pred_count", "boundary_localization_unmatched_gt_count"):
+            self.assertEqual(cached[key], reference[key])
 
 
 if __name__ == "__main__":
