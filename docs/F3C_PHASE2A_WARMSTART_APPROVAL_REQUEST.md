@@ -49,7 +49,10 @@ Consequently:
 No checkpoint-bound command, manifest, or original training log was found in
 the reviewed repository/history or the inventoried AutoDL historical log
 directory. The public recipe describes a code path; it does not prove the
-origin of either delivered checkpoint.
+origin of either delivered checkpoint. In particular, the historical
+`epochs`, batch size, crop size, overlap, PMS start/refresh, initialization,
+and per-epoch timing cannot be attributed to these checkpoint bytes. Only the
+public example values in the table are known.
 
 ## 4. Checkpoint evidence
 
@@ -66,7 +69,9 @@ matches the legacy saver in `main.py`, which evaluates `test_loader` and saves
 `base_pq_epoch.pth`/`base_aji_epoch.pth` when those metrics improve. The
 MoNuSeg delivered filename also says `best_pq`. This is evidence of elevated
 test-metric-selection risk, not proof that a particular historical run used
-test14 or TNBC p9-p11. Exposure therefore remains `unknown`, and neither
+test14 or TNBC p7-p11. TNBC p7-p8 exposure and p9-p11 exposure are separately
+unknown; the MoNuSeg training manifest and test14 exposure are unknown.
+Exposure therefore remains `unknown`, and neither
 checkpoint may be used as clean or final-performance evidence. This is
 compatible with the manager's explicit permission to use unclear historical
 checkpoints for exploratory warm-start feasibility.

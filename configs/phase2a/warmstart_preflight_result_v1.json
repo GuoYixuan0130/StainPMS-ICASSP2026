@@ -37,8 +37,10 @@
       "rng_state": false,
       "manifest_evidence": false,
       "command_or_config_evidence": false,
+      "training_manifest": "unknown",
       "initialization_source": "unknown",
       "selection_history": "unknown_with_elevated_legacy_test_loader_selection_risk",
+      "p7_p8_exposure": "unknown",
       "p9_p11_exposure": "unknown",
       "evidence_class": "warm_start_exploratory_only"
     },
@@ -56,6 +58,7 @@
       "rng_state": false,
       "manifest_evidence": false,
       "command_or_config_evidence": false,
+      "training_manifest": "unknown",
       "initialization_source": "unknown_public_path_is_CA_SAM2_warm_start_but_not_checkpoint_proof",
       "selection_history": "unknown_with_elevated_legacy_test_loader_PQ_selection_risk",
       "test14_exposure": "unknown",
@@ -67,7 +70,9 @@
     "public_monuseg_recipe": "CA-SAM2 warm-start, 10 epochs, lr=1e-5, batch=1, crop=256, overlap=92, PMS start=0, refresh=20",
     "public_200_epoch_recipe": "TNBC generic-SAM2 scratch example, lr=1e-4, batch=1, crop=256, overlap=32, PMS start=50, refresh=20",
     "monuseg_58_2_gpu_hour_interpretation": "hypothetical 200-epoch scratch extrapolation, not the public MoNuSeg warm-start budget",
-    "checkpoint_bound_run_logs_found": false
+    "checkpoint_bound_run_logs_found": false,
+    "checkpoint_bound_historical_command_found": false,
+    "per_epoch_timing_log_found": false
   },
   "weight_warm_start_contract": {
     "load_checkpoint_fields": ["model", "model1"],

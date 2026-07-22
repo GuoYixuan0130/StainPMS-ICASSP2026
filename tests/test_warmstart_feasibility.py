@@ -74,6 +74,15 @@ class WarmStartFeasibilityTests(unittest.TestCase):
         self.assertIsNone(result["equal_budget"]["tnbc"]["C1_gpu_hours"])
         self.assertIsNone(result["equal_budget"]["monuseg"]["C1_gpu_hours"])
         self.assertFalse(result["proposed_C1"]["new_parameters"])
+        self.assertEqual(
+            result["checkpoint_findings"]["tnbc"]["p7_p8_exposure"], "unknown"
+        )
+        self.assertEqual(
+            result["checkpoint_findings"]["tnbc"]["p9_p11_exposure"], "unknown"
+        )
+        self.assertEqual(
+            result["checkpoint_findings"]["monuseg"]["test14_exposure"], "unknown"
+        )
         self.assertEqual(result["proposed_C1"]["prompt_group_weights"]["ordinary"], 1.0)
         self.assertEqual(
             result["proposed_C1"]["prompt_group_weights"]["PMS_residual"],
