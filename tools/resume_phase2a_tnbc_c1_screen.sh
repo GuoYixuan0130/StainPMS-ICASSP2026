@@ -20,21 +20,32 @@ if [[ ! -f "$c0_summary" ]]; then
   echo "C0 training_summary.json is required before C1-only recovery." >&2
   exit 2
 fi
-if [[ -e "$c1_summary" ]]; then
-  echo "C1 training_summary.json already exists; this recovery is not applicable." >&2
-  exit 2
-fi
 if [[ ! -f "$screen_root/diagnostics/epoch_000_shared/summary.json" ]]; then
   echo "Shared epoch-0 diagnosis is required and will not be recomputed." >&2
   exit 2
 fi
 
-resume_checkpoint="$(find "$screen_root/c1/checkpoints" -maxdepth 1 -type f -name 'epoch_*.pth' -printf '%f\n' | sort | tail -n 1)"
-if [[ -z "$resume_checkpoint" ]]; then
-  echo "No C1 recovery checkpoint found." >&2
-  exit 2
+recover_c1=true
+if [[ -f "$c1_summary" ]]; then
+  python - "$c1_summary" <<'PY'
+import json
+import pathlib
+import sys
+
+summary = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+if summary.get("status") != "complete" or len(summary.get("epochs", [])) != 5:
+    raise SystemExit("existing C1 summary is not a complete five-epoch formal screen")
+print("C1 is already complete; recovery driver will run only fairness, diagnosis, and summary.")
+PY
+  recover_c1=false
+else
+  resume_checkpoint="$(find "$screen_root/c1/checkpoints" -maxdepth 1 -type f -name 'epoch_*.pth' -printf '%f\n' | sort | tail -n 1)"
+  if [[ -z "$resume_checkpoint" ]]; then
+    echo "No C1 recovery checkpoint found." >&2
+    exit 2
+  fi
+  resume_checkpoint="$screen_root/c1/checkpoints/$resume_checkpoint"
 fi
-resume_checkpoint="$screen_root/c1/checkpoints/$resume_checkpoint"
 
 mkdir -p "$screen_root/reports"
 conda run -n agentseg python -m unittest discover \
@@ -49,6 +60,7 @@ initial_sha="44a3cb3e93051301d789e44f93769588abfa727d7a174b0270f55305ef023781"
 coverage_manifest="$smoke_root/tnbc/coverage_manifest.json"
 screen_config="configs/phase2a/tnbc_warmstart_screen_v1.json"
 
+if [[ "$recover_c1" == true ]]; then
 conda run -n agentseg python main.py \
   --dataset tnbc \
   --data_path "$data_path" \
@@ -75,6 +87,7 @@ conda run -n agentseg python main.py \
   --warmstart_output "$c1_summary" \
   --exp_name f3c_phase2a_tnbc_c1_formal5_recovery \
   2>&1 | tee "$screen_root/reports/c1_recovery_train.log"
+fi
 
 conda run -n agentseg python tools/verify_phase2a_tnbc_fairness.py \
   --c0-summary "$c0_summary" \
