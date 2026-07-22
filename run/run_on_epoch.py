@@ -73,7 +73,11 @@ def _decode_training_candidates(
     for the optional C1 auxiliary objective.
     """
     arm = str(getattr(cfgs, "warmstart_candidate_arm", "") or "").lower()
-    common_four_candidate_path = arm in {"c0", "c1"}
+    # All comparable Phase-2A arms take exactly the same four-native-token
+    # decoder forward. C0 preserves the original objective without creating
+    # an auxiliary candidate group; the experimental arms differ only in
+    # which approved extra loss term is enabled after this common forward.
+    common_four_candidate_path = arm in {"c0", "c1", "coverage_only", "quality_only"}
     if common_four_candidate_path:
         all_masks, all_quality, _, object_logits = net.sam_mask_decoder.predict_masks(
             image_embeddings=image_embed,
@@ -730,9 +734,15 @@ def train_on_epoch(
 
                 loss_dict = criterion(outputs1, targets, pred, values, gt_inst_masks, epoch)
                 candidate_groups = None
-                if str(getattr(cfgs, "warmstart_candidate_arm", "")).lower() == "c1":
+                if str(getattr(cfgs, "warmstart_candidate_arm", "")).lower() in {
+                    "c1",
+                    "coverage_only",
+                    "quality_only",
+                }:
                     if all_standard_low_res_masks is None or all_standard_quality is None:
-                        raise RuntimeError("C1 requires the common four-candidate decoder path")
+                        raise RuntimeError(
+                            "candidate-loss arms require the common four-candidate decoder path"
+                        )
                     all_standard_masks = F.interpolate(
                         all_standard_low_res_masks,
                         size=(cfgs.out_size, cfgs.out_size),
@@ -889,7 +899,7 @@ def train_on_epoch(
                             if candidate_groups is not None:
                                 if b_all_low_res_masks is None or b_all_quality is None:
                                     raise RuntimeError(
-                                        "C1 PMS prompts require the common four-candidate decoder path"
+                                        "candidate-loss PMS prompts require the common four-candidate decoder path"
                                     )
                                 b_all_masks = F.interpolate(
                                     b_all_low_res_masks,
@@ -1010,7 +1020,7 @@ def train_on_epoch(
 
                 if (
                     str(getattr(cfgs, "warmstart_candidate_arm", "")).lower()
-                    in {"legacy", "c0", "c1"}
+                    in {"legacy", "c0", "c1", "coverage_only", "quality_only"}
                     and runtime_stats is not None
                     and runtime_stats.get("capture_gradient_audit", True)
                 ):

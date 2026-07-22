@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "protocol_id": "tnbc_loss_ablation_pqbest_v1",
+  "approval_scope": "TNBC coverage-only and quality-only 5-epoch exploratory warm-start ablations; MoNuSeg is not approved.",
+  "reference": {
+    "historical_baseline_checkpoint_sha256": "44a3cb3e93051301d789e44f93769588abfa727d7a174b0270f55305ef023781",
+    "continued_training_control": "existing C0 in the approved C0/C1 screen; do not retrain or delete",
+    "full_joint_arm": "existing C1-full in the approved C0/C1 screen; do not retrain or delete"
+  },
+  "data": {
+    "train_protocol": "tnbc_stainpms_prepared_continuity_v1_phase1_train",
+    "development_protocol": "tnbc_stainpms_prepared_continuity_v1_phase1_development",
+    "train_patients": [1, 2, 3, 4, 5, 6],
+    "development_patients": [7, 8],
+    "sealed_patients": [9, 10, 11],
+    "coverage": "reuse the C0/C1 shared train-only coverage manifest without refresh"
+  },
+  "optimization": {
+    "seed": 3407,
+    "epochs": 5,
+    "attempted_crop_batches_per_epoch": 270,
+    "planned_attempted_crop_batches": 1350,
+    "optimizer": "AdamW",
+    "learning_rate": 1e-05,
+    "weight_decay": 0.0001,
+    "scheduler": "MultiStepLR",
+    "milestones": [80, 140, 200],
+    "gradient_clip_norm": 0.1,
+    "legacy_no_prompt_behavior": "no optimizer step and no replacement crop"
+  },
+  "arms": {
+    "coverage_only": {
+      "coverage_coefficient": 1.0,
+      "quality_coefficient": 0.0,
+      "candidate_coverage_tau": 0.1
+    },
+    "quality_only": {
+      "coverage_coefficient": 0.0,
+      "quality_coefficient": 1.0,
+      "candidate_coverage_tau": 0.1
+    }
+  },
+  "development_model_selection": {
+    "metric": "equal_patient_macro_PQ",
+    "patients": [7, 8],
+    "tie_break": "earlier_epoch_on_exact_equal_PQ",
+    "fixed_epoch_5_retained": true
+  },
+  "retention": {
+    "rolling_last": "one complete model/model1/optimizer/scheduler/RNG state, atomically replaced after each epoch",
+    "best_pq": "model/model1 weights only when development patient-macro PQ strictly improves",
+    "epoch_metrics": "all epochs retained as JSON/CSV and frozen diagnosis outputs",
+    "no_permanent_full_epoch_history": true,
+    "expected_persistent_storage_per_arm_gib": "about 9 (one full last state plus one weights-only best_pq state)",
+    "minimum_free_storage_before_one_arm_gib": 12
+  },
+  "evaluation": {
+    "evaluator": "strict_empty_handling_v1",
+    "match_iou": 0.5,
+    "instance_nms_iou": 0.5,
+    "point_nms_threshold": 12,
+    "report": ["dice1", "dice2", "aji", "dq", "sq", "pq", "best_candidate_iou", "best_candidate_ccr_at_0_5", "selected_candidate_iou", "selected_candidate_ccr_at_0_5", "selection_regret", "CCR_numerator_denominator", "paired_success_to_failure", "paired_failure_to_success"]
+  }
+}

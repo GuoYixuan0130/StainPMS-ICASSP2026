@@ -148,7 +148,14 @@ def parse_args():
     parser.add_argument(
         "--warmstart_stage",
         default="",
-        choices=["", "prepare_coverage", "smoke", "timing", "formal_tnbc_5epoch"],
+        choices=[
+            "",
+            "prepare_coverage",
+            "smoke",
+            "timing",
+            "formal_tnbc_5epoch",
+            "formal_tnbc_pqbest_ablation_5epoch",
+        ],
         help=(
             "Exploratory train-only C0/C1 stage. formal_tnbc_5epoch is the "
             "owner-approved fixed five-epoch TNBC screening run."
@@ -157,13 +164,19 @@ def parse_args():
     parser.add_argument(
         "--warmstart_candidate_arm",
         default="",
-        choices=["", "legacy", "c0", "c1"],
+        choices=["", "legacy", "c0", "c1", "coverage_only", "quality_only"],
         help=(
             "legacy is an equivalence reference only; c0/c1 share the explicit "
             "four-native-candidate decoder call."
         ),
     )
     parser.add_argument("--warmstart_output", default="", type=str)
+    parser.add_argument(
+        "--warmstart_dev_manifest",
+        default="",
+        type=str,
+        help="Frozen TNBC p7/p8 manifest used only by PQ-best development evaluation.",
+    )
     parser.add_argument(
         "--warmstart_resume_checkpoint",
         default="",

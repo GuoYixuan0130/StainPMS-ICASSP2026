@@ -4,6 +4,7 @@ import math
 import os
 import platform
 import random
+import shutil
 import subprocess
 import sys
 import time
@@ -861,7 +862,7 @@ def run_warmstart_smoke(
         int(runtime_stats.get("native_mask_token_count", 0)) == 4
         and int(runtime_stats.get("native_candidate_decoder_calls", 0)) > 0
     )
-    candidate_ok = arm != "c1" or "candidate_loss_audit" in runtime_stats
+    candidate_ok = arm in {"legacy", "c0"} or "candidate_loss_audit" in runtime_stats
     complete = (
         int(runtime_stats.get("optimizer_steps", 0)) == requested
         and skips == 0
@@ -1454,6 +1455,520 @@ def run_warmstart_formal_tnbc_5epoch(
     if int(runtime_stats.get("crop_batches_seen", 0)) != planned_attempted_crop_batches:
         raise RuntimeError("formal TNBC screen ended with incorrect attempted crop-batch count")
     _json_write_atomic(output, report)
+    print(json.dumps({"status": "complete", "output": str(output)}))
+    return report
+
+
+def _pqbest_state_declaration(
+    *,
+    checkpoint_path,
+    checkpoint_sha256,
+    arm,
+    train_manifest_identity,
+    development_manifest_identity,
+    coverage_identity,
+    screen_config_identity,
+    epoch,
+):
+    """Create the declaration required before a full state may be diagnosed.
+
+    The full `last` state includes optimizer and RNG objects, so consumers must
+    opt in to `weights_only=False`.  The declaration is deliberately written
+    before launching the read-only p7/p8 diagnosis, which verifies its hash.
+    """
+
+    return {
+        "schema_version": 1,
+        "dataset": "tnbc",
+        "classification": "historical_exploratory",
+        "checkpoint_path": str(Path(checkpoint_path).resolve()),
+        "checkpoint_sha256": checkpoint_sha256,
+        "selection_history": (
+            "owner-approved development PQ-best warm-start ablation; p7/p8 are "
+            "used only after the completed epoch for equal-patient-macro PQ selection"
+        ),
+        "training_manifest": train_manifest_identity,
+        "development_manifest": development_manifest_identity,
+        "p7_p8_exposure": "no optimizer updates; post-epoch fixed strict development diagnosis only",
+        "p9_p11_exposure": "none",
+        "test_metric_selection": "not applicable",
+        "allowed_phase1_use": (
+            "exploratory TNBC p7-p8 development checkpoint selection only; not a clean "
+            "baseline, final-performance, or sealed-test checkpoint"
+        ),
+        "source_note": "model/model1 weight warm-start only; fresh optimizer/scheduler/RNG; texture bank discarded",
+        "phase": "2A-warmstart-pqbest-ablation",
+        "protocol": "tnbc_loss_ablation_pqbest_v1",
+        "arm": arm,
+        "epoch": int(epoch),
+        "coverage": coverage_identity,
+        "screen_config": screen_config_identity,
+        "texture_memory_bank_list": [],
+        "embedded_texture_bank_loaded": False,
+        "coverage_refresh_events": [],
+    }
+
+
+def _run_pqbest_development_diagnosis(cfgs, *, checkpoint_path, declaration_path, epoch, output_dir):
+    """Invoke the frozen read-only p7/p8 diagnosis for one completed epoch."""
+
+    output_dir = Path(output_dir).resolve()
+    script = Path(__file__).resolve().parent / "tools" / "run_phase1_candidate_diagnosis.py"
+    command = [
+        sys.executable,
+        str(script),
+        "--dataset",
+        "tnbc",
+        "--manifest",
+        str(Path(cfgs.warmstart_dev_manifest).resolve()),
+        "--checkpoint",
+        str(Path(checkpoint_path).resolve()),
+        "--checkpoint-declaration",
+        str(Path(declaration_path).resolve()),
+        "--data-path",
+        str(Path(cfgs.data_path).resolve()),
+        "--output-dir",
+        str(output_dir),
+        "--scope-label",
+        f"tnbc_p7_8_{cfgs.warmstart_candidate_arm}_epoch_{epoch}",
+        "--seed",
+        str(cfgs.seed),
+        "--crop-size",
+        str(cfgs.crop_size),
+        "--out-size",
+        str(cfgs.out_size),
+        "--overlap",
+        str(cfgs.overlap),
+        "--load",
+        str(cfgs.load),
+        "--point-nms-thr",
+        str(cfgs.test_nms_thr),
+        "--instance-nms-iou",
+        "0.5",
+        "--prompt-chunk-size",
+        "64",
+        "--texture",
+        "--context",
+        "--discard-checkpoint-texture-bank",
+        "--checkpoint-has-training-state",
+        "--include-final-task-metrics",
+        "--drop-completed-resume-state",
+    ]
+    if output_dir.exists() and any(output_dir.iterdir()):
+        command.append("--resume")
+    print("[pqbest-development] " + " ".join(command))
+    subprocess.run(command, cwd=Path(__file__).resolve().parent, check=True)
+    from stainpms.phase2a_pqbest import diagnosis_epoch_record
+
+    return diagnosis_epoch_record(
+        arm=str(cfgs.warmstart_candidate_arm), epoch=int(epoch), directory=output_dir
+    )
+
+
+def _write_pqbest_epoch_csv(path, epochs):
+    import csv
+
+    fields = [
+        "epoch",
+        "patient_macro_pq",
+        "attempted_crop_batches",
+        "effective_optimizer_updates",
+        "no_prompt_batch_count",
+        "optimizer_updates",
+        "selected_as_best_pq",
+        "last_state_sha256",
+    ]
+    with Path(path).open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for record in epochs:
+            diagnosis = record["diagnosis"]
+            writer.writerow(
+                {
+                    "epoch": record["epoch"],
+                    "patient_macro_pq": diagnosis["patient_macro"]["task_metrics_image_macro"]["pq"],
+                    "attempted_crop_batches": record["attempted_crop_batches"],
+                    "effective_optimizer_updates": record["effective_optimizer_updates"],
+                    "no_prompt_batch_count": record["no_prompt_batch_count"],
+                    "optimizer_updates": record["optimizer_updates"],
+                    "selected_as_best_pq": record["selected_as_best_pq"],
+                    "last_state_sha256": record["last_state_sha256"],
+                }
+            )
+
+
+def run_warmstart_formal_tnbc_pqbest_ablation_5epoch(
+    cfgs,
+    args,
+    train_dataset,
+    train_loader,
+    model1,
+    model1_encoder,
+    net,
+    criterion,
+    optimizer,
+    scheduler,
+    device,
+    coverage_identity,
+    train_manifest_identity,
+):
+    """Run one low-storage, development-PQ-best TNBC loss-ablation arm.
+
+    Exactly one complete training state is retained for recovery.  Each epoch
+    is diagnosed on p7/p8 before `best_pq` is atomically replaced only on a
+    strict equal-patient-macro PQ improvement.  Thus no model-selection state
+    leaks into the train-only optimizer process and no five-state checkpoint
+    archive is produced.
+    """
+
+    from stainpms.phase2a_pqbest import choose_pq_best
+
+    output = Path(cfgs.warmstart_output).resolve()
+    output_dir = output.parent
+    state_dir = output_dir / "checkpoints"
+    diagnostics_dir = output_dir / "diagnostics"
+    best_dir = output_dir / "best_pq"
+    progress_path = output_dir / "epoch_metrics.json"
+    last_state_path = state_dir / "last_complete_state.pth"
+    last_declaration_path = state_dir / "last_complete_state.json"
+    best_weights_path = best_dir / "model_model1_weights.pth"
+    best_declaration_path = best_dir / "declaration.json"
+    attempted_per_epoch = 270
+    planned_attempted = 1350
+    arm = str(cfgs.warmstart_candidate_arm)
+    if len(train_dataset) != 30:
+        raise RuntimeError("PQ-best TNBC ablation requires exactly 30 p1-p6 images")
+    if output.exists():
+        raise FileExistsError(f"PQ-best ablation training summary already exists: {output}")
+
+    # One arm retains one ~6 GiB full optimizer/RNG state and one ~3 GiB
+    # model/model1-only PQ-best state. Atomic replacement briefly needs one
+    # additional object, so fail before training if the current filesystem
+    # cannot safely complete this arm without touching any existing artifact.
+    available_gib = shutil.disk_usage(output_dir.parent).free / (1024**3)
+    required_gib = 12.0
+    if available_gib < required_gib:
+        raise RuntimeError(
+            f"PQ-best ablation requires at least {required_gib:.1f} GiB free for one arm's "
+            f"rolling last and best_pq retention; only {available_gib:.2f} GiB is available"
+        )
+
+    resume_arg = str(getattr(cfgs, "warmstart_resume_checkpoint", "") or "")
+    epoch_records = []
+    runtime_stats = new_timing_runtime_stats()
+    runtime_stats["record_no_prompt_batches"] = True
+    start_epoch = 0
+    recovery = {"resumed": False}
+    if resume_arg:
+        resume_path = Path(resume_arg).resolve()
+        if resume_path != last_state_path or not resume_path.is_file():
+            raise RuntimeError("PQ-best recovery accepts only this arm's last_complete_state.pth")
+        if not progress_path.is_file() or not last_declaration_path.is_file():
+            raise RuntimeError("PQ-best recovery requires retained epoch metrics and last declaration")
+        state = torch.load(resume_path, map_location="cpu", weights_only=False)
+        expected = {
+            "phase": "2A-warmstart-pqbest-ablation",
+            "protocol": "tnbc_loss_ablation_pqbest_v1",
+            "dataset": "tnbc",
+            "arm": arm,
+            "train_manifest": train_manifest_identity,
+            "development_manifest": getattr(cfgs, "warmstart_dev_manifest_identity"),
+            "coverage": coverage_identity,
+            "screen_config": getattr(cfgs, "warmstart_screen_config_identity"),
+            "texture_memory_bank_list": [],
+            "embedded_texture_bank_loaded": False,
+            "coverage_refresh_events": [],
+        }
+        mismatched = {
+            name: (state.get(name), expected_value)
+            for name, expected_value in expected.items()
+            if state.get(name) != expected_value
+        }
+        if mismatched:
+            raise RuntimeError(f"PQ-best recovery provenance mismatch: {mismatched}")
+        progress = json.loads(progress_path.read_text(encoding="utf-8"))
+        epoch_records = list(progress.get("epochs", []))
+        completed = int(state.get("epoch", -1))
+        if completed < 1 or completed >= 5 or len(epoch_records) != completed:
+            raise RuntimeError("PQ-best recovery requires a completed contiguous epoch 1--4 history")
+        if [int(record.get("epoch", -1)) for record in epoch_records] != list(range(1, completed + 1)):
+            raise RuntimeError("PQ-best recovery epoch records are not contiguous")
+        if sha256_file(resume_path) != epoch_records[-1].get("last_state_sha256"):
+            raise RuntimeError("PQ-best recovery last-state hash does not match epoch metrics")
+        net.load_state_dict(state["model"])
+        model1.load_state_dict(state["model1"])
+        optimizer.load_state_dict(state["optimizer"])
+        scheduler.load_state_dict(state["scheduler"])
+        _restore_rng_state(state["rng_state"])
+        runtime_stats = dict(state["runtime_stats"])
+        start_epoch = completed
+        recovery = {
+            "resumed": True,
+            "resume_checkpoint_path": str(resume_path),
+            "resume_checkpoint_sha256": sha256_file(resume_path),
+            "resumed_after_epoch": completed,
+            "restored_fields": ["model", "model1", "optimizer", "scheduler", "rng_state"],
+        }
+    else:
+        occupied = [path for path in (state_dir, diagnostics_dir, best_dir) if path.exists() and any(path.iterdir())]
+        if occupied or progress_path.exists():
+            raise FileExistsError(
+                "PQ-best output directory already contains state, diagnostics, best weights, or metrics; "
+                "use an explicit last-state recovery or a new output directory"
+            )
+        state_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        best_dir.mkdir(parents=True, exist_ok=True)
+
+    coverage_before = dict(coverage_identity)
+    cuda_index = _cuda_device_index(device) if torch.cuda.is_available() else None
+    peak_allocated_mib = 0.0
+    peak_reserved_mib = 0.0
+    started = time.perf_counter()
+    for epoch in range(start_epoch, 5):
+        crop_before = int(runtime_stats.get("crop_batches_seen", 0))
+        update_before = int(runtime_stats.get("optimizer_steps", 0))
+        no_prompt_before = int(runtime_stats.get("no_prompt_batch_count", 0))
+        position_before = len(runtime_stats.get("no_prompt_batches", []))
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize(cuda_index)
+            torch.cuda.reset_peak_memory_stats(cuda_index)
+        epoch_started = time.perf_counter()
+        losses = train_on_epoch(
+            cfgs, model1, model1_encoder, net, train_loader, criterion, optimizer,
+            epoch, [], device, runtime_stats=runtime_stats,
+        )
+        if torch.cuda.is_available():
+            torch.cuda.synchronize(cuda_index)
+        epoch_seconds = time.perf_counter() - epoch_started
+        if not losses or not all(np.isfinite(float(value)) for value in losses.values()):
+            raise RuntimeError(f"PQ-best ablation epoch {epoch + 1} has empty or non-finite losses")
+        skipped = sum(int(runtime_stats.get(key, 0)) for key in ("shape_skips", "nonfinite_loss_skips", "nonfinite_gradient_skips"))
+        attempted = int(runtime_stats.get("crop_batches_seen", 0)) - crop_before
+        updates = int(runtime_stats.get("optimizer_steps", 0)) - update_before
+        no_prompt = int(runtime_stats.get("no_prompt_batch_count", 0)) - no_prompt_before
+        positions = list(runtime_stats.get("no_prompt_batches", []))[position_before:]
+        positions_sha = hashlib.sha256(json.dumps(positions, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        if skipped or attempted != attempted_per_epoch or updates + no_prompt != attempted:
+            raise RuntimeError(
+                f"PQ-best crop-batch contract failed at epoch {epoch + 1}: attempted={attempted}/{attempted_per_epoch}, "
+                f"effective_updates={updates}, no_prompt={no_prompt}, other_skips={skipped}"
+            )
+        if int(runtime_stats.get("native_mask_token_count", 0)) != 4:
+            raise RuntimeError("PQ-best ablation did not use the required four native mask tokens")
+        scheduler.step()
+        epoch_peak_allocated = torch.cuda.max_memory_allocated(cuda_index) / (1024**2) if torch.cuda.is_available() else 0.0
+        epoch_peak_reserved = torch.cuda.max_memory_reserved(cuda_index) / (1024**2) if torch.cuda.is_available() else 0.0
+        peak_allocated_mib = max(peak_allocated_mib, epoch_peak_allocated)
+        peak_reserved_mib = max(peak_reserved_mib, epoch_peak_reserved)
+        state = {
+            "schema_version": 1,
+            "phase": "2A-warmstart-pqbest-ablation",
+            "protocol": "tnbc_loss_ablation_pqbest_v1",
+            "dataset": "tnbc",
+            "arm": arm,
+            "model": net.state_dict(),
+            "model1": model1.state_dict(),
+            "epoch": epoch + 1,
+            "optimizer_updates": int(runtime_stats.get("optimizer_steps", 0)),
+            "attempted_crop_batches": attempted,
+            "effective_optimizer_updates": updates,
+            "no_prompt_batch_count": no_prompt,
+            "no_prompt_batch_indices": positions,
+            "no_prompt_batch_indices_sha256": positions_sha,
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "rng_state": _capture_rng_state(),
+            "texture_memory_bank_list": [],
+            "embedded_texture_bank_loaded": False,
+            "coverage_refresh_events": [],
+            "train_manifest": train_manifest_identity,
+            "development_manifest": getattr(cfgs, "warmstart_dev_manifest_identity"),
+            "coverage": coverage_identity,
+            "screen_config": getattr(cfgs, "warmstart_screen_config_identity"),
+            "epoch_losses": {key: float(value) for key, value in losses.items()},
+            "epoch_runtime": {
+                "wall_seconds": epoch_seconds,
+                "peak_memory_allocated_mib": epoch_peak_allocated,
+                "peak_memory_reserved_mib": epoch_peak_reserved,
+            },
+            "runtime_stats": dict(runtime_stats),
+            "repository": _repository_identity(),
+            "command": list(sys.argv),
+        }
+        _torch_save_atomic(last_state_path, state)
+        state_sha = sha256_file(last_state_path)
+        declaration = _pqbest_state_declaration(
+            checkpoint_path=last_state_path,
+            checkpoint_sha256=state_sha,
+            arm=arm,
+            train_manifest_identity=train_manifest_identity,
+            development_manifest_identity=getattr(cfgs, "warmstart_dev_manifest_identity"),
+            coverage_identity=coverage_identity,
+            screen_config_identity=getattr(cfgs, "warmstart_screen_config_identity"),
+            epoch=epoch + 1,
+        )
+        _json_write_atomic(last_declaration_path, declaration)
+        diagnosis = _run_pqbest_development_diagnosis(
+            cfgs,
+            checkpoint_path=last_state_path,
+            declaration_path=last_declaration_path,
+            epoch=epoch + 1,
+            output_dir=diagnostics_dir / f"epoch_{epoch + 1:04d}",
+        )
+        candidate_record = {
+            "epoch": epoch + 1,
+            "optimizer_updates": int(runtime_stats.get("optimizer_steps", 0)),
+            "attempted_crop_batches": attempted,
+            "effective_optimizer_updates": updates,
+            "no_prompt_batch_count": no_prompt,
+            "no_prompt_batch_indices": positions,
+            "no_prompt_batch_indices_sha256": positions_sha,
+            "losses": state["epoch_losses"],
+            "runtime": state["epoch_runtime"],
+            "learning_rate_after_scheduler_step": float(optimizer.param_groups[0]["lr"]),
+            "scheduler_state_after_step": scheduler.state_dict(),
+            "last_state_path": str(last_state_path),
+            "last_state_sha256": state_sha,
+            "last_state_declaration": str(last_declaration_path),
+            "diagnosis": diagnosis,
+            "selected_as_best_pq": False,
+        }
+        prior_selection = choose_pq_best([record["diagnosis"] for record in epoch_records]) if epoch_records else None
+        current_pq = diagnosis["patient_macro"]["task_metrics_image_macro"]["pq"]
+        should_replace_best = prior_selection is None or current_pq > prior_selection["selected_patient_macro_pq"]
+        if should_replace_best:
+            weights_payload = {
+                "schema_version": 1,
+                "phase": "2A-warmstart-pqbest-ablation",
+                "protocol": "tnbc_loss_ablation_pqbest_v1",
+                "dataset": "tnbc",
+                "arm": arm,
+                "model": state["model"],
+                "model1": state["model1"],
+                "selected_epoch": epoch + 1,
+                "selected_patient_macro_pq": current_pq,
+                "source_last_state_sha256": state_sha,
+                "train_manifest": train_manifest_identity,
+                "development_manifest": getattr(cfgs, "warmstart_dev_manifest_identity"),
+                "coverage": coverage_identity,
+                "screen_config": getattr(cfgs, "warmstart_screen_config_identity"),
+                "texture_memory_bank_list": [],
+                "embedded_texture_bank_loaded": False,
+            }
+            _torch_save_atomic(best_weights_path, weights_payload)
+            best_sha = sha256_file(best_weights_path)
+            _json_write_atomic(
+                best_declaration_path,
+                {
+                    **_pqbest_state_declaration(
+                        checkpoint_path=best_weights_path,
+                        checkpoint_sha256=best_sha,
+                        arm=arm,
+                        train_manifest_identity=train_manifest_identity,
+                        development_manifest_identity=getattr(cfgs, "warmstart_dev_manifest_identity"),
+                        coverage_identity=coverage_identity,
+                        screen_config_identity=getattr(cfgs, "warmstart_screen_config_identity"),
+                        epoch=epoch + 1,
+                    ),
+                    "selection_history": "strictly highest observed equal-patient-macro PQ; exact ties retain the earlier epoch",
+                    "checkpoint_kind": "best_pq_model_and_model1_weights_only",
+                    "selected_patient_macro_pq": current_pq,
+                    "source_last_state_sha256": state_sha,
+                },
+            )
+            candidate_record["selected_as_best_pq"] = True
+            candidate_record["best_pq_weights_path"] = str(best_weights_path)
+            candidate_record["best_pq_weights_sha256"] = best_sha
+        epoch_records.append(candidate_record)
+        progress = {
+            "schema_version": 1,
+            "status": "in_progress",
+            "stage": "formal_tnbc_pqbest_ablation_5epoch",
+            "protocol": "tnbc_loss_ablation_pqbest_v1",
+            "arm": arm,
+            "train_manifest": train_manifest_identity,
+            "development_manifest": getattr(cfgs, "warmstart_dev_manifest_identity"),
+            "coverage": coverage_identity,
+            "screen_config": getattr(cfgs, "warmstart_screen_config_identity"),
+            "epochs": epoch_records,
+            "retention": {
+                "last_complete_state": str(last_state_path),
+                "best_pq_weights": str(best_weights_path),
+                "no_permanent_full_epoch_history": True,
+            },
+        }
+        _json_write_atomic(progress_path, progress)
+        _write_pqbest_epoch_csv(output_dir / "epoch_metrics.csv", epoch_records)
+        print(
+            f"[pqbest-ablation] arm={arm} epoch={epoch + 1}/5 attempted={attempted}/270 "
+            f"effective_updates={updates} cumulative_updates={state['optimizer_updates']} "
+            f"no_prompt={no_prompt} patient_macro_pq={current_pq:.6f} best_replaced={should_replace_best}"
+        )
+
+    coverage_after = verify_coverage_manifest(
+        Path(cfgs.warmstart_coverage_manifest),
+        train_manifest_identity=train_manifest_identity,
+        checkpoint_sha256=sha256_file(Path(cfgs.sam_ckpt).resolve()),
+        dataset="tnbc",
+    )
+    pq_selection = choose_pq_best([record["diagnosis"] for record in epoch_records])
+    report = _warmstart_base_report(cfgs, args, train_dataset, model1, net, optimizer, scheduler, coverage_identity)
+    report.update(
+        {
+            "status": "complete",
+            "stage": "formal_tnbc_pqbest_ablation_5epoch",
+            "protocol": "tnbc_loss_ablation_pqbest_v1",
+            "planned_epochs": 5,
+            "attempted_crop_batches_per_epoch": attempted_per_epoch,
+            "planned_attempted_crop_batches": planned_attempted,
+            "actual_attempted_crop_batches": int(runtime_stats.get("crop_batches_seen", 0)),
+            "actual_optimizer_updates": int(runtime_stats.get("optimizer_steps", 0)),
+            "actual_no_prompt_batch_count": int(runtime_stats.get("no_prompt_batch_count", 0)),
+            "coverage_refresh_events": [],
+            "coverage_integrity": {"before": coverage_before, "after": coverage_after},
+            "screen_config": getattr(cfgs, "warmstart_screen_config_identity"),
+            "development_manifest": getattr(cfgs, "warmstart_dev_manifest_identity"),
+            "epochs": epoch_records,
+            "pq_best_selection": pq_selection,
+            "retained_artifacts": {
+                "last_complete_state_path": str(last_state_path),
+                "last_complete_state_sha256": sha256_file(last_state_path),
+                "best_pq_weights_path": str(best_weights_path),
+                "best_pq_weights_sha256": sha256_file(best_weights_path),
+                "best_pq_declaration": str(best_declaration_path),
+                "epoch_metrics_json": str(progress_path),
+                "epoch_metrics_csv": str(output_dir / "epoch_metrics.csv"),
+                "no_permanent_full_epoch_history": True,
+            },
+            "recovery": recovery,
+            "runtime": {
+                **finalize_runtime_audits(runtime_stats),
+                "wall_seconds_this_process": time.perf_counter() - started,
+                "peak_memory_allocated_mib": peak_allocated_mib,
+                "peak_memory_reserved_mib": peak_reserved_mib,
+            },
+            "sealed_data_attestation": {
+                "development_loader_constructed_in_optimizer_process": False,
+                "development_diagnosis_invoked_after_each_completed_epoch": True,
+                "TNBC_p9_p11_accessed": False,
+                "MoNuSeg_test14_accessed": False,
+            },
+            "evaluation_plan": {
+                "each_epoch": "strict p7/p8 diagnosis from the rolling completed state",
+                "model_selection": "highest equal-patient-macro PQ; exact tie chooses earlier epoch",
+                "fixed_epoch_5_retained": True,
+            },
+        }
+    )
+    if int(runtime_stats.get("crop_batches_seen", 0)) != planned_attempted:
+        raise RuntimeError("PQ-best ablation ended with incorrect attempted crop-batch count")
+    _json_write_atomic(output, report)
+    progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    progress["status"] = "complete"
+    progress["training_summary"] = str(output)
+    _json_write_atomic(progress_path, progress)
     print(json.dumps({"status": "complete", "output": str(output)}))
     return report
 
@@ -2102,8 +2617,10 @@ def _validate_warmstart_preflight(cfgs, args):
         "sam_ckpt": cfgs.sam_ckpt,
         "warmstart_checkpoint_sha256": cfgs.warmstart_checkpoint_sha256,
     }
-    if stage == "formal_tnbc_5epoch":
+    if stage in {"formal_tnbc_5epoch", "formal_tnbc_pqbest_ablation_5epoch"}:
         required_paths["warmstart_screen_config"] = cfgs.warmstart_screen_config
+    if stage == "formal_tnbc_pqbest_ablation_5epoch":
+        required_paths["warmstart_dev_manifest"] = cfgs.warmstart_dev_manifest
     missing_paths = [name for name, value in required_paths.items() if not value]
     if missing_paths:
         raise ValueError("warm-start feasibility missing: " + ", ".join(missing_paths))
@@ -2112,8 +2629,8 @@ def _validate_warmstart_preflight(cfgs, args):
     if output_path.exists() and not resume_checkpoint:
         raise ValueError(f"warm-start output already exists: {output_path}")
     if resume_checkpoint:
-        if stage != "formal_tnbc_5epoch":
-            raise ValueError("warm-start recovery is permitted only for formal_tnbc_5epoch")
+        if stage not in {"formal_tnbc_5epoch", "formal_tnbc_pqbest_ablation_5epoch"}:
+            raise ValueError("warm-start recovery is permitted only for a formal TNBC screen")
         resume_path = Path(resume_checkpoint).resolve()
         expected_checkpoint_dir = output_path.parent / "checkpoints"
         if not resume_path.is_file():
@@ -2151,7 +2668,16 @@ def _validate_warmstart_preflight(cfgs, args):
             f"{expected_checkpoint_sha}"
         )
 
-    approved_epochs = 5 if stage == "formal_tnbc_5epoch" else 10
+    approved_epochs = (
+        5
+        if stage in {"formal_tnbc_5epoch", "formal_tnbc_pqbest_ablation_5epoch"}
+        else 10
+    )
+    arm = str(cfgs.warmstart_candidate_arm or "")
+    expected_auxiliary_coefficients = {
+        "coverage_only": (1.0, 0.0),
+        "quality_only": (0.0, 1.0),
+    }.get(arm, (1.0, 1.0))
     exact_values = {
         "seed": (int(cfgs.seed), 3407),
         "epochs": (int(cfgs.epochs), approved_epochs),
@@ -2196,11 +2722,11 @@ def _validate_warmstart_preflight(cfgs, args):
         "candidate_coverage_tau": (float(cfgs.candidate_coverage_tau), 0.1),
         "candidate_coverage_coefficient": (
             float(cfgs.candidate_coverage_coefficient),
-            1.0,
+            expected_auxiliary_coefficients[0],
         ),
         "candidate_quality_coefficient": (
             float(cfgs.candidate_quality_coefficient),
-            1.0,
+            expected_auxiliary_coefficients[1],
         ),
     }
     value_mismatches.update(
@@ -2241,7 +2767,6 @@ def _validate_warmstart_preflight(cfgs, args):
             "warm-start required settings are disabled: " + ", ".join(missing_bools)
         )
 
-    arm = str(cfgs.warmstart_candidate_arm or "")
     if stage == "prepare_coverage":
         if arm != "c0":
             raise ValueError("coverage preparation must declare arm c0")
@@ -2255,7 +2780,11 @@ def _validate_warmstart_preflight(cfgs, args):
         cache_dir.mkdir(parents=True, exist_ok=True)
         coverage_identity = None
     else:
-        allowed_arms = {"legacy", "c0", "c1"} if stage == "smoke" else {"c0", "c1"}
+        allowed_arms = (
+            {"legacy", "c0", "c1", "coverage_only", "quality_only"}
+            if stage == "smoke"
+            else {"c0", "c1", "coverage_only", "quality_only"}
+        )
         if arm not in allowed_arms:
             raise ValueError(
                 f"warm-start {stage} arm must be one of {sorted(allowed_arms)}"
@@ -2299,6 +2828,50 @@ def _validate_warmstart_preflight(cfgs, args):
             raise ValueError("formal_tnbc_5epoch cannot set warmstart smoke updates")
         if int(cfgs.phase2a_warmup_updates) != 10 or int(cfgs.phase2a_timed_updates) != 100:
             raise ValueError("formal_tnbc_5epoch requires the approved 10/100 timing provenance")
+    if stage == "formal_tnbc_pqbest_ablation_5epoch":
+        if str(cfgs.dataset) != "tnbc":
+            raise ValueError("formal_tnbc_pqbest_ablation_5epoch rejects all non-TNBC datasets")
+        if arm not in {"coverage_only", "quality_only"}:
+            raise ValueError("PQ-best ablation requires coverage_only or quality_only arm")
+        screen_config_path = Path(cfgs.warmstart_screen_config).resolve()
+        screen_config = json.loads(screen_config_path.read_text(encoding="utf-8"))
+        if screen_config.get("protocol_id") != "tnbc_loss_ablation_pqbest_v1":
+            raise ValueError("PQ-best ablation screen config protocol mismatch")
+        if int(screen_config.get("optimization", {}).get("planned_attempted_crop_batches", -1)) != 1350:
+            raise ValueError("PQ-best ablation must freeze 1350 attempted crop batches")
+        arm_config = screen_config.get("arms", {}).get(arm, {})
+        expected_coverage, expected_quality = expected_auxiliary_coefficients
+        if (
+            float(arm_config.get("coverage_coefficient", float("nan"))) != expected_coverage
+            or float(arm_config.get("quality_coefficient", float("nan"))) != expected_quality
+        ):
+            raise ValueError("PQ-best ablation arm coefficients differ from frozen config")
+        development_manifest_path = Path(cfgs.warmstart_dev_manifest).resolve()
+        development_manifest = json.loads(development_manifest_path.read_text(encoding="utf-8"))
+        records = development_manifest.get("records")
+        if not isinstance(records, list) or len(records) != 7:
+            raise ValueError("PQ-best development manifest must contain exactly seven p7-p8 records")
+        patients = {int(record.get("patient", -1)) for record in records}
+        if patients != {7, 8}:
+            raise ValueError("PQ-best development manifest must contain exactly TNBC patients 7 and 8")
+        if str(development_manifest.get("dataset", "")).lower() != "tnbc":
+            raise ValueError("PQ-best development manifest dataset mismatch")
+        cfgs.warmstart_dev_manifest_identity = {
+            "path": str(development_manifest_path),
+            "sha256": sha256_file(development_manifest_path),
+            "protocol_id": development_manifest.get("protocol_id"),
+            "record_count": len(records),
+            "patients": sorted(patients),
+        }
+        cfgs.warmstart_screen_config_identity = {
+            "path": str(screen_config_path),
+            "sha256": sha256_file(screen_config_path),
+            "protocol_id": screen_config["protocol_id"],
+        }
+        if int(cfgs.warmstart_smoke_updates) != 0:
+            raise ValueError("formal PQ-best ablation cannot set warmstart smoke updates")
+        if int(cfgs.phase2a_warmup_updates) != 10 or int(cfgs.phase2a_timed_updates) != 100:
+            raise ValueError("formal PQ-best ablation requires the approved 10/100 timing provenance")
     return train_manifest_identity, coverage_identity
 
 
@@ -2549,6 +3122,24 @@ def main():
 
     if cfgs.warmstart_stage == "formal_tnbc_5epoch":
         run_warmstart_formal_tnbc_5epoch(
+            cfgs,
+            args,
+            train_dataset,
+            train_loader,
+            model1,
+            model1_encoder,
+            net,
+            criterion,
+            optimizer,
+            scheduler,
+            device,
+            warmstart_coverage_identity,
+            warmstart_manifest_identity,
+        )
+        return
+
+    if cfgs.warmstart_stage == "formal_tnbc_pqbest_ablation_5epoch":
+        run_warmstart_formal_tnbc_pqbest_ablation_5epoch(
             cfgs,
             args,
             train_dataset,
