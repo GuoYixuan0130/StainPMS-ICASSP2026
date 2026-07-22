@@ -17,3 +17,15 @@ Run `tools/run_phase2a_tnbc_c0c1_screen.sh SMOKE_ROOT` on AutoDL. It:
 - applies the promotion rule only to epoch 5. It never starts epoch 10 or MoNuSeg.
 
 The generated result remains single-seed exploratory warm-start evidence. A pass indicates a stable exploratory signal, not final performance validation.
+
+## Interrupted C1 recovery
+
+If C0 completed and C1 stopped only after an epoch checkpoint was atomically saved,
+do not rerun C0 or restart C1 from the historical checkpoint. After restoring enough
+disk space, run `tools/resume_phase2a_tnbc_c1_screen.sh SCREEN_ROOT SMOKE_ROOT`.
+The recovery path accepts only the latest C1 checkpoint in that screen root and
+fails closed unless every prior C1 epoch is contiguous and has matching arm,
+train-manifest, coverage, screen-config, checkpoint declaration, no-prompt audit,
+optimizer, scheduler, and RNG provenance. It restores model, point head, optimizer,
+scheduler, and RNG, completes only the remaining epochs, then runs the unchanged
+fairness gate and fixed p7/p8 evaluation.

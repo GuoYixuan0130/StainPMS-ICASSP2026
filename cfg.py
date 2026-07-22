@@ -164,6 +164,15 @@ def parse_args():
         ),
     )
     parser.add_argument("--warmstart_output", default="", type=str)
+    parser.add_argument(
+        "--warmstart_resume_checkpoint",
+        default="",
+        type=str,
+        help=(
+            "Formal TNBC C0/C1 recovery checkpoint. Only resumes an interrupted "
+            "five-epoch screen after validating its frozen train-only contract."
+        ),
+    )
     parser.add_argument("--warmstart_checkpoint_sha256", default="", type=str)
     parser.add_argument("--warmstart_coverage_manifest", default="", type=str)
     parser.add_argument(

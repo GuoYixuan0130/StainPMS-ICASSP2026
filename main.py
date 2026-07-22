@@ -1079,28 +1079,169 @@ def run_warmstart_formal_tnbc_5epoch(
     output_dir = output.parent
     checkpoints_dir = output_dir / "checkpoints"
     declarations_dir = output_dir / "checkpoint_declarations"
-    if checkpoints_dir.exists() and any(checkpoints_dir.iterdir()):
-        raise FileExistsError(f"formal TNBC output already has checkpoints: {checkpoints_dir}")
-    checkpoints_dir.mkdir(parents=True, exist_ok=True)
-    declarations_dir.mkdir(parents=True, exist_ok=True)
 
     attempted_crop_batches_per_epoch = 270
     planned_attempted_crop_batches = 1350
     if len(train_dataset) != 30:
         raise RuntimeError("formal TNBC screen requires exactly 30 p1-p6 images")
-    runtime_stats = new_timing_runtime_stats()
-    runtime_stats["record_no_prompt_batches"] = True
-    epoch_records = []
+    resume_checkpoint_arg = str(getattr(cfgs, "warmstart_resume_checkpoint", "") or "")
+    recovery = None
+    if resume_checkpoint_arg:
+        resume_path = Path(resume_checkpoint_arg).resolve()
+        if resume_path.parent != checkpoints_dir:
+            raise RuntimeError("formal TNBC recovery checkpoint is outside this arm's checkpoint directory")
+        if output.exists():
+            raise RuntimeError("formal TNBC recovery refuses an already-complete training summary")
+        if not checkpoints_dir.is_dir() or not declarations_dir.is_dir():
+            raise RuntimeError("formal TNBC recovery requires existing checkpoint and declaration directories")
+
+        resume_state = torch.load(resume_path, map_location="cpu")
+        required = {
+            "phase": "2A-warmstart-formal-screen",
+            "protocol": "tnbc_c0_c1_5epoch_exploratory_v1",
+            "dataset": "tnbc",
+            "arm": str(cfgs.warmstart_candidate_arm),
+            "train_manifest": train_manifest_identity,
+            "coverage": coverage_identity,
+            "screen_config": getattr(cfgs, "warmstart_screen_config_identity", None),
+            "texture_memory_bank_list": [],
+            "embedded_texture_bank_loaded": False,
+            "coverage_refresh_events": [],
+        }
+        mismatched = {
+            name: (resume_state.get(name), expected)
+            for name, expected in required.items()
+            if resume_state.get(name) != expected
+        }
+        if mismatched:
+            raise RuntimeError(f"formal TNBC recovery provenance mismatch: {mismatched}")
+        resume_epoch = int(resume_state.get("epoch", -1))
+        if resume_epoch < 1 or resume_epoch >= 5:
+            raise RuntimeError("formal TNBC recovery checkpoint must be from completed epoch 1--4")
+        stored_paths = sorted(checkpoints_dir.glob("*.pth"))
+        if len(stored_paths) != resume_epoch or resume_path not in stored_paths:
+            raise RuntimeError(
+                "formal TNBC recovery requires exactly the contiguous pre-recovery epoch checkpoints"
+            )
+
+        runtime_stats = dict(resume_state.get("runtime_stats", {}))
+        if runtime_stats.get("record_no_prompt_batches") is not True:
+            raise RuntimeError("formal TNBC recovery checkpoint lacks no-prompt position auditing")
+        if int(runtime_stats.get("crop_batches_seen", -1)) != resume_epoch * attempted_crop_batches_per_epoch:
+            raise RuntimeError("formal TNBC recovery attempted-crop history is inconsistent")
+        if len(runtime_stats.get("no_prompt_batches", [])) != int(
+            runtime_stats.get("no_prompt_batch_count", -1)
+        ):
+            raise RuntimeError("formal TNBC recovery no-prompt history is inconsistent")
+
+        epoch_records = []
+        prior_states = []
+        for path in stored_paths:
+            state = resume_state if path == resume_path else torch.load(path, map_location="cpu")
+            state_mismatched = {
+                name: (state.get(name), expected)
+                for name, expected in required.items()
+                if state.get(name) != expected
+            }
+            if state_mismatched:
+                raise RuntimeError(
+                    f"formal TNBC recovery prior checkpoint provenance mismatch for {path}: "
+                    f"{state_mismatched}"
+                )
+            epoch_number = int(state.get("epoch", -1))
+            local_attempted = int(state.get("attempted_crop_batches", -1))
+            local_updates = int(state.get("effective_optimizer_updates", -1))
+            local_no_prompt = int(state.get("no_prompt_batch_count", -1))
+            local_positions = list(state.get("no_prompt_batch_indices", []))
+            if (
+                epoch_number != len(prior_states) + 1
+                or local_attempted != attempted_crop_batches_per_epoch
+                or local_updates + local_no_prompt != local_attempted
+                or len(local_positions) != local_no_prompt
+            ):
+                raise RuntimeError(f"formal TNBC recovery checkpoint contract failed: {path}")
+            calculated_positions_sha = hashlib.sha256(
+                json.dumps(local_positions, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            if calculated_positions_sha != state.get("no_prompt_batch_indices_sha256"):
+                raise RuntimeError(f"formal TNBC recovery no-prompt hash mismatch: {path}")
+            checkpoint_sha = sha256_file(path)
+            declaration_path = declarations_dir / f"{path.stem}.json"
+            if not declaration_path.is_file():
+                raise RuntimeError(f"formal TNBC recovery declaration is missing: {declaration_path}")
+            declaration = json.loads(declaration_path.read_text(encoding="utf-8"))
+            if declaration.get("checkpoint_sha256") != checkpoint_sha:
+                raise RuntimeError(f"formal TNBC recovery declaration hash mismatch: {declaration_path}")
+            epoch_records.append(
+                {
+                    "epoch": epoch_number,
+                    "optimizer_updates": int(state.get("optimizer_updates", -1)),
+                    "attempted_crop_batches": local_attempted,
+                    "effective_optimizer_updates": local_updates,
+                    "no_prompt_batch_count": local_no_prompt,
+                    "no_prompt_batch_indices": local_positions,
+                    "no_prompt_batch_indices_sha256": calculated_positions_sha,
+                    "checkpoint_path": str(path),
+                    "checkpoint_sha256": checkpoint_sha,
+                    "checkpoint_declaration": str(declaration_path),
+                    "losses": {
+                        key: float(value) for key, value in state.get("epoch_losses", {}).items()
+                    },
+                    "runtime": dict(state.get("epoch_runtime", {})),
+                    "learning_rate_after_scheduler_step": float(
+                        state.get("scheduler", {}).get("_last_lr", [optimizer.param_groups[0]["lr"]])[0]
+                    ),
+                    "scheduler_state_after_step": state.get("scheduler"),
+                }
+            )
+            prior_states.append(state)
+        if [record["epoch"] for record in epoch_records] != list(range(1, resume_epoch + 1)):
+            raise RuntimeError("formal TNBC recovery checkpoint epochs are not contiguous")
+        if int(resume_state.get("optimizer_updates", -1)) != int(
+            epoch_records[-1]["optimizer_updates"]
+        ):
+            raise RuntimeError("formal TNBC recovery optimizer-update history is inconsistent")
+
+        net.load_state_dict(resume_state["model"])
+        model1.load_state_dict(resume_state["model1"])
+        optimizer.load_state_dict(resume_state["optimizer"])
+        scheduler.load_state_dict(resume_state["scheduler"])
+        _restore_rng_state(resume_state["rng_state"])
+        start_epoch = resume_epoch
+        recovery = {
+            "resumed": True,
+            "resume_checkpoint_path": str(resume_path),
+            "resume_checkpoint_sha256": sha256_file(resume_path),
+            "resumed_after_epoch": resume_epoch,
+            "restored_fields": ["model", "model1", "optimizer", "scheduler", "rng_state"],
+            "preexisting_epoch_checkpoint_count": len(epoch_records),
+        }
+        del prior_states
+    else:
+        if checkpoints_dir.exists() and any(checkpoints_dir.iterdir()):
+            raise FileExistsError(f"formal TNBC output already has checkpoints: {checkpoints_dir}")
+        checkpoints_dir.mkdir(parents=True, exist_ok=True)
+        declarations_dir.mkdir(parents=True, exist_ok=True)
+        runtime_stats = new_timing_runtime_stats()
+        runtime_stats["record_no_prompt_batches"] = True
+        epoch_records = []
+        start_epoch = 0
     coverage_before = dict(coverage_identity)
     cuda_index = _cuda_device_index(device) if torch.cuda.is_available() else None
-    peak_allocated_mib = 0.0
-    peak_reserved_mib = 0.0
+    peak_allocated_mib = max(
+        [float(record.get("runtime", {}).get("peak_memory_allocated_mib", 0.0)) for record in epoch_records]
+        or [0.0]
+    )
+    peak_reserved_mib = max(
+        [float(record.get("runtime", {}).get("peak_memory_reserved_mib", 0.0)) for record in epoch_records]
+        or [0.0]
+    )
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.synchronize(cuda_index)
     training_started = time.perf_counter()
 
-    for epoch in range(5):
+    for epoch in range(start_epoch, 5):
         crop_batches_before = int(runtime_stats.get("crop_batches_seen", 0))
         optimizer_updates_before = int(runtime_stats.get("optimizer_steps", 0))
         no_prompt_before = int(runtime_stats.get("no_prompt_batch_count", 0))
@@ -1279,9 +1420,14 @@ def run_warmstart_formal_tnbc_5epoch(
             "coverage_integrity": {"before": coverage_before, "after": coverage_after},
             "screen_config": getattr(cfgs, "warmstart_screen_config_identity", None),
             "epochs": epoch_records,
+            "recovery": recovery,
             "runtime": {
                 **finalize_runtime_audits(runtime_stats),
-                "wall_seconds": time.perf_counter() - training_started,
+                "wall_seconds": sum(
+                    float(record.get("runtime", {}).get("wall_seconds", 0.0))
+                    for record in epoch_records
+                ),
+                "wall_seconds_this_process": time.perf_counter() - training_started,
                 "peak_memory_allocated_mib": peak_allocated_mib,
                 "peak_memory_reserved_mib": peak_reserved_mib,
             },
@@ -1955,8 +2101,22 @@ def _validate_warmstart_preflight(cfgs, args):
     if missing_paths:
         raise ValueError("warm-start feasibility missing: " + ", ".join(missing_paths))
     output_path = Path(cfgs.warmstart_output).resolve()
-    if output_path.exists():
+    resume_checkpoint = str(getattr(cfgs, "warmstart_resume_checkpoint", "") or "")
+    if output_path.exists() and not resume_checkpoint:
         raise ValueError(f"warm-start output already exists: {output_path}")
+    if resume_checkpoint:
+        if stage != "formal_tnbc_5epoch":
+            raise ValueError("warm-start recovery is permitted only for formal_tnbc_5epoch")
+        resume_path = Path(resume_checkpoint).resolve()
+        expected_checkpoint_dir = output_path.parent / "checkpoints"
+        if not resume_path.is_file():
+            raise ValueError(f"warm-start recovery checkpoint is missing: {resume_path}")
+        if resume_path.parent != expected_checkpoint_dir:
+            raise ValueError(
+                "warm-start recovery checkpoint must belong to the output's checkpoints directory"
+            )
+        if output_path.is_file():
+            raise ValueError("cannot recover a formal screen that already has training_summary.json")
     if not cfgs.verify_manifest_hashes:
         raise ValueError("warm-start feasibility requires manifest hash verification")
 
