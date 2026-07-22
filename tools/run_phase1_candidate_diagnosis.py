@@ -675,6 +675,15 @@ def parse_args() -> argparse.Namespace:
             "checkpoint embeds a bank; used by the approved C0/C1 warm start."
         ),
     )
+    parser.add_argument(
+        "--drop-completed-resume-state",
+        action="store_true",
+        help=(
+            "After a successful complete diagnosis, remove only its large "
+            "texture_memory_bank.pt resume cache. CSV/JSON metrics and all "
+            "per-image audit records remain intact."
+        ),
+    )
     parser.add_argument("--gpu-device", type=int, default=0)
     parser.add_argument("--resume", action="store_true", help="Resume only from this tool's manifest-matched per-image state.")
     parser.add_argument("--max-images", type=int, default=0, help="Nonzero produces a labelled smoke-only output, never a Phase 1 result.")
@@ -871,6 +880,19 @@ def main() -> int:
     write_csv(output_dir / "gt_instances.csv", gt_rows)
     write_csv(output_dir / "images.csv", image_records)
     write_json_atomic(output_dir / "images.json", image_records)
+    resume_state = {
+        "texture_memory_bank_path": str(texture_state_path),
+        "dropped_after_complete": False,
+        "freed_bytes": 0,
+    }
+    # The tensor bank is required only while a diagnosis is incomplete so it
+    # can resume with identical state.  After all images, rows, and summaries
+    # exist it is not an evaluation result and can be discarded explicitly to
+    # keep the formal C0/C1 artifact footprint bounded.
+    if args.drop_completed_resume_state and args.max_images == 0 and texture_state_path.is_file():
+        resume_state["freed_bytes"] = int(texture_state_path.stat().st_size)
+        texture_state_path.unlink()
+        resume_state["dropped_after_complete"] = True
     examples: dict[str, list[dict[str, Any]]] = {}
     for error_class in sorted({row["error_class"] for row in gt_rows}):
         candidates = sorted(
@@ -934,6 +956,7 @@ def main() -> int:
             "peak_memory_allocated_mib": torch.cuda.max_memory_allocated(cuda_device_index) / (1024 ** 2) if torch.cuda.is_available() else 0.0,
             "peak_memory_reserved_mib": torch.cuda.max_memory_reserved(cuda_device_index) / (1024 ** 2) if torch.cuda.is_available() else 0.0,
         },
+        "completed_resume_state": resume_state,
         "overall": aggregate_rows(gt_rows, image_records, thresholds, main_match_iou),
         "groups": group_summaries(gt_rows, image_records, thresholds, main_match_iou),
         "fixed_examples": examples,

@@ -12,6 +12,7 @@ Run `tools/run_phase2a_tnbc_c0c1_screen.sh SMOKE_ROOT` on AutoDL. It:
 - fails closed if the arms have different no-prompt positions, attempted crop counts, effective optimizer updates, or scheduler states;
 - saves model, point head, optimizer, scheduler, RNG, runtime state, checkpoint SHA256, and declaration after every epoch;
 - evaluates all ten immutable epoch checkpoints with the same frozen Phase 1 decoder, NMS, assembly, and strict evaluator;
+- retains the complete machine-readable diagnosis but removes each diagnosis's resumability-only `texture_memory_bank.pt` after it completes successfully;
 - creates p7, p8, equal patient-macro, and C1−C0 tables; and
 - applies the promotion rule only to epoch 5. It never starts epoch 10 or MoNuSeg.
 

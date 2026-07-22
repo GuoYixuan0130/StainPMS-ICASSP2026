@@ -75,6 +75,7 @@ diagnose_checkpoint() {
     --crop-size 256 --out-size 256 --overlap 32 --load unclockwise \
     --point-nms-thr 12 --instance-nms-iou 0.5 --prompt-chunk-size 64 \
     --texture --context --discard-checkpoint-texture-bank --include-final-task-metrics \
+    --drop-completed-resume-state \
     2>&1 | tee "$screen_root/reports/$(basename "$output").log"
 }
 
