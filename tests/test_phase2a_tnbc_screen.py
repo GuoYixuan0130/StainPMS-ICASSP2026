@@ -1,6 +1,11 @@
 import unittest
 
-from stainpms.phase2a_tnbc_screen import assess_epoch5, build_epoch_record, metric_deltas
+from stainpms.phase2a_tnbc_screen import (
+    assess_epoch5,
+    build_epoch_record,
+    metric_deltas,
+    selected_candidate_ccr_at_0_5,
+)
 
 
 def strict_metrics(aji, pq):
@@ -39,6 +44,17 @@ def record(arm, epoch, aji7, aji8, pq7, pq8, best7, best8):
 
 
 class TnbcScreenTests(unittest.TestCase):
+    def test_selected_ccr_counts_empty_csv_value_as_end_to_end_miss(self):
+        value = selected_candidate_ccr_at_0_5(
+            [
+                {"patient": "7", "auto_selected_candidate_iou": "0.6"},
+                {"patient": "7", "auto_selected_candidate_iou": ""},
+                {"patient": "7", "auto_selected_candidate_iou": None},
+            ],
+            7,
+        )
+        self.assertAlmostEqual(value, 1.0 / 3.0)
+
     def test_epoch5_requires_all_owner_frozen_rules(self):
         c0 = record("c0", 5, 0.40, 0.50, 0.60, 0.60, 0.50, 0.50)
         c1 = record("c1", 5, 0.41, 0.51, 0.598, 0.600, 0.51, 0.50)

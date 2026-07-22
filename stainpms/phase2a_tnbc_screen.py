@@ -90,8 +90,21 @@ def selected_candidate_ccr_at_0_5(gt_rows: list[dict[str, Any]], patient: int) -
     rows = [row for row in gt_rows if int(row.get("patient", -1)) == patient]
     if not rows:
         raise ValueError(f"no GT rows for TNBC patient {patient}")
-    values = [row.get("auto_selected_candidate_iou") for row in rows]
-    return float(sum(value is not None and float(value) >= 0.5 for value in values) / len(rows))
+    # CSV serialization represents absent automatic-point candidates as an
+    # empty string.  For end-to-end selected-candidate CCR that is a genuine
+    # non-coverage event, so it contributes zero while remaining in the GT
+    # denominator rather than raising or silently dropping the instance.
+    covered = 0
+    for row in rows:
+        value = row.get("auto_selected_candidate_iou")
+        try:
+            covered += int(value is not None and str(value).strip() != "" and float(value) >= 0.5)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "auto_selected_candidate_iou must be numeric, empty, or null; "
+                f"got {value!r} for patient {patient}"
+            )
+    return float(covered / len(rows))
 
 
 def build_epoch_record(
