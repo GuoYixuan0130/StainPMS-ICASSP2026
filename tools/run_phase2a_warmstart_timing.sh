@@ -12,6 +12,10 @@ fi
 mkdir -p "$timing_root/reports"
 cd "$repo_root"
 
+conda run -n agentseg python -m unittest discover \
+  -s tests -p 'test_candidate_coverage.py' -v \
+  2>&1 | tee "$timing_root/reports/test_candidate_coverage_timing_preflight.txt"
+
 python - "$smoke_root" <<'PY'
 import json
 import pathlib

@@ -933,11 +933,16 @@ def train_on_epoch(
                                 )
 
                 if candidate_groups is not None:
+                    collect_candidate_audit = bool(
+                        runtime_stats is not None
+                        and runtime_stats.get("collect_candidate_audit", True)
+                    )
                     stainpms_loss = sum(loss for loss in loss_dict.values())
                     coverage_loss, quality_loss, group_audit = (
                         aggregate_candidate_prompt_groups(
                             candidate_groups,
                             temperature=float(cfgs.candidate_coverage_tau),
+                            collect_audit=collect_candidate_audit,
                         )
                     )
                     weighted_coverage = (
@@ -948,15 +953,16 @@ def train_on_epoch(
                     )
                     loss_dict["loss_candidate_coverage"] = weighted_coverage
                     loss_dict["loss_candidate_quality"] = weighted_quality
-                    _record_candidate_loss_audit(
-                        runtime_stats,
-                        stainpms_loss=stainpms_loss,
-                        coverage_loss=coverage_loss,
-                        quality_loss=quality_loss,
-                        weighted_coverage=weighted_coverage,
-                        weighted_quality=weighted_quality,
-                        group_audit=group_audit,
-                    )
+                    if collect_candidate_audit:
+                        _record_candidate_loss_audit(
+                            runtime_stats,
+                            stainpms_loss=stainpms_loss,
+                            coverage_loss=coverage_loss,
+                            quality_loss=quality_loss,
+                            weighted_coverage=weighted_coverage,
+                            weighted_quality=weighted_quality,
+                            group_audit=group_audit,
+                        )
 
                 losses = sum(loss for loss in loss_dict.values())
                 metric_logger.update(lr=optimizer.param_groups[0]["lr"])
@@ -983,11 +989,12 @@ def train_on_epoch(
                 optimizer.zero_grad()
                 losses.backward()
 
-                if str(getattr(cfgs, "warmstart_candidate_arm", "")).lower() in {
-                    "legacy",
-                    "c0",
-                    "c1",
-                }:
+                if (
+                    str(getattr(cfgs, "warmstart_candidate_arm", "")).lower()
+                    in {"legacy", "c0", "c1"}
+                    and runtime_stats is not None
+                    and runtime_stats.get("capture_gradient_audit", True)
+                ):
                     _record_gradient_audit(runtime_stats, point_net, net)
 
                 trainable_params = [

@@ -91,6 +91,7 @@
     "smoke_optimizer_updates": [1, 2],
     "timing_warmup_updates": 10,
     "timing_measured_updates": 100,
+    "timing_gradient_and_softmin_diagnostic_cpu_sync": false,
     "formal_5epoch_training": false
   }
 }

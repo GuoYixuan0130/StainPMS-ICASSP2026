@@ -84,6 +84,7 @@ def candidate_prompt_losses(
     gt_masks: torch.Tensor,
     *,
     temperature: float = 0.1,
+    collect_softmin_audit: bool = True,
 ) -> dict[str, torch.Tensor]:
     """Compute frozen per-prompt candidate coverage and quality losses."""
     if candidate_logits.ndim != 4:
@@ -99,7 +100,11 @@ def candidate_prompt_losses(
         dice, focal = _per_prompt_dice_and_focal(candidate_logits, gt_masks)
         segmentation = (20.0 * dice + focal) / 21.0
         coverage = stable_softmin(segmentation, temperature)
-        gradient_weights = softmin_gradient_weights(segmentation, temperature)
+        gradient_weights = (
+            softmin_gradient_weights(segmentation, temperature)
+            if collect_softmin_audit
+            else None
+        )
 
         with torch.no_grad():
             predicted = candidate_logits.detach().float() > 0.0
@@ -113,21 +118,24 @@ def candidate_prompt_losses(
         ).pow(2.0)
         quality = quality_error.mean(dim=-1)
 
-    return {
+    result = {
         "dice_per_candidate": dice,
         "focal_per_candidate": focal,
         "segmentation_per_candidate": segmentation,
         "coverage_per_prompt": coverage,
-        "softmin_gradient_weights": gradient_weights,
         "hard_iou_target": hard_iou_target,
         "quality_per_prompt": quality,
     }
+    if gradient_weights is not None:
+        result["softmin_gradient_weights"] = gradient_weights
+    return result
 
 
 def aggregate_candidate_prompt_groups(
     groups: Mapping[str, Mapping[str, Any]],
     *,
     temperature: float = 0.1,
+    collect_audit: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, dict[str, Any]]]:
     """Average valid prompts within each group, then apply frozen weights.
 
@@ -161,14 +169,19 @@ def aggregate_candidate_prompt_groups(
                 quality_predictions,
                 gt_masks,
                 temperature=temperature,
+                collect_softmin_audit=collect_audit,
             )
             coverage_mean = result["coverage_per_prompt"].mean()
             quality_mean = result["quality_per_prompt"].mean()
-            weights = result["softmin_gradient_weights"].detach()
-            best_weight_mean = float(weights.max(dim=1).values.mean().cpu())
-            effective_candidate_count_mean = float(
-                (1.0 / weights.pow(2).sum(dim=1)).mean().cpu()
-            )
+            if collect_audit:
+                weights = result["softmin_gradient_weights"].detach()
+                best_weight_mean = float(weights.max(dim=1).values.mean().cpu())
+                effective_candidate_count_mean = float(
+                    (1.0 / weights.pow(2).sum(dim=1)).mean().cpu()
+                )
+            else:
+                best_weight_mean = None
+                effective_candidate_count_mean = None
         weighted_coverage = coverage_mean * alpha
         weighted_quality = quality_mean * alpha
         coverage_total = (
@@ -181,16 +194,17 @@ def aggregate_candidate_prompt_groups(
             if quality_total is None
             else quality_total + weighted_quality
         )
-        audit[name] = {
-            "valid_prompt_count": count,
-            "alpha": alpha,
-            "coverage_mean": float(coverage_mean.detach().cpu()),
-            "quality_mean": float(quality_mean.detach().cpu()),
-            "weighted_coverage": float(weighted_coverage.detach().cpu()),
-            "weighted_quality": float(weighted_quality.detach().cpu()),
-            "best_softmin_gradient_weight_mean": best_weight_mean,
-            "effective_candidate_count_mean": effective_candidate_count_mean,
-        }
+        if collect_audit:
+            audit[name] = {
+                "valid_prompt_count": count,
+                "alpha": alpha,
+                "coverage_mean": float(coverage_mean.detach().cpu()),
+                "quality_mean": float(quality_mean.detach().cpu()),
+                "weighted_coverage": float(weighted_coverage.detach().cpu()),
+                "weighted_quality": float(weighted_quality.detach().cpu()),
+                "best_softmin_gradient_weight_mean": best_weight_mean,
+                "effective_candidate_count_mean": effective_candidate_count_mean,
+            }
     if coverage_total is None or quality_total is None:
         raise ValueError("at least one declared prompt group is required")
     return coverage_total, quality_total, audit

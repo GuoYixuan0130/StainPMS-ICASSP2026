@@ -65,6 +65,10 @@ that same cache.
 components, gradient group norms, and fixed key-parameter gradient vectors. It
 also verifies C0/C1 checkpoint, manifest, coverage, seed, optimizer,
 scheduler, crop count, decoder call count, prompt count, and token mapping.
+Full gradient norms, key-gradient snapshots, and softmin diagnostic reductions
+are collected in smoke only. They are disabled during the timed interval to
+avoid contaminating seconds-per-update with CPU synchronization; this does not
+change the C0 or C1 training loss.
 
 ## Execution order
 

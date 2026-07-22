@@ -462,7 +462,10 @@ def run_phase2a_timing(
             f"{checkpoint_sha256} != {cfgs.phase2a_generic_checkpoint_sha256}"
         )
 
-    warmup_stats = {}
+    warmup_stats = {
+        "capture_gradient_audit": False,
+        "collect_candidate_audit": False,
+    }
     warmup_losses = train_on_epoch(
         cfgs,
         model1,
@@ -480,7 +483,10 @@ def run_phase2a_timing(
     if int(warmup_stats.get("optimizer_steps", 0)) != warmup_updates:
         raise RuntimeError(f"Phase 2A warm-up did not reach {warmup_updates} updates")
 
-    timed_stats = {}
+    timed_stats = {
+        "capture_gradient_audit": False,
+        "collect_candidate_audit": False,
+    }
     cuda_index = _cuda_device_index(device) if torch.cuda.is_available() else None
     if torch.cuda.is_available():
         torch.cuda.synchronize(cuda_index)
@@ -988,10 +994,6 @@ def run_warmstart_timing(
         and skips == 0
         and finite
         and int(timed_stats.get("native_mask_token_count", 0)) == 4
-        and (
-            str(cfgs.warmstart_candidate_arm) != "c1"
-            or "candidate_loss_audit" in timed_stats
-        )
     )
     report = _warmstart_base_report(
         cfgs,

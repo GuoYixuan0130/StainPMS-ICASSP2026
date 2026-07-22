@@ -118,6 +118,30 @@ class CandidateCoverageTests(unittest.TestCase):
         self.assertEqual(audit["pms_residual"]["coverage_mean"], 0.0)
         self.assertEqual(audit["pms_residual"]["quality_mean"], 0.0)
 
+    def test_disabling_audit_does_not_change_training_losses(self):
+        logits = torch.randn(2, 4, 8, 8, requires_grad=True)
+        quality = torch.randn(2, 4, requires_grad=True)
+        gt = torch.zeros(2, 8, 8)
+        gt[:, 1:6, 2:7] = 1
+        groups = {
+            "ordinary": {
+                "candidate_logits": logits,
+                "quality_predictions": quality,
+                "gt_masks": gt,
+                "alpha": 1.0,
+            }
+        }
+        coverage_audit, quality_audit, audit = self.aggregate_candidate_prompt_groups(
+            groups, collect_audit=True
+        )
+        coverage_fast, quality_fast, no_audit = self.aggregate_candidate_prompt_groups(
+            groups, collect_audit=False
+        )
+        torch.testing.assert_close(coverage_audit, coverage_fast)
+        torch.testing.assert_close(quality_audit, quality_fast)
+        self.assertTrue(audit)
+        self.assertEqual(no_audit, {})
+
     def test_zero_coefficients_exactly_degenerate_to_c0(self):
         parameter_c0 = torch.tensor(0.3, requires_grad=True)
         base_c0 = parameter_c0.square()
