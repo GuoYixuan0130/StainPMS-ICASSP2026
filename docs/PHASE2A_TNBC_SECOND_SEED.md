@@ -20,6 +20,7 @@ Each arm atomically retains only:
   GiB);
 - JSON/CSV metrics, declarations, logs, and read-only diagnosis summaries.
 
-No permanent `epoch_*.pth` archive is created.  The two-arm run is expected
-to use about 18--20 GiB persistently, including diagnostics, and each arm
-refuses to start below 12 GiB free space.
+No permanent `epoch_*.pth` archive is created. The two-arm run is expected to
+use about 18--20 GiB persistently, including diagnostics. Atomic replacement
+of a `last` state briefly adds about 6 GiB, so the sequential two-arm peak is
+about 24--26 GiB. Each arm refuses to start below 16 GiB free space.

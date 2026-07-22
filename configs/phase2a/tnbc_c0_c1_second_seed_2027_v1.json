@@ -62,6 +62,6 @@
     "no_permanent_full_epoch_history": true,
     "expected_persistent_storage_per_arm_gib": "about 9",
     "expected_two_arm_storage_gib": "about 18 to 20 including diagnostics and logs",
-    "minimum_free_storage_before_each_arm_gib": 12
+    "minimum_free_storage_before_each_arm_gib": 16
   }
 }

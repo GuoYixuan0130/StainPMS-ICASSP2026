@@ -31,6 +31,7 @@ class PqBestTests(unittest.TestCase):
         self.assertEqual(config["data"]["sealed_patients"], [9, 10, 11])
         self.assertTrue(config["retention"]["no_permanent_full_epoch_history"])
         self.assertEqual(config["retention"]["expected_two_arm_storage_gib"], "about 18 to 20 including diagnostics and logs")
+        self.assertEqual(config["retention"]["minimum_free_storage_before_each_arm_gib"], 16)
 
     def test_selects_highest_pq_and_earlier_exact_tie(self):
         selected = choose_pq_best([record(1, 0.5), record(2, 0.7), record(3, 0.7)])

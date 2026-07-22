@@ -1656,11 +1656,12 @@ def run_warmstart_formal_tnbc_pqbest_ablation_5epoch(
         raise FileExistsError(f"PQ-best ablation training summary already exists: {output}")
 
     # One arm retains one ~6 GiB full optimizer/RNG state and one ~3 GiB
-    # model/model1-only PQ-best state. Atomic replacement briefly needs one
-    # additional object, so fail before training if the current filesystem
-    # cannot safely complete this arm without touching any existing artifact.
+    # model/model1-only PQ-best state. Atomic replacement of the full `last`
+    # state briefly retains both generations, requiring roughly 15 GiB before
+    # diagnostics and filesystem overhead. Fail before training rather than
+    # risking an incomplete recovery state.
     available_gib = shutil.disk_usage(output_dir.parent).free / (1024**3)
-    required_gib = 12.0
+    required_gib = 16.0
     if available_gib < required_gib:
         raise RuntimeError(
             f"PQ-best ablation requires at least {required_gib:.1f} GiB free for one arm's "
