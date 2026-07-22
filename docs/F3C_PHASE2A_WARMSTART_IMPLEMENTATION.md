@@ -69,6 +69,9 @@ Full gradient norms, key-gradient snapshots, and softmin diagnostic reductions
 are collected in smoke only. They are disabled during the timed interval to
 avoid contaminating seconds-per-update with CPU synchronization; this does not
 change the C0 or C1 training loss.
+Timing reports contain an explicit `timing_audit_isolation` gate, and budget
+estimation rejects reports that do not prove both warm-up and timed intervals
+were free of these smoke-only audit records.
 
 ## Execution order
 

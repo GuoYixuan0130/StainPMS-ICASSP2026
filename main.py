@@ -28,6 +28,8 @@ from sam2_train.modeling.utils import collate_fn, set_seed
 from stainpms.warmstart_protocol import (
     build_coverage_manifest,
     finalize_runtime_audits,
+    new_timing_runtime_stats,
+    timing_audit_isolation,
     validate_train_manifest_identity,
     verify_coverage_manifest,
 )
@@ -927,7 +929,7 @@ def run_warmstart_timing(
 ):
     warmup_updates = int(cfgs.phase2a_warmup_updates)
     timed_updates = int(cfgs.phase2a_timed_updates)
-    warmup_stats = {}
+    warmup_stats = new_timing_runtime_stats()
     warmup_losses = train_on_epoch(
         cfgs,
         model1,
@@ -959,7 +961,7 @@ def run_warmstart_timing(
             f"updates={warmup_stats.get('optimizer_steps')} skips={warmup_skips} "
             f"finite={warmup_finite}"
         )
-    timed_stats = {}
+    timed_stats = new_timing_runtime_stats()
     cuda_index = _cuda_device_index(device) if torch.cuda.is_available() else None
     if torch.cuda.is_available():
         torch.cuda.synchronize(cuda_index)
@@ -989,11 +991,15 @@ def run_warmstart_timing(
     finite = bool(timed_losses) and all(
         np.isfinite(float(value)) for value in timed_losses.values()
     )
+    warmup_audit_isolation = timing_audit_isolation(warmup_stats)
+    timed_audit_isolation = timing_audit_isolation(timed_stats)
     complete = (
         int(timed_stats.get("optimizer_steps", 0)) == timed_updates
         and skips == 0
         and finite
         and int(timed_stats.get("native_mask_token_count", 0)) == 4
+        and warmup_audit_isolation["status"] == "pass"
+        and timed_audit_isolation["status"] == "pass"
     )
     report = _warmstart_base_report(
         cfgs,
@@ -1009,6 +1015,10 @@ def run_warmstart_timing(
         {
             "status": "complete" if complete else "issues_found",
             "stage": "timing",
+            "timing_audit_isolation": {
+                "warmup": warmup_audit_isolation,
+                "timed": timed_audit_isolation,
+            },
             "warmup": {
                 **finalize_runtime_audits(warmup_stats),
                 "requested_optimizer_updates": warmup_updates,

@@ -32,6 +32,11 @@ def timing_seconds(path: Path, dataset: str, arm: str) -> tuple[float, dict]:
         raise ValueError(f"incomplete timing artifact: {path}")
     if payload.get("training_configuration", {}).get("arm") != arm:
         raise ValueError(f"timing arm mismatch: {path}")
+    isolation = payload.get("timing_audit_isolation", {})
+    if isolation.get("warmup", {}).get("status") != "pass" or isolation.get(
+        "timed", {}
+    ).get("status") != "pass":
+        raise ValueError(f"timing includes or does not attest diagnostic isolation: {path}")
     if payload.get("data", {}).get("coverage", {}).get("record_count") != (
         30 if dataset == "tnbc" else 37
     ):

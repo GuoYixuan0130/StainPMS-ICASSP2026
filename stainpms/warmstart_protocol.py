@@ -263,3 +263,31 @@ def finalize_runtime_audits(runtime_stats: dict[str, Any]) -> dict[str, Any]:
             for name, value in gradient.get("group_l2_sum", {}).items()
         }
     return result
+
+
+def new_timing_runtime_stats() -> dict[str, bool]:
+    """Create runtime counters with smoke-only synchronization disabled."""
+    return {
+        "capture_gradient_audit": False,
+        "collect_candidate_audit": False,
+    }
+
+
+def timing_audit_isolation(runtime_stats: dict[str, Any]) -> dict[str, Any]:
+    """Report whether timed updates avoided smoke-only diagnostic reductions."""
+    unexpected = [
+        key
+        for key in ("candidate_loss_audit", "gradient_audit")
+        if key in runtime_stats
+    ]
+    controls_disabled = (
+        runtime_stats.get("capture_gradient_audit") is False
+        and runtime_stats.get("collect_candidate_audit") is False
+    )
+    passed = controls_disabled and not unexpected
+    return {
+        "status": "pass" if passed else "fail",
+        "capture_gradient_audit": runtime_stats.get("capture_gradient_audit"),
+        "collect_candidate_audit": runtime_stats.get("collect_candidate_audit"),
+        "unexpected_audit_records": unexpected,
+    }

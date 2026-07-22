@@ -6,6 +6,8 @@ from pathlib import Path
 from stainpms.warmstart_protocol import (
     MONUSEG_TRAIN37_SAMPLE_IDS,
     build_coverage_manifest,
+    new_timing_runtime_stats,
+    timing_audit_isolation,
     validate_train_manifest_identity,
     verify_coverage_manifest,
 )
@@ -22,6 +24,14 @@ class WarmStartProtocolTests(unittest.TestCase):
         }
         path.write_text(json.dumps(payload), encoding="utf-8")
         return path
+
+    def test_timing_runtime_disables_and_attests_smoke_only_audits(self):
+        runtime_stats = new_timing_runtime_stats()
+        self.assertEqual(timing_audit_isolation(runtime_stats)["status"], "pass")
+        runtime_stats["gradient_audit"] = {"step_count": 1}
+        result = timing_audit_isolation(runtime_stats)
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["unexpected_audit_records"], ["gradient_audit"])
 
     def test_tnbc_rejects_sealed_identity_before_file_access(self):
         with tempfile.TemporaryDirectory() as directory:

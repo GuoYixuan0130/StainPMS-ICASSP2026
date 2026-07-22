@@ -1,8 +1,10 @@
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
 from tools.audit_warmstart_checkpoints import parse_named_path as parse_checkpoint
+from tools.estimate_warmstart_budget import timing_seconds
 from tools.estimate_warmstart_feasibility_budget import estimate_c0_stages
 
 
@@ -10,6 +12,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class WarmStartFeasibilityTests(unittest.TestCase):
+    def test_warmstart_budget_rejects_timing_without_audit_isolation(self):
+        payload = {
+            "status": "complete",
+            "stage": "timing",
+            "training_configuration": {"arm": "c0"},
+            "data": {"coverage": {"record_count": 30}},
+            "timed": {"seconds_per_optimizer_update": 1.0},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "timing.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "diagnostic isolation"):
+                timing_seconds(path, "tnbc", "c0")
+
     def test_checkpoint_named_path_preserves_value_after_first_equals(self):
         name, path = parse_checkpoint("tnbc=checkpoints/model=name.pth")
         self.assertEqual(name, "tnbc")
