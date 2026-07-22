@@ -1469,6 +1469,9 @@ def _pqbest_state_declaration(
     coverage_identity,
     screen_config_identity,
     epoch,
+    phase,
+    protocol,
+    selection_history,
 ):
     """Create the declaration required before a full state may be diagnosed.
 
@@ -1483,10 +1486,7 @@ def _pqbest_state_declaration(
         "classification": "historical_exploratory",
         "checkpoint_path": str(Path(checkpoint_path).resolve()),
         "checkpoint_sha256": checkpoint_sha256,
-        "selection_history": (
-            "owner-approved development PQ-best warm-start ablation; p7/p8 are "
-            "used only after the completed epoch for equal-patient-macro PQ selection"
-        ),
+        "selection_history": selection_history,
         "training_manifest": train_manifest_identity,
         "development_manifest": development_manifest_identity,
         "p7_p8_exposure": "no optimizer updates; post-epoch fixed strict development diagnosis only",
@@ -1497,8 +1497,8 @@ def _pqbest_state_declaration(
             "baseline, final-performance, or sealed-test checkpoint"
         ),
         "source_note": "model/model1 weight warm-start only; fresh optimizer/scheduler/RNG; texture bank discarded",
-        "phase": "2A-warmstart-pqbest-ablation",
-        "protocol": "tnbc_loss_ablation_pqbest_v1",
+        "phase": phase,
+        "protocol": protocol,
         "arm": arm,
         "epoch": int(epoch),
         "coverage": coverage_identity,
@@ -1612,7 +1612,7 @@ def run_warmstart_formal_tnbc_pqbest_ablation_5epoch(
     coverage_identity,
     train_manifest_identity,
 ):
-    """Run one low-storage, development-PQ-best TNBC loss-ablation arm.
+    """Run one low-storage, development-PQ-best TNBC five-epoch arm.
 
     Exactly one complete training state is retained for recovery.  Each epoch
     is diagnosed on p7/p8 before `best_pq` is atomically replaced only on a
@@ -1623,6 +1623,20 @@ def run_warmstart_formal_tnbc_pqbest_ablation_5epoch(
 
     from stainpms.phase2a_pqbest import choose_pq_best
 
+    stage = str(cfgs.warmstart_stage)
+    protocol = str(cfgs.warmstart_screen_config_identity["protocol_id"])
+    phase = (
+        "2A-warmstart-pqbest-c0c1-second-seed"
+        if stage == "formal_tnbc_pqbest_repro_5epoch"
+        else "2A-warmstart-pqbest-ablation"
+    )
+    selection_history = (
+        "owner-approved C0/C1 second-seed reproduction; p7/p8 are used only after "
+        "the completed epoch for equal-patient-macro PQ checkpoint selection"
+        if stage == "formal_tnbc_pqbest_repro_5epoch"
+        else "owner-approved development PQ-best warm-start ablation; p7/p8 are used "
+        "only after the completed epoch for equal-patient-macro PQ selection"
+    )
     output = Path(cfgs.warmstart_output).resolve()
     output_dir = output.parent
     state_dir = output_dir / "checkpoints"
@@ -1667,8 +1681,8 @@ def run_warmstart_formal_tnbc_pqbest_ablation_5epoch(
             raise RuntimeError("PQ-best recovery requires retained epoch metrics and last declaration")
         state = torch.load(resume_path, map_location="cpu", weights_only=False)
         expected = {
-            "phase": "2A-warmstart-pqbest-ablation",
-            "protocol": "tnbc_loss_ablation_pqbest_v1",
+            "phase": phase,
+            "protocol": protocol,
             "dataset": "tnbc",
             "arm": arm,
             "train_manifest": train_manifest_identity,
@@ -1764,8 +1778,8 @@ def run_warmstart_formal_tnbc_pqbest_ablation_5epoch(
         peak_reserved_mib = max(peak_reserved_mib, epoch_peak_reserved)
         state = {
             "schema_version": 1,
-            "phase": "2A-warmstart-pqbest-ablation",
-            "protocol": "tnbc_loss_ablation_pqbest_v1",
+            "phase": phase,
+            "protocol": protocol,
             "dataset": "tnbc",
             "arm": arm,
             "model": net.state_dict(),
@@ -1808,6 +1822,9 @@ def run_warmstart_formal_tnbc_pqbest_ablation_5epoch(
             coverage_identity=coverage_identity,
             screen_config_identity=getattr(cfgs, "warmstart_screen_config_identity"),
             epoch=epoch + 1,
+            phase=phase,
+            protocol=protocol,
+            selection_history=selection_history,
         )
         _json_write_atomic(last_declaration_path, declaration)
         diagnosis = _run_pqbest_development_diagnosis(
@@ -1841,8 +1858,8 @@ def run_warmstart_formal_tnbc_pqbest_ablation_5epoch(
         if should_replace_best:
             weights_payload = {
                 "schema_version": 1,
-                "phase": "2A-warmstart-pqbest-ablation",
-                "protocol": "tnbc_loss_ablation_pqbest_v1",
+                "phase": phase,
+                "protocol": protocol,
                 "dataset": "tnbc",
                 "arm": arm,
                 "model": state["model"],
@@ -1871,6 +1888,9 @@ def run_warmstart_formal_tnbc_pqbest_ablation_5epoch(
                         coverage_identity=coverage_identity,
                         screen_config_identity=getattr(cfgs, "warmstart_screen_config_identity"),
                         epoch=epoch + 1,
+                        phase=phase,
+                        protocol=protocol,
+                        selection_history=selection_history,
                     ),
                     "selection_history": "strictly highest observed equal-patient-macro PQ; exact ties retain the earlier epoch",
                     "checkpoint_kind": "best_pq_model_and_model1_weights_only",
@@ -1885,8 +1905,8 @@ def run_warmstart_formal_tnbc_pqbest_ablation_5epoch(
         progress = {
             "schema_version": 1,
             "status": "in_progress",
-            "stage": "formal_tnbc_pqbest_ablation_5epoch",
-            "protocol": "tnbc_loss_ablation_pqbest_v1",
+            "stage": stage,
+            "protocol": protocol,
             "arm": arm,
             "train_manifest": train_manifest_identity,
             "development_manifest": getattr(cfgs, "warmstart_dev_manifest_identity"),
@@ -1918,8 +1938,8 @@ def run_warmstart_formal_tnbc_pqbest_ablation_5epoch(
     report.update(
         {
             "status": "complete",
-            "stage": "formal_tnbc_pqbest_ablation_5epoch",
-            "protocol": "tnbc_loss_ablation_pqbest_v1",
+            "stage": stage,
+            "protocol": protocol,
             "planned_epochs": 5,
             "attempted_crop_batches_per_epoch": attempted_per_epoch,
             "planned_attempted_crop_batches": planned_attempted,
@@ -2595,6 +2615,20 @@ def _validate_warmstart_preflight(cfgs, args):
     stage = str(cfgs.warmstart_stage or "")
     if not stage:
         return None, None
+    pqbest_stage_specs = {
+        "formal_tnbc_pqbest_ablation_5epoch": {
+            "protocol_id": "tnbc_loss_ablation_pqbest_v1",
+            "arms": {"coverage_only", "quality_only"},
+            "seed": 3407,
+            "label": "PQ-best ablation",
+        },
+        "formal_tnbc_pqbest_repro_5epoch": {
+            "protocol_id": "tnbc_c0_c1_second_seed_2027_v1",
+            "arms": {"c0", "c1"},
+            "seed": 2027,
+            "label": "PQ-best C0/C1 reproduction",
+        },
+    }
 
     incompatible = {
         "eval": bool(cfgs.eval),
@@ -2617,9 +2651,9 @@ def _validate_warmstart_preflight(cfgs, args):
         "sam_ckpt": cfgs.sam_ckpt,
         "warmstart_checkpoint_sha256": cfgs.warmstart_checkpoint_sha256,
     }
-    if stage in {"formal_tnbc_5epoch", "formal_tnbc_pqbest_ablation_5epoch"}:
+    if stage in {"formal_tnbc_5epoch", *pqbest_stage_specs}:
         required_paths["warmstart_screen_config"] = cfgs.warmstart_screen_config
-    if stage == "formal_tnbc_pqbest_ablation_5epoch":
+    if stage in pqbest_stage_specs:
         required_paths["warmstart_dev_manifest"] = cfgs.warmstart_dev_manifest
     missing_paths = [name for name, value in required_paths.items() if not value]
     if missing_paths:
@@ -2629,7 +2663,7 @@ def _validate_warmstart_preflight(cfgs, args):
     if output_path.exists() and not resume_checkpoint:
         raise ValueError(f"warm-start output already exists: {output_path}")
     if resume_checkpoint:
-        if stage not in {"formal_tnbc_5epoch", "formal_tnbc_pqbest_ablation_5epoch"}:
+        if stage not in {"formal_tnbc_5epoch", *pqbest_stage_specs}:
             raise ValueError("warm-start recovery is permitted only for a formal TNBC screen")
         resume_path = Path(resume_checkpoint).resolve()
         expected_checkpoint_dir = output_path.parent / "checkpoints"
@@ -2670,16 +2704,21 @@ def _validate_warmstart_preflight(cfgs, args):
 
     approved_epochs = (
         5
-        if stage in {"formal_tnbc_5epoch", "formal_tnbc_pqbest_ablation_5epoch"}
+        if stage in {"formal_tnbc_5epoch", *pqbest_stage_specs}
         else 10
     )
     arm = str(cfgs.warmstart_candidate_arm or "")
-    expected_auxiliary_coefficients = {
-        "coverage_only": (1.0, 0.0),
-        "quality_only": (0.0, 1.0),
-    }.get(arm, (1.0, 1.0))
+    if stage == "formal_tnbc_pqbest_repro_5epoch":
+        expected_auxiliary_coefficients = {"c0": (0.0, 0.0), "c1": (1.0, 1.0)}.get(
+            arm, (float("nan"), float("nan"))
+        )
+    else:
+        expected_auxiliary_coefficients = {
+            "coverage_only": (1.0, 0.0),
+            "quality_only": (0.0, 1.0),
+        }.get(arm, (1.0, 1.0))
     exact_values = {
-        "seed": (int(cfgs.seed), 3407),
+        "seed": (int(cfgs.seed), pqbest_stage_specs.get(stage, {}).get("seed", 3407)),
         "epochs": (int(cfgs.epochs), approved_epochs),
         "crop_size": (int(cfgs.crop_size), 256),
         "out_size": (int(cfgs.out_size), 256),
@@ -2828,24 +2867,25 @@ def _validate_warmstart_preflight(cfgs, args):
             raise ValueError("formal_tnbc_5epoch cannot set warmstart smoke updates")
         if int(cfgs.phase2a_warmup_updates) != 10 or int(cfgs.phase2a_timed_updates) != 100:
             raise ValueError("formal_tnbc_5epoch requires the approved 10/100 timing provenance")
-    if stage == "formal_tnbc_pqbest_ablation_5epoch":
+    if stage in pqbest_stage_specs:
+        stage_spec = pqbest_stage_specs[stage]
         if str(cfgs.dataset) != "tnbc":
-            raise ValueError("formal_tnbc_pqbest_ablation_5epoch rejects all non-TNBC datasets")
-        if arm not in {"coverage_only", "quality_only"}:
-            raise ValueError("PQ-best ablation requires coverage_only or quality_only arm")
+            raise ValueError(f"{stage} rejects all non-TNBC datasets")
+        if arm not in stage_spec["arms"]:
+            raise ValueError(f"{stage_spec['label']} requires one of {sorted(stage_spec['arms'])}")
         screen_config_path = Path(cfgs.warmstart_screen_config).resolve()
         screen_config = json.loads(screen_config_path.read_text(encoding="utf-8"))
-        if screen_config.get("protocol_id") != "tnbc_loss_ablation_pqbest_v1":
-            raise ValueError("PQ-best ablation screen config protocol mismatch")
+        if screen_config.get("protocol_id") != stage_spec["protocol_id"]:
+            raise ValueError(f"{stage_spec['label']} screen config protocol mismatch")
         if int(screen_config.get("optimization", {}).get("planned_attempted_crop_batches", -1)) != 1350:
-            raise ValueError("PQ-best ablation must freeze 1350 attempted crop batches")
+            raise ValueError(f"{stage_spec['label']} must freeze 1350 attempted crop batches")
         arm_config = screen_config.get("arms", {}).get(arm, {})
         expected_coverage, expected_quality = expected_auxiliary_coefficients
         if (
             float(arm_config.get("coverage_coefficient", float("nan"))) != expected_coverage
             or float(arm_config.get("quality_coefficient", float("nan"))) != expected_quality
         ):
-            raise ValueError("PQ-best ablation arm coefficients differ from frozen config")
+            raise ValueError(f"{stage_spec['label']} arm coefficients differ from frozen config")
         development_manifest_path = Path(cfgs.warmstart_dev_manifest).resolve()
         development_manifest = json.loads(development_manifest_path.read_text(encoding="utf-8"))
         records = development_manifest.get("records")
@@ -2869,9 +2909,9 @@ def _validate_warmstart_preflight(cfgs, args):
             "protocol_id": screen_config["protocol_id"],
         }
         if int(cfgs.warmstart_smoke_updates) != 0:
-            raise ValueError("formal PQ-best ablation cannot set warmstart smoke updates")
+            raise ValueError(f"{stage_spec['label']} cannot set warmstart smoke updates")
         if int(cfgs.phase2a_warmup_updates) != 10 or int(cfgs.phase2a_timed_updates) != 100:
-            raise ValueError("formal PQ-best ablation requires the approved 10/100 timing provenance")
+            raise ValueError(f"{stage_spec['label']} requires the approved 10/100 timing provenance")
     return train_manifest_identity, coverage_identity
 
 
@@ -3138,7 +3178,10 @@ def main():
         )
         return
 
-    if cfgs.warmstart_stage == "formal_tnbc_pqbest_ablation_5epoch":
+    if cfgs.warmstart_stage in {
+        "formal_tnbc_pqbest_ablation_5epoch",
+        "formal_tnbc_pqbest_repro_5epoch",
+    }:
         run_warmstart_formal_tnbc_pqbest_ablation_5epoch(
             cfgs,
             args,
