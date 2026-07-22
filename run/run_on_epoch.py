@@ -11,6 +11,7 @@ from tqdm import tqdm
 from run.utils import vis_inst_image
 from sam2_train.modeling.stats_utils import *
 from sam2_train.modeling.utils import *
+from stainpms.candidate_coverage import aggregate_candidate_prompt_groups
 from stainpms.evaluator import evaluate_instance_pair, write_evaluation_outputs
 
 
@@ -50,6 +51,207 @@ def _refine_sam_masks(cfgs, low_res_multimasks):
         mode="bilinear",
         align_corners=False,
     )[:, 0]
+
+
+def _decode_training_candidates(
+    cfgs,
+    net,
+    *,
+    image_embed,
+    sparse_prompt_embeddings,
+    dense_prompt_embeddings,
+    cell_nums,
+    high_res_feats,
+    runtime_stats,
+):
+    """Use one common four-token decoder call for approved C0 and C1 arms.
+
+    Legacy StainPMS computes all four native masks inside ``predict_masks`` and
+    then returns token 0 when ``multimask_output=False`` during training.  The
+    warm-start path makes that mapping explicit while retaining all candidates
+    for the optional C1 auxiliary objective.
+    """
+    arm = str(getattr(cfgs, "warmstart_candidate_arm", "") or "").lower()
+    common_four_candidate_path = arm in {"c0", "c1"}
+    if common_four_candidate_path:
+        all_masks, all_quality, _, object_logits = net.sam_mask_decoder.predict_masks(
+            image_embeddings=image_embed,
+            image_pe=net.sam_prompt_encoder.get_dense_pe(),
+            sparse_prompt_embeddings=sparse_prompt_embeddings,
+            dense_prompt_embeddings=dense_prompt_embeddings,
+            repeat_image=False,
+            cell_nums=cell_nums,
+            high_res_features=high_res_feats,
+        )
+        if all_masks.ndim != 4 or all_masks.shape[1] != 4:
+            raise RuntimeError(
+                f"warm-start candidate path expected four masks, got {tuple(all_masks.shape)}"
+            )
+        if all_quality.shape != all_masks.shape[:2]:
+            raise RuntimeError(
+                "warm-start quality shape does not match native mask candidates: "
+                f"{tuple(all_quality.shape)} vs {tuple(all_masks.shape[:2])}"
+            )
+        if runtime_stats is not None:
+            runtime_stats["native_candidate_decoder_calls"] = int(
+                runtime_stats.get("native_candidate_decoder_calls", 0)
+            ) + 1
+            runtime_stats["native_candidate_prompt_count"] = int(
+                runtime_stats.get("native_candidate_prompt_count", 0)
+            ) + int(all_masks.shape[0])
+            runtime_stats["native_mask_token_count"] = 4
+            runtime_stats["original_supervised_mask_token"] = 0
+        return (
+            all_masks[:, 0:1],
+            all_quality[:, 0:1],
+            object_logits,
+            all_masks,
+            all_quality,
+        )
+
+    selected_masks, selected_quality, _, object_logits = net.sam_mask_decoder(
+        image_embeddings=image_embed,
+        image_pe=net.sam_prompt_encoder.get_dense_pe(),
+        sparse_prompt_embeddings=sparse_prompt_embeddings,
+        dense_prompt_embeddings=dense_prompt_embeddings,
+        multimask_output=False,
+        repeat_image=False,
+        cell_nums=cell_nums,
+        high_res_features=high_res_feats,
+    )
+    return selected_masks, selected_quality, object_logits, None, None
+
+
+def _l2_gradient_norm(parameters):
+    squared = 0.0
+    found = False
+    for parameter in parameters:
+        if parameter.grad is None:
+            continue
+        found = True
+        squared += float(parameter.grad.detach().float().pow(2).sum().cpu())
+    return math.sqrt(squared) if found else 0.0
+
+
+def _small_gradient_snapshot(named_parameters, *, maximum_elements=4096):
+    candidates = []
+    for name, parameter in named_parameters:
+        if parameter.grad is None or parameter.numel() > maximum_elements:
+            continue
+        candidates.append((parameter.numel(), name, parameter))
+    if not candidates:
+        return None
+    _, name, parameter = sorted(candidates, key=lambda item: (item[0], item[1]))[0]
+    values = parameter.grad.detach().float().reshape(-1).cpu()
+    return {
+        "name": name,
+        "shape": list(parameter.shape),
+        "values": values.tolist(),
+        "l2_norm": float(torch.linalg.vector_norm(values)),
+        "max_abs": float(values.abs().max()) if values.numel() else 0.0,
+    }
+
+
+def _record_gradient_audit(runtime_stats, point_net, net):
+    if runtime_stats is None:
+        return
+    decoder = net.sam_mask_decoder
+    groups = {
+        "point_head": _l2_gradient_norm(point_net.parameters()),
+        "mask_decoder": _l2_gradient_norm(decoder.parameters()),
+        "quality_head": _l2_gradient_norm(decoder.iou_prediction_head.parameters()),
+    }
+    audit = runtime_stats.setdefault(
+        "gradient_audit",
+        {"step_count": 0, "group_l2_sum": {}, "group_l2_max": {}, "key_gradients": {}},
+    )
+    audit["step_count"] += 1
+    for name, value in groups.items():
+        audit["group_l2_sum"][name] = float(audit["group_l2_sum"].get(name, 0.0)) + value
+        audit["group_l2_max"][name] = max(
+            float(audit["group_l2_max"].get(name, 0.0)), value
+        )
+    if not audit["key_gradients"]:
+        snapshots = {
+            "point_head": _small_gradient_snapshot(point_net.named_parameters()),
+            "mask_token_embedding": _small_gradient_snapshot(
+                [("mask_tokens.weight", decoder.mask_tokens.weight)]
+            ),
+            "quality_head": _small_gradient_snapshot(
+                (
+                    (f"iou_prediction_head.{name}", parameter)
+                    for name, parameter in decoder.iou_prediction_head.named_parameters()
+                )
+            ),
+        }
+        audit["key_gradients"] = {
+            name: value for name, value in snapshots.items() if value is not None
+        }
+
+
+def _record_candidate_loss_audit(
+    runtime_stats,
+    *,
+    stainpms_loss,
+    coverage_loss,
+    quality_loss,
+    weighted_coverage,
+    weighted_quality,
+    group_audit,
+):
+    if runtime_stats is None:
+        return
+    total = stainpms_loss + weighted_coverage + weighted_quality
+    extra = weighted_coverage + weighted_quality
+    audit = runtime_stats.setdefault(
+        "candidate_loss_audit",
+        {
+            "step_count": 0,
+            "stainpms_loss_sum": 0.0,
+            "coverage_loss_sum": 0.0,
+            "quality_loss_sum": 0.0,
+            "weighted_extra_sum": 0.0,
+            "total_loss_sum": 0.0,
+            "extra_to_total_ratio_sum": 0.0,
+            "groups": {},
+        },
+    )
+    audit["step_count"] += 1
+    values = {
+        "stainpms_loss_sum": stainpms_loss,
+        "coverage_loss_sum": coverage_loss,
+        "quality_loss_sum": quality_loss,
+        "weighted_extra_sum": extra,
+        "total_loss_sum": total,
+    }
+    for key, value in values.items():
+        audit[key] += float(value.detach().float().cpu())
+    ratio = extra.detach().float() / total.detach().float().abs().clamp_min(1e-12)
+    audit["extra_to_total_ratio_sum"] += float(ratio.cpu())
+    for name, record in group_audit.items():
+        target = audit["groups"].setdefault(
+            name,
+            {
+                "valid_prompt_count": 0,
+                "coverage_prompt_weighted_sum": 0.0,
+                "quality_prompt_weighted_sum": 0.0,
+                "best_softmin_weight_prompt_weighted_sum": 0.0,
+                "effective_candidate_count_prompt_weighted_sum": 0.0,
+                "alpha": float(record["alpha"]),
+            },
+        )
+        count = int(record["valid_prompt_count"])
+        target["valid_prompt_count"] += count
+        target["coverage_prompt_weighted_sum"] += float(record["coverage_mean"]) * count
+        target["quality_prompt_weighted_sum"] += float(record["quality_mean"]) * count
+        if count and record["best_softmin_gradient_weight_mean"] is not None:
+            target["best_softmin_weight_prompt_weighted_sum"] += (
+                float(record["best_softmin_gradient_weight_mean"]) * count
+            )
+        if count and record["effective_candidate_count_mean"] is not None:
+            target["effective_candidate_count_prompt_weighted_sum"] += (
+                float(record["effective_candidate_count_mean"]) * count
+            )
 
 
 def _dump_eval_artifacts(
@@ -235,6 +437,8 @@ def train_on_epoch(
         runtime_stats.setdefault("shape_skips", 0)
         runtime_stats.setdefault("nonfinite_loss_skips", 0)
         runtime_stats.setdefault("nonfinite_gradient_skips", 0)
+        runtime_stats.setdefault("native_candidate_decoder_calls", 0)
+        runtime_stats.setdefault("native_candidate_prompt_count", 0)
     point_net.train()
     net.train()
     criterion.train()
@@ -403,15 +607,21 @@ def train_on_epoch(
                         batch_size=batch_size,
                     )
 
-                low_res_multimasks, iou_predictions, _, _ = net.sam_mask_decoder(
-                    image_embeddings=image_embed,
-                    image_pe=net.sam_prompt_encoder.get_dense_pe(),
+                (
+                    low_res_multimasks,
+                    iou_predictions,
+                    _,
+                    all_standard_low_res_masks,
+                    all_standard_quality,
+                ) = _decode_training_candidates(
+                    cfgs,
+                    net,
+                    image_embed=image_embed,
                     sparse_prompt_embeddings=se,
                     dense_prompt_embeddings=de,
-                    multimask_output=False,
-                    repeat_image=False,
                     cell_nums=cell_nums,
-                    high_res_features=high_res_feats,
+                    high_res_feats=high_res_feats,
+                    runtime_stats=runtime_stats,
                 )
                 values, _ = torch.max(iou_predictions, dim=1)
                 values_list = torch.split(values, cell_nums.tolist())
@@ -500,6 +710,45 @@ def train_on_epoch(
                     continue
 
                 loss_dict = criterion(outputs1, targets, pred, values, gt_inst_masks, epoch)
+                candidate_groups = None
+                if str(getattr(cfgs, "warmstart_candidate_arm", "")).lower() == "c1":
+                    if all_standard_low_res_masks is None or all_standard_quality is None:
+                        raise RuntimeError("C1 requires the common four-candidate decoder path")
+                    all_standard_masks = F.interpolate(
+                        all_standard_low_res_masks,
+                        size=(cfgs.out_size, cfgs.out_size),
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+                    candidate_groups = {
+                        "ordinary": {
+                            "candidate_logits": all_standard_masks,
+                            "quality_predictions": all_standard_quality,
+                            "gt_masks": gt_inst_masks,
+                            "alpha": 1.0,
+                        },
+                        "pms_residual": {
+                            "candidate_logits": all_standard_masks.new_empty(
+                                (0, 4, cfgs.out_size, cfgs.out_size)
+                            ),
+                            "quality_predictions": all_standard_quality.new_empty((0, 4)),
+                            "gt_masks": gt_inst_masks.new_empty(
+                                (0, cfgs.out_size, cfgs.out_size)
+                            ),
+                            "alpha": float(criterion.pms_loss_coef)
+                            * float(criterion.pms_residual_mask_weight),
+                        },
+                        "pms_preservation": {
+                            "candidate_logits": all_standard_masks.new_empty(
+                                (0, 4, cfgs.out_size, cfgs.out_size)
+                            ),
+                            "quality_predictions": all_standard_quality.new_empty((0, 4)),
+                            "gt_masks": gt_inst_masks.new_empty(
+                                (0, cfgs.out_size, cfgs.out_size)
+                            ),
+                            "alpha": float(criterion.pms_preserve_loss_coef),
+                        },
+                    }
 
                 pms_coef = getattr(criterion, "pms_loss_coef", 0.0)
                 if getattr(cfgs, "use_pms", False) and pms_coef > 0 and len(b_coords_batch) == batch_size:
@@ -568,15 +817,21 @@ def train_on_epoch(
                                 masks=None,
                                 batch_size=batch_size,
                             )
-                        b_low_res_masks, b_iou_preds, _, b_object_score_logits = net.sam_mask_decoder(
-                            image_embeddings=image_embed,
-                            image_pe=net.sam_prompt_encoder.get_dense_pe(),
+                        (
+                            b_low_res_masks,
+                            b_iou_preds,
+                            b_object_score_logits,
+                            b_all_low_res_masks,
+                            b_all_quality,
+                        ) = _decode_training_candidates(
+                            cfgs,
+                            net,
+                            image_embed=image_embed,
                             sparse_prompt_embeddings=b_se,
                             dense_prompt_embeddings=b_de,
-                            multimask_output=False,
-                            repeat_image=False,
                             cell_nums=b_cell_nums,
-                            high_res_features=high_res_feats,
+                            high_res_feats=high_res_feats,
+                            runtime_stats=runtime_stats,
                         )
                         obj_logits = b_object_score_logits.squeeze(-1)
                         pms_object = F.binary_cross_entropy_with_logits(
@@ -611,6 +866,31 @@ def train_on_epoch(
                             )
                             if preserve_coef < 0:
                                 preserve_coef = pms_coef
+
+                            if candidate_groups is not None:
+                                if b_all_low_res_masks is None or b_all_quality is None:
+                                    raise RuntimeError(
+                                        "C1 PMS prompts require the common four-candidate decoder path"
+                                    )
+                                b_all_masks = F.interpolate(
+                                    b_all_low_res_masks,
+                                    size=(cfgs.out_size, cfgs.out_size),
+                                    mode="bilinear",
+                                    align_corners=False,
+                                )[pos_idx_mask]
+                                b_all_quality_pos = b_all_quality[pos_idx_mask]
+                                candidate_groups["pms_residual"] = {
+                                    "candidate_logits": b_all_masks[residual_pos_mask],
+                                    "quality_predictions": b_all_quality_pos[residual_pos_mask],
+                                    "gt_masks": b_gt_masks_cat[residual_pos_mask],
+                                    "alpha": residual_coef,
+                                }
+                                candidate_groups["pms_preservation"] = {
+                                    "candidate_logits": b_all_masks[preserve_pos_mask],
+                                    "quality_predictions": b_all_quality_pos[preserve_pos_mask],
+                                    "gt_masks": b_gt_masks_cat[preserve_pos_mask],
+                                    "alpha": preserve_coef,
+                                }
 
                             if residual_pos_mask.any():
                                 res_pred = b_pred_pos[residual_pos_mask]
@@ -652,6 +932,32 @@ def train_on_epoch(
                                     * criterion.pms_iou_weight
                                 )
 
+                if candidate_groups is not None:
+                    stainpms_loss = sum(loss for loss in loss_dict.values())
+                    coverage_loss, quality_loss, group_audit = (
+                        aggregate_candidate_prompt_groups(
+                            candidate_groups,
+                            temperature=float(cfgs.candidate_coverage_tau),
+                        )
+                    )
+                    weighted_coverage = (
+                        coverage_loss * float(cfgs.candidate_coverage_coefficient)
+                    )
+                    weighted_quality = (
+                        quality_loss * float(cfgs.candidate_quality_coefficient)
+                    )
+                    loss_dict["loss_candidate_coverage"] = weighted_coverage
+                    loss_dict["loss_candidate_quality"] = weighted_quality
+                    _record_candidate_loss_audit(
+                        runtime_stats,
+                        stainpms_loss=stainpms_loss,
+                        coverage_loss=coverage_loss,
+                        quality_loss=quality_loss,
+                        weighted_coverage=weighted_coverage,
+                        weighted_quality=weighted_quality,
+                        group_audit=group_audit,
+                    )
+
                 losses = sum(loss for loss in loss_dict.values())
                 metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
@@ -676,6 +982,13 @@ def train_on_epoch(
 
                 optimizer.zero_grad()
                 losses.backward()
+
+                if str(getattr(cfgs, "warmstart_candidate_arm", "")).lower() in {
+                    "legacy",
+                    "c0",
+                    "c1",
+                }:
+                    _record_gradient_audit(runtime_stats, point_net, net)
 
                 trainable_params = [
                     p for group in optimizer.param_groups for p in group["params"] if p.requires_grad

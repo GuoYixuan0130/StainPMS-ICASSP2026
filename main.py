@@ -25,6 +25,12 @@ from run.utils import create_logger, get_network, set_log_dir
 from sam2_train.modeling.criterion import build_criterion
 from sam2_train.modeling.dpa_p2pnet import build_model
 from sam2_train.modeling.utils import collate_fn, set_seed
+from stainpms.warmstart_protocol import (
+    build_coverage_manifest,
+    finalize_runtime_audits,
+    validate_train_manifest_identity,
+    verify_coverage_manifest,
+)
 
 
 def count_trainable_params(*modules):
@@ -218,8 +224,9 @@ def build_dataloaders(cfgs, args):
     )
     smoke_steps = int(cfgs.train_only_smoke_steps or 0)
     phase2a_timing = bool(cfgs.phase2a_timing_profile)
+    warmstart_train_only = bool(cfgs.warmstart_stage)
     phase2a_no_eval = bool(cfgs.phase2a_baseline and cfgs.phase2a_eval_policy == "none")
-    train_only_protocol = smoke_steps > 0 or phase2a_timing
+    train_only_protocol = smoke_steps > 0 or phase2a_timing or warmstart_train_only
     if train_only_protocol:
         if not cfgs.train_manifest:
             raise ValueError("train-only protocol requires --train_manifest")
@@ -594,7 +601,443 @@ def maybe_load_warm_start(cfgs, model1):
     if not has_point_head:
         return None
     load_ca_sam2_point_head_checkpoint(cfgs, model1)
+    if cfgs.warmstart_stage:
+        print(
+            "[warmstart] loaded model/model1 weights only; embedded texture bank discarded"
+        )
+        return None
     return load_ca_sam2_texture_bank(cfgs)
+
+
+def _repository_identity():
+    status_lines = [
+        line
+        for line in subprocess.check_output(
+            ["git", "status", "--short"], text=True
+        ).splitlines()
+        if line.strip()
+    ]
+    return {
+        "branch": subprocess.check_output(
+            ["git", "branch", "--show-current"], text=True
+        ).strip(),
+        "commit": subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True
+        ).strip(),
+        "dirty": bool(status_lines),
+        "dirty_files": status_lines,
+    }
+
+
+def _warmstart_training_configuration(cfgs, args, model1, net, optimizer, scheduler):
+    decoder = net.sam_mask_decoder
+    return {
+        "arm": str(cfgs.warmstart_candidate_arm),
+        "optimizer": {
+            "type": "AdamW",
+            "state_source": "fresh",
+            "learning_rate": float(optimizer.param_groups[0]["lr"]),
+            "weight_decay": float(optimizer.param_groups[0]["weight_decay"]),
+            "betas": list(optimizer.param_groups[0]["betas"]),
+            "eps": float(optimizer.param_groups[0]["eps"]),
+            "amsgrad": bool(optimizer.param_groups[0]["amsgrad"]),
+            "maximize": bool(optimizer.param_groups[0]["maximize"]),
+            "foreach": optimizer.param_groups[0].get("foreach"),
+            "capturable": bool(optimizer.param_groups[0].get("capturable", False)),
+            "differentiable": bool(
+                optimizer.param_groups[0].get("differentiable", False)
+            ),
+        },
+        "scheduler": {
+            "type": type(scheduler).__name__,
+            "state_source": "fresh",
+            "milestones": list(cfgs.lr_milestones),
+            "gamma": 0.3,
+            "last_epoch_without_step_calls": int(scheduler.last_epoch),
+            "step_calls_during_smoke_or_timing": 0,
+        },
+        "amp": {"enabled": False},
+        "gradient_clipping": {
+            "enabled": float(cfgs.clip_grad) > 0,
+            "max_norm": float(cfgs.clip_grad),
+            "audit_norm_position": "before_clipping",
+        },
+        "trainable_parameters": {
+            "point_head": count_trainable_params(model1),
+            "sam2": count_trainable_params(net),
+            "total": count_trainable_params(model1, net),
+            "image_encoder_policy": "frozen except prompt_generator",
+            "C1_new_parameters": 0,
+        },
+        "decoder": {
+            "native_mask_token_count": int(decoder.num_mask_tokens),
+            "legacy_and_C0_supervised_token": 0,
+            "C0_C1_common_forward": "sam_mask_decoder.predict_masks tokens 0..3",
+            "multimask_flag_difference_between_C0_C1": False,
+            "decoder_call_count_difference_between_C0_C1": False,
+        },
+        "objective": {
+            "stainpms_preserved": True,
+            "candidate_coverage_tau": float(cfgs.candidate_coverage_tau),
+            "candidate_coverage_coefficient": float(
+                cfgs.candidate_coverage_coefficient
+            ),
+            "candidate_quality_coefficient": float(
+                cfgs.candidate_quality_coefficient
+            ),
+            "pms_loss_coef": float(args.criterion.pms_loss_coef),
+            "pms_residual_mask_weight": float(
+                args.criterion.pms_residual_mask_weight
+            ),
+            "pms_preserve_loss_coef": float(args.criterion.pms_preserve_loss_coef),
+        },
+        "data_order": {
+            "shuffle": False,
+            "crop_batch_size": int(cfgs.b),
+            "seed": int(cfgs.seed),
+        },
+    }
+
+
+def run_warmstart_prepare_coverage(
+    cfgs,
+    args,
+    train_dataset,
+    model1,
+    model1_encoder,
+    net,
+    device,
+    train_manifest_identity,
+):
+    output = Path(cfgs.warmstart_output).resolve()
+    checkpoint_path = Path(cfgs.sam_ckpt).resolve()
+    checkpoint_sha = sha256_file(checkpoint_path)
+    started = time.perf_counter()
+    refresh_baseline_masks_inplace(
+        cfgs,
+        args,
+        train_dataset,
+        None,
+        model1,
+        model1_encoder,
+        net,
+        None,
+        -1,
+        device,
+    )
+    if torch.cuda.is_available():
+        torch.cuda.synchronize(_cuda_device_index(device))
+    elapsed = time.perf_counter() - started
+    report = build_coverage_manifest(
+        cache_dir=Path(cfgs.baseline_masks_dir),
+        train_manifest_identity=train_manifest_identity,
+        dataset=str(cfgs.dataset),
+        checkpoint_path=checkpoint_path,
+        checkpoint_sha256=checkpoint_sha,
+        wall_seconds=elapsed,
+        repository=_repository_identity(),
+        command=list(sys.argv),
+    )
+    _json_write_atomic(output, report)
+    print(json.dumps({"status": "complete", "coverage_manifest": str(output)}))
+    return report
+
+
+def _warmstart_base_report(
+    cfgs,
+    args,
+    train_dataset,
+    model1,
+    net,
+    optimizer,
+    scheduler,
+    coverage_identity,
+):
+    checkpoint_path = Path(cfgs.sam_ckpt).resolve()
+    return {
+        "schema_version": 1,
+        "phase": "2A-warmstart-feasibility",
+        "protocol": "native_candidate_C0_C1_train_only_v1",
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "command": list(sys.argv),
+        "repository": _repository_identity(),
+        "environment": {
+            "python": sys.version,
+            "torch": torch.__version__,
+            "torch_cuda": torch.version.cuda,
+            "cudnn": torch.backends.cudnn.version(),
+            "gpu": torch.cuda.get_device_name(_cuda_device_index(torch.device("cuda")))
+            if torch.cuda.is_available()
+            else None,
+        },
+        "initialization": {
+            "checkpoint_path": str(checkpoint_path),
+            "checkpoint_sha256": sha256_file(checkpoint_path),
+            "loaded_fields": ["model", "model1"],
+            "optimizer_scheduler_rng_loaded": False,
+            "embedded_texture_bank_loaded": False,
+            "evidence_class": "exploratory_weight_warm_start",
+        },
+        "data": {
+            "manifest_path": str(cfgs.train_manifest),
+            "manifest_sha256": train_dataset.manifest.get("manifest_sha256"),
+            "protocol_id": train_dataset.manifest.get("protocol_id"),
+            "record_count": len(train_dataset),
+            "hashes_verified": bool(cfgs.verify_manifest_hashes),
+            "coverage": coverage_identity,
+            "eval_manifest": None,
+        },
+        "training_configuration": _warmstart_training_configuration(
+            cfgs, args, model1, net, optimizer, scheduler
+        ),
+        "determinism": {
+            "seed": int(cfgs.seed),
+            "cudnn_deterministic": bool(torch.backends.cudnn.deterministic),
+            "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
+        },
+        "sealed_data_attestation": {
+            "development_loader_constructed": False,
+            "test_loader_constructed": False,
+            "TNBC_p7_p11_accessed": False,
+            "MoNuSeg_test14_accessed": False,
+        },
+    }
+
+
+def run_warmstart_smoke(
+    cfgs,
+    args,
+    train_dataset,
+    train_loader,
+    model1,
+    model1_encoder,
+    net,
+    criterion,
+    optimizer,
+    scheduler,
+    device,
+    coverage_identity,
+):
+    requested = int(cfgs.warmstart_smoke_updates)
+    runtime_stats = {}
+    cuda_index = _cuda_device_index(device) if torch.cuda.is_available() else None
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats(cuda_index)
+        torch.cuda.synchronize(cuda_index)
+    started = time.perf_counter()
+    losses = train_on_epoch(
+        cfgs,
+        model1,
+        model1_encoder,
+        net,
+        train_loader,
+        criterion,
+        optimizer,
+        0,
+        [],
+        device,
+        runtime_stats=runtime_stats,
+        max_optimizer_steps=requested,
+    )
+    if torch.cuda.is_available():
+        torch.cuda.synchronize(cuda_index)
+    elapsed = time.perf_counter() - started
+    finite = bool(losses) and all(np.isfinite(float(value)) for value in losses.values())
+    skips = sum(
+        int(runtime_stats.get(key, 0))
+        for key in ("shape_skips", "nonfinite_loss_skips", "nonfinite_gradient_skips")
+    )
+    arm = str(cfgs.warmstart_candidate_arm)
+    four_candidate_ok = arm == "legacy" or (
+        int(runtime_stats.get("native_mask_token_count", 0)) == 4
+        and int(runtime_stats.get("native_candidate_decoder_calls", 0)) > 0
+    )
+    candidate_ok = arm != "c1" or "candidate_loss_audit" in runtime_stats
+    complete = (
+        int(runtime_stats.get("optimizer_steps", 0)) == requested
+        and skips == 0
+        and finite
+        and four_candidate_ok
+        and candidate_ok
+    )
+    report = _warmstart_base_report(
+        cfgs,
+        args,
+        train_dataset,
+        model1,
+        net,
+        optimizer,
+        scheduler,
+        coverage_identity,
+    )
+    report.update(
+        {
+            "status": "complete" if complete else "issues_found",
+            "stage": "smoke",
+            "requested_optimizer_updates": requested,
+            "losses": {key: float(value) for key, value in losses.items()},
+            "runtime": {
+                **finalize_runtime_audits(runtime_stats),
+                "wall_seconds": elapsed,
+                "seconds_per_optimizer_update": elapsed / requested,
+                "peak_memory_allocated_mib": (
+                    torch.cuda.max_memory_allocated(cuda_index) / (1024**2)
+                    if torch.cuda.is_available()
+                    else 0.0
+                ),
+                "peak_memory_reserved_mib": (
+                    torch.cuda.max_memory_reserved(cuda_index) / (1024**2)
+                    if torch.cuda.is_available()
+                    else 0.0
+                ),
+            },
+            "numerical_gate": {
+                "losses_finite": finite,
+                "skipped_updates": skips,
+                "four_candidate_forward_verified": four_candidate_ok,
+                "candidate_audit_present_when_required": candidate_ok,
+            },
+        }
+    )
+    _json_write_atomic(Path(cfgs.warmstart_output).resolve(), report)
+    print(json.dumps({"status": report["status"], "output": cfgs.warmstart_output}))
+    return report
+
+
+def run_warmstart_timing(
+    cfgs,
+    args,
+    train_dataset,
+    train_loader,
+    model1,
+    model1_encoder,
+    net,
+    criterion,
+    optimizer,
+    scheduler,
+    device,
+    coverage_identity,
+):
+    warmup_updates = int(cfgs.phase2a_warmup_updates)
+    timed_updates = int(cfgs.phase2a_timed_updates)
+    warmup_stats = {}
+    warmup_losses = train_on_epoch(
+        cfgs,
+        model1,
+        model1_encoder,
+        net,
+        train_loader,
+        criterion,
+        optimizer,
+        0,
+        [],
+        device,
+        runtime_stats=warmup_stats,
+        max_optimizer_steps=warmup_updates,
+    )
+    warmup_skips = sum(
+        int(warmup_stats.get(key, 0))
+        for key in ("shape_skips", "nonfinite_loss_skips", "nonfinite_gradient_skips")
+    )
+    warmup_finite = bool(warmup_losses) and all(
+        np.isfinite(float(value)) for value in warmup_losses.values()
+    )
+    if (
+        int(warmup_stats.get("optimizer_steps", 0)) != warmup_updates
+        or warmup_skips != 0
+        or not warmup_finite
+    ):
+        raise RuntimeError(
+            "warm-start timing warm-up gate failed: "
+            f"updates={warmup_stats.get('optimizer_steps')} skips={warmup_skips} "
+            f"finite={warmup_finite}"
+        )
+    timed_stats = {}
+    cuda_index = _cuda_device_index(device) if torch.cuda.is_available() else None
+    if torch.cuda.is_available():
+        torch.cuda.synchronize(cuda_index)
+        torch.cuda.reset_peak_memory_stats(cuda_index)
+    started = time.perf_counter()
+    timed_losses = train_on_epoch(
+        cfgs,
+        model1,
+        model1_encoder,
+        net,
+        train_loader,
+        criterion,
+        optimizer,
+        0,
+        [],
+        device,
+        runtime_stats=timed_stats,
+        max_optimizer_steps=timed_updates,
+    )
+    if torch.cuda.is_available():
+        torch.cuda.synchronize(cuda_index)
+    elapsed = time.perf_counter() - started
+    skips = sum(
+        int(timed_stats.get(key, 0))
+        for key in ("shape_skips", "nonfinite_loss_skips", "nonfinite_gradient_skips")
+    )
+    finite = bool(timed_losses) and all(
+        np.isfinite(float(value)) for value in timed_losses.values()
+    )
+    complete = (
+        int(timed_stats.get("optimizer_steps", 0)) == timed_updates
+        and skips == 0
+        and finite
+        and int(timed_stats.get("native_mask_token_count", 0)) == 4
+        and (
+            str(cfgs.warmstart_candidate_arm) != "c1"
+            or "candidate_loss_audit" in timed_stats
+        )
+    )
+    report = _warmstart_base_report(
+        cfgs,
+        args,
+        train_dataset,
+        model1,
+        net,
+        optimizer,
+        scheduler,
+        coverage_identity,
+    )
+    report.update(
+        {
+            "status": "complete" if complete else "issues_found",
+            "stage": "timing",
+            "warmup": {
+                **finalize_runtime_audits(warmup_stats),
+                "requested_optimizer_updates": warmup_updates,
+                "losses": {key: float(value) for key, value in warmup_losses.items()},
+                "all_losses_finite": warmup_finite,
+                "skipped_updates": warmup_skips,
+            },
+            "timed": {
+                **finalize_runtime_audits(timed_stats),
+                "requested_optimizer_updates": timed_updates,
+                "losses": {key: float(value) for key, value in timed_losses.items()},
+                "wall_seconds": elapsed,
+                "seconds_per_optimizer_update": elapsed / timed_updates,
+                "peak_memory_allocated_mib": (
+                    torch.cuda.max_memory_allocated(cuda_index) / (1024**2)
+                    if torch.cuda.is_available()
+                    else 0.0
+                ),
+                "peak_memory_reserved_mib": (
+                    torch.cuda.max_memory_reserved(cuda_index) / (1024**2)
+                    if torch.cuda.is_available()
+                    else 0.0
+                ),
+                "all_losses_finite": finite,
+                "skipped_updates": skips,
+            },
+        }
+    )
+    _json_write_atomic(Path(cfgs.warmstart_output).resolve(), report)
+    print(json.dumps({"status": report["status"], "output": cfgs.warmstart_output}))
+    return report
 
 
 def _json_write_atomic(path, payload):
@@ -1214,10 +1657,205 @@ def write_eval_metric_artifact(cfgs, eval_split, metrics):
     print(f"Wrote unrounded evaluation metrics: {path}")
 
 
+def _validate_warmstart_preflight(cfgs, args):
+    """Validate the approved train-only warm-start contract before data access."""
+    stage = str(cfgs.warmstart_stage or "")
+    if not stage:
+        return None, None
+
+    incompatible = {
+        "eval": bool(cfgs.eval),
+        "eval_manifest": bool(cfgs.eval_manifest),
+        "stage1_coverage_oracle": bool(cfgs.stage1_coverage_oracle),
+        "stage2_selective_refine": bool(cfgs.stage2_selective_refine),
+        "train_only_smoke_steps": int(cfgs.train_only_smoke_steps or 0) > 0,
+        "legacy_phase2a_timing": bool(cfgs.phase2a_timing_profile),
+        "scratch_phase2a_baseline": bool(cfgs.phase2a_baseline),
+    }
+    enabled = [name for name, value in incompatible.items() if value]
+    if enabled:
+        raise ValueError(
+            "warm-start feasibility cannot be combined with: " + ", ".join(enabled)
+        )
+
+    required_paths = {
+        "train_manifest": cfgs.train_manifest,
+        "warmstart_output": cfgs.warmstart_output,
+        "sam_ckpt": cfgs.sam_ckpt,
+        "warmstart_checkpoint_sha256": cfgs.warmstart_checkpoint_sha256,
+    }
+    missing_paths = [name for name, value in required_paths.items() if not value]
+    if missing_paths:
+        raise ValueError("warm-start feasibility missing: " + ", ".join(missing_paths))
+    output_path = Path(cfgs.warmstart_output).resolve()
+    if output_path.exists():
+        raise ValueError(f"warm-start output already exists: {output_path}")
+    if not cfgs.verify_manifest_hashes:
+        raise ValueError("warm-start feasibility requires manifest hash verification")
+
+    train_manifest_identity = validate_train_manifest_identity(
+        Path(cfgs.train_manifest), str(cfgs.dataset)
+    )
+    expected_protocol = {
+        "tnbc": "tnbc_stainpms_prepared_continuity_v1_phase1_train",
+        "monuseg": "monuseg_download37_continuity_v1_phase1_trainonly",
+    }[str(cfgs.dataset)]
+    if train_manifest_identity["protocol_id"] != expected_protocol:
+        raise ValueError(
+            "warm-start train manifest protocol mismatch: "
+            f"{train_manifest_identity['protocol_id']} != {expected_protocol}"
+        )
+
+    checkpoint_path = Path(cfgs.sam_ckpt).resolve()
+    if not checkpoint_path.is_file():
+        raise ValueError(f"warm-start checkpoint is missing: {checkpoint_path}")
+    checkpoint_sha = sha256_file(checkpoint_path)
+    expected_checkpoint_sha = str(cfgs.warmstart_checkpoint_sha256).lower()
+    if checkpoint_sha != expected_checkpoint_sha:
+        raise ValueError(
+            f"warm-start checkpoint SHA256 mismatch: {checkpoint_sha} != "
+            f"{expected_checkpoint_sha}"
+        )
+
+    exact_values = {
+        "seed": (int(cfgs.seed), 3407),
+        "epochs": (int(cfgs.epochs), 10),
+        "crop_size": (int(cfgs.crop_size), 256),
+        "out_size": (int(cfgs.out_size), 256),
+        "crop_batch_size": (int(cfgs.b), 1),
+        "overlap": (
+            int(cfgs.overlap),
+            32 if str(cfgs.dataset) == "tnbc" else 92,
+        ),
+        "pms_start_epoch": (int(cfgs.pms_start_epoch), 0),
+        "coverage_refresh_interval": (
+            int(cfgs.iterative_baseline_refresh_every),
+            20,
+        ),
+        "pms_gt_match_radius": (int(args.criterion.pms_gt_match_radius), 8),
+        "pms_preserve_max_prompts": (
+            int(args.criterion.pms_preserve_max_prompts),
+            20,
+        ),
+        "stain_min_distance": (int(args.criterion.stain_min_distance), 12),
+        "stain_top_k": (int(args.criterion.stain_top_k), 20),
+        "point_nms_threshold": (int(args.test.nms_thr), 12),
+    }
+    value_mismatches = {
+        name: values for name, values in exact_values.items() if values[0] != values[1]
+    }
+    float_values = {
+        "learning_rate": (float(cfgs.lr), 1e-5),
+        "weight_decay": (float(cfgs.weight_decay), 1e-4),
+        "gradient_clip": (float(cfgs.clip_grad), 0.1),
+        "pms_loss_coef": (float(args.criterion.pms_loss_coef), 0.5),
+        "pms_object_weight": (float(args.criterion.pms_object_weight), 1.0),
+        "pms_residual_mask_weight": (
+            float(args.criterion.pms_residual_mask_weight),
+            0.3,
+        ),
+        "pms_preserve_loss_coef": (
+            float(args.criterion.pms_preserve_loss_coef),
+            1.0,
+        ),
+        "candidate_coverage_tau": (float(cfgs.candidate_coverage_tau), 0.1),
+        "candidate_coverage_coefficient": (
+            float(cfgs.candidate_coverage_coefficient),
+            1.0,
+        ),
+        "candidate_quality_coefficient": (
+            float(cfgs.candidate_quality_coefficient),
+            1.0,
+        ),
+    }
+    value_mismatches.update(
+        {
+            name: values
+            for name, values in float_values.items()
+            if not math.isclose(values[0], values[1], rel_tol=0.0, abs_tol=1e-12)
+        }
+    )
+    if value_mismatches:
+        raise ValueError(
+            f"warm-start command differs from the frozen configuration: {value_mismatches}"
+        )
+    if float(cfgs.lr_min) >= 0:
+        raise ValueError("warm-start feasibility requires the public MultiStepLR path")
+    if list(cfgs.lr_milestones) != [80, 140, 200]:
+        raise ValueError("warm-start feasibility requires milestones 80 140 200")
+    if str(cfgs.sam_config) != "sam2_hiera_l" or str(cfgs.net) != "sam2":
+        raise ValueError("warm-start feasibility requires the frozen SAM2 Hiera-L path")
+    if str(cfgs.load) != "unclockwise":
+        raise ValueError("warm-start feasibility requires load=unclockwise")
+    if bool(cfgs.tta):
+        raise ValueError("warm-start feasibility forbids TTA")
+
+    required_bools = {
+        "use_pms": bool(cfgs.use_pms),
+        "pms_self_bootstrap": bool(cfgs.pms_self_bootstrap),
+        "coverage_accumulate": cfgs.coverage_accumulate is True,
+        "pms_preserve_covered": bool(cfgs.pms_preserve_covered),
+        "texture": bool(cfgs.texture),
+        "context": bool(cfgs.context),
+        "test_filtering": bool(args.test.filtering),
+        "strict_evaluator": str(cfgs.evaluator_mode) == "strict",
+    }
+    missing_bools = [name for name, enabled in required_bools.items() if not enabled]
+    if missing_bools:
+        raise ValueError(
+            "warm-start required settings are disabled: " + ", ".join(missing_bools)
+        )
+
+    arm = str(cfgs.warmstart_candidate_arm or "")
+    if stage == "prepare_coverage":
+        if arm != "c0":
+            raise ValueError("coverage preparation must declare arm c0")
+        if cfgs.warmstart_coverage_manifest:
+            raise ValueError("coverage preparation cannot consume a coverage manifest")
+        if not cfgs.baseline_masks_dir:
+            raise ValueError("coverage preparation requires --baseline_masks_dir")
+        cache_dir = Path(cfgs.baseline_masks_dir).resolve()
+        if cache_dir.exists() and any(cache_dir.iterdir()):
+            raise ValueError(f"coverage output directory must be empty: {cache_dir}")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        coverage_identity = None
+    else:
+        allowed_arms = {"legacy", "c0", "c1"} if stage == "smoke" else {"c0", "c1"}
+        if arm not in allowed_arms:
+            raise ValueError(
+                f"warm-start {stage} arm must be one of {sorted(allowed_arms)}"
+            )
+        if not cfgs.warmstart_coverage_manifest:
+            raise ValueError(f"warm-start {stage} requires a coverage manifest")
+        coverage_identity = verify_coverage_manifest(
+            Path(cfgs.warmstart_coverage_manifest),
+            train_manifest_identity=train_manifest_identity,
+            checkpoint_sha256=checkpoint_sha,
+            dataset=str(cfgs.dataset),
+        )
+        if cfgs.baseline_masks_dir:
+            supplied_cache = str(Path(cfgs.baseline_masks_dir).resolve())
+            if supplied_cache != coverage_identity["cache_dir"]:
+                raise ValueError("CLI coverage directory differs from frozen coverage manifest")
+        cfgs.baseline_masks_dir = coverage_identity["cache_dir"]
+
+    if stage == "smoke" and int(cfgs.warmstart_smoke_updates) not in {1, 2}:
+        raise ValueError("approved warm-start smoke permits exactly 1 or 2 updates")
+    if stage == "timing":
+        if int(cfgs.phase2a_warmup_updates) != 10:
+            raise ValueError("warm-start timing requires exactly 10 warm-up updates")
+        if int(cfgs.phase2a_timed_updates) != 100:
+            raise ValueError("warm-start timing requires exactly 100 timed updates")
+    return train_manifest_identity, coverage_identity
+
+
 def main():
     args = Config.fromfile("./args.py")
     cfgs = cfg.parse_args()
     apply_cli_overrides(args, cfgs)
+    warmstart_manifest_identity, warmstart_coverage_identity = (
+        _validate_warmstart_preflight(cfgs, args)
+    )
     if cfgs.train_only_smoke_steps < 0:
         raise ValueError("--train_only_smoke_steps cannot be negative")
     if cfgs.train_only_smoke_steps > 0:
@@ -1380,7 +2018,13 @@ def main():
             print("[pms-self-bootstrap] disabled because --use_pms was not set.")
             cfgs.pms_self_bootstrap = False
         else:
-            if cfgs.phase2a_baseline:
+            if cfgs.warmstart_stage:
+                if not cfgs.baseline_masks_dir:
+                    raise ValueError(
+                        "warm-start self-bootstrap requires its validated coverage directory"
+                    )
+                self_cache_dir = str(Path(cfgs.baseline_masks_dir).resolve())
+            elif cfgs.phase2a_baseline:
                 self_cache_dir = str(
                     Path(cfgs.phase2a_output_dir).resolve() / "coverage_cache"
                 )
@@ -1402,6 +2046,53 @@ def main():
             )
 
     train_dataset, test_dataset, train_loader, test_loader = build_dataloaders(cfgs, args)
+
+    if cfgs.warmstart_stage == "prepare_coverage":
+        run_warmstart_prepare_coverage(
+            cfgs,
+            args,
+            train_dataset,
+            model1,
+            model1_encoder,
+            net,
+            device,
+            warmstart_manifest_identity,
+        )
+        return
+
+    if cfgs.warmstart_stage == "smoke":
+        run_warmstart_smoke(
+            cfgs,
+            args,
+            train_dataset,
+            train_loader,
+            model1,
+            model1_encoder,
+            net,
+            criterion,
+            optimizer,
+            scheduler,
+            device,
+            warmstart_coverage_identity,
+        )
+        return
+
+    if cfgs.warmstart_stage == "timing":
+        run_warmstart_timing(
+            cfgs,
+            args,
+            train_dataset,
+            train_loader,
+            model1,
+            model1_encoder,
+            net,
+            criterion,
+            optimizer,
+            scheduler,
+            device,
+            warmstart_coverage_identity,
+        )
+        return
 
     if cfgs.train_only_smoke_steps > 0:
         run_train_only_smoke(

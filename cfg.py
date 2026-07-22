@@ -145,6 +145,29 @@ def parse_args():
     parser.add_argument("--phase2a_resume_checkpoint", default="", type=str)
     parser.add_argument("--phase2a_budget_gate_report", default="", type=str)
 
+    parser.add_argument(
+        "--warmstart_stage",
+        default="",
+        choices=["", "prepare_coverage", "smoke", "timing"],
+        help="Exploratory train-only C0/C1 implementation and timing stage.",
+    )
+    parser.add_argument(
+        "--warmstart_candidate_arm",
+        default="",
+        choices=["", "legacy", "c0", "c1"],
+        help=(
+            "legacy is an equivalence reference only; c0/c1 share the explicit "
+            "four-native-candidate decoder call."
+        ),
+    )
+    parser.add_argument("--warmstart_output", default="", type=str)
+    parser.add_argument("--warmstart_checkpoint_sha256", default="", type=str)
+    parser.add_argument("--warmstart_coverage_manifest", default="", type=str)
+    parser.add_argument("--warmstart_smoke_updates", default=0, type=int)
+    parser.add_argument("--candidate_coverage_tau", default=0.1, type=float)
+    parser.add_argument("--candidate_coverage_coefficient", default=1.0, type=float)
+    parser.add_argument("--candidate_quality_coefficient", default=1.0, type=float)
+
     parser.add_argument("--use_pms", action="store_true")
     parser.add_argument("--pms_loss_coef", default=-1.0, type=float)
     parser.add_argument("--pms_object_weight", default=-1.0, type=float)

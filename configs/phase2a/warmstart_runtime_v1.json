@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "phase": "2A-warmstart-feasibility",
+  "status": "implementation_and_timing_approved_formal_5epoch_not_approved",
+  "protocol_id": "native_candidate_C0_C1_train_only_v1",
+  "initialization": {
+    "kind": "exploratory_weight_warm_start",
+    "loaded_checkpoint_fields": ["model", "model1"],
+    "discarded_checkpoint_fields": ["texture_memory_bank_list"],
+    "optimizer_state": "fresh",
+    "scheduler_state": "fresh",
+    "rng_state": "fresh_seed_3407"
+  },
+  "shared_training": {
+    "seed": 3407,
+    "deterministic": true,
+    "network": "sam2_hiera_l",
+    "crop_size": 256,
+    "out_size": 256,
+    "crop_batch_size": 1,
+    "load_order": "unclockwise",
+    "optimizer": {
+      "type": "AdamW",
+      "learning_rate": 0.00001,
+      "weight_decay": 0.0001,
+      "betas": [0.9, 0.999],
+      "eps": 1e-08,
+      "amsgrad": false
+    },
+    "scheduler": {
+      "type": "MultiStepLR",
+      "milestones_epochs": [80, 140, 200],
+      "gamma": 0.3,
+      "note": "No scheduler step occurs in smoke/timing; LR remains constant over proposed 5/10 epochs."
+    },
+    "amp": false,
+    "gradient_clip_max_norm": 0.1,
+    "coverage_refresh_interval_epochs": 20,
+    "initial_coverage": "one shared train-only regeneration per dataset and checkpoint",
+    "coverage_accumulate": true,
+    "pms": {
+      "start_epoch": 0,
+      "loss_coefficient": 0.5,
+      "object_weight": 1.0,
+      "residual_mask_weight": 0.3,
+      "preservation_loss_coefficient": 1.0,
+      "gt_match_radius": 8,
+      "preserve_covered": true,
+      "preserve_max_prompts": 20,
+      "stain_min_distance": 12,
+      "stain_top_k": 20
+    }
+  },
+  "candidate_objective": {
+    "name": "native best-of-K coverage plus quality calibration baseline",
+    "native_candidate_count": 4,
+    "legacy_and_C0_supervised_token": 0,
+    "C0_C1_common_forward": "predict_masks tokens 0..3 exactly once per prompt group",
+    "softmin_temperature": 0.1,
+    "coverage_coefficient": 1.0,
+    "quality_coefficient": 1.0,
+    "group_reduction": "ordinary, PMS residual, and PMS preservation averaged separately; empty group is exact zero",
+    "negative_or_unmatched_auxiliary_supervision": false,
+    "hard_quality_target": "stop-gradient IoU of bilinearly upsampled logit>0 candidate against assigned GT",
+    "external_ranker": false,
+    "inference_change": false
+  },
+  "datasets": {
+    "tnbc": {
+      "train_scope": "patients 1-6 only",
+      "train_images": 30,
+      "overlap": 32,
+      "updates_per_epoch": 270,
+      "screen_updates": 1350,
+      "full_updates": 2700,
+      "checkpoint_sha256": "44a3cb3e93051301d789e44f93769588abfa727d7a174b0270f55305ef023781",
+      "forbidden": "patients 7-11 for coverage or optimization; patients 9-11 for any access"
+    },
+    "monuseg": {
+      "train_scope": "frozen train37 only",
+      "train_images": 37,
+      "overlap": 92,
+      "updates_per_epoch": 1332,
+      "screen_updates": 6660,
+      "full_updates": 13320,
+      "checkpoint_sha256": "6616c24626a162580d79aa7035d0b6c1a4ae6240a6c2f4599960dd4efac95db1",
+      "forbidden": "official test14 access"
+    }
+  },
+  "approved_execution": {
+    "smoke_optimizer_updates": [1, 2],
+    "timing_warmup_updates": 10,
+    "timing_measured_updates": 100,
+    "formal_5epoch_training": false
+  }
+}
