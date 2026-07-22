@@ -156,6 +156,7 @@ def parse_args():
             "formal_tnbc_5epoch",
             "formal_tnbc_pqbest_ablation_5epoch",
             "formal_tnbc_pqbest_repro_5epoch",
+            "formal_tnbc_pqbest_third_seed_5epoch",
         ],
         help=(
             "Exploratory train-only C0/C1 stage. formal_tnbc_5epoch is the "

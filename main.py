@@ -1625,18 +1625,34 @@ def run_warmstart_formal_tnbc_pqbest_ablation_5epoch(
 
     stage = str(cfgs.warmstart_stage)
     protocol = str(cfgs.warmstart_screen_config_identity["protocol_id"])
-    phase = (
-        "2A-warmstart-pqbest-c0c1-second-seed"
-        if stage == "formal_tnbc_pqbest_repro_5epoch"
-        else "2A-warmstart-pqbest-ablation"
+    reproduction_metadata = {
+        "formal_tnbc_pqbest_repro_5epoch": {
+            "phase": "2A-warmstart-pqbest-c0c1-second-seed",
+            "selection_history": (
+                "owner-approved C0/C1 second-seed reproduction; p7/p8 are used only "
+                "after the completed epoch for equal-patient-macro PQ checkpoint selection"
+            ),
+        },
+        "formal_tnbc_pqbest_third_seed_5epoch": {
+            "phase": "2A-warmstart-pqbest-c0c1-third-seed",
+            "selection_history": (
+                "owner-approved C0/C1 third-seed reproduction; p7/p8 are used only "
+                "after the completed epoch for equal-patient-macro PQ checkpoint selection"
+            ),
+        },
+    }
+    run_metadata = reproduction_metadata.get(
+        stage,
+        {
+            "phase": "2A-warmstart-pqbest-ablation",
+            "selection_history": (
+                "owner-approved development PQ-best warm-start ablation; p7/p8 are used "
+                "only after the completed epoch for equal-patient-macro PQ selection"
+            ),
+        },
     )
-    selection_history = (
-        "owner-approved C0/C1 second-seed reproduction; p7/p8 are used only after "
-        "the completed epoch for equal-patient-macro PQ checkpoint selection"
-        if stage == "formal_tnbc_pqbest_repro_5epoch"
-        else "owner-approved development PQ-best warm-start ablation; p7/p8 are used "
-        "only after the completed epoch for equal-patient-macro PQ selection"
-    )
+    phase = run_metadata["phase"]
+    selection_history = run_metadata["selection_history"]
     output = Path(cfgs.warmstart_output).resolve()
     output_dir = output.parent
     state_dir = output_dir / "checkpoints"
@@ -2629,6 +2645,12 @@ def _validate_warmstart_preflight(cfgs, args):
             "seed": 2027,
             "label": "PQ-best C0/C1 reproduction",
         },
+        "formal_tnbc_pqbest_third_seed_5epoch": {
+            "protocol_id": "tnbc_c0_c1_third_seed_1337_v1",
+            "arms": {"c0", "c1"},
+            "seed": 1337,
+            "label": "PQ-best C0/C1 third-seed reproduction",
+        },
     }
 
     incompatible = {
@@ -2709,7 +2731,7 @@ def _validate_warmstart_preflight(cfgs, args):
         else 10
     )
     arm = str(cfgs.warmstart_candidate_arm or "")
-    if stage == "formal_tnbc_pqbest_repro_5epoch":
+    if stage in {"formal_tnbc_pqbest_repro_5epoch", "formal_tnbc_pqbest_third_seed_5epoch"}:
         expected_auxiliary_coefficients = {"c0": (0.0, 0.0), "c1": (1.0, 1.0)}.get(
             arm, (float("nan"), float("nan"))
         )
@@ -3182,6 +3204,7 @@ def main():
     if cfgs.warmstart_stage in {
         "formal_tnbc_pqbest_ablation_5epoch",
         "formal_tnbc_pqbest_repro_5epoch",
+        "formal_tnbc_pqbest_third_seed_5epoch",
     }:
         run_warmstart_formal_tnbc_pqbest_ablation_5epoch(
             cfgs,

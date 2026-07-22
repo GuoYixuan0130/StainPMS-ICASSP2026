@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "protocol_id": "tnbc_c0_c1_third_seed_1337_v1",
+  "approval_scope": "TNBC only: independent C0/C1-full third-seed reproduction. No MoNuSeg training, no sealed TNBC access, and no new modules.",
+  "reference": {
+    "historical_baseline_checkpoint_sha256": "44a3cb3e93051301d789e44f93769588abfa727d7a174b0270f55305ef023781",
+    "all_prespecified_seeds": [3407, 2027, 1337],
+    "third_seed": 1337,
+    "seed_handling": "all three seeds must be retained and reported; no seed selection is permitted"
+  },
+  "data": {
+    "train_protocol": "tnbc_stainpms_prepared_continuity_v1_phase1_train",
+    "development_protocol": "tnbc_stainpms_prepared_continuity_v1_phase1_development",
+    "train_patients": [1, 2, 3, 4, 5, 6],
+    "development_patients": [7, 8],
+    "sealed_patients": [9, 10, 11],
+    "coverage": "reuse the frozen shared train-only coverage manifest without refresh"
+  },
+  "optimization": {
+    "seed": 1337,
+    "epochs": 5,
+    "attempted_crop_batches_per_epoch": 270,
+    "planned_attempted_crop_batches": 1350,
+    "optimizer": "AdamW",
+    "learning_rate": 1e-05,
+    "weight_decay": 0.0001,
+    "scheduler": "MultiStepLR",
+    "milestones": [80, 140, 200],
+    "gradient_clip_norm": 0.1,
+    "legacy_no_prompt_behavior": "no optimizer step and no replacement crop"
+  },
+  "arms": {
+    "c0": {
+      "coverage_coefficient": 0.0,
+      "quality_coefficient": 0.0,
+      "candidate_coverage_tau": 0.1
+    },
+    "c1": {
+      "coverage_coefficient": 1.0,
+      "quality_coefficient": 1.0,
+      "candidate_coverage_tau": 0.1
+    }
+  },
+  "development_model_selection": {
+    "metric": "equal_patient_macro_PQ",
+    "patients": [7, 8],
+    "tie_break": "earlier_epoch_on_exact_equal_PQ",
+    "fixed_epoch_5_primary": true,
+    "pq_best_is_secondary": true
+  },
+  "final_advancement_rule": {
+    "comparison": "fixed epoch-5 C1-full minus paired C0 over all seeds [3407, 2027, 1337]",
+    "mean_AJI_delta_must_be_positive": true,
+    "mean_PQ_delta_must_be_positive": true,
+    "AJI_positive_seed_count_at_least": 2,
+    "PQ_positive_seed_count_at_least": 2,
+    "all_conditions_required": true,
+    "if_pass": "freeze C1-full and request owner decision about formal test",
+    "if_fail": "stop the current warm-start route without accessing sealed patients"
+  },
+  "retention": {
+    "rolling_last": "one complete model/model1/optimizer/scheduler/RNG state per arm, atomically replaced after each epoch",
+    "best_pq": "model/model1 weights only when development patient-macro PQ strictly improves",
+    "epoch_metrics": "all epochs retained as JSON/CSV and frozen diagnosis outputs",
+    "no_permanent_full_epoch_history": true,
+    "expected_persistent_storage_per_arm_gib": "about 9",
+    "expected_two_arm_storage_gib": "about 18 to 20 including diagnostics and logs",
+    "minimum_free_storage_before_each_arm_gib": 16
+  }
+}
