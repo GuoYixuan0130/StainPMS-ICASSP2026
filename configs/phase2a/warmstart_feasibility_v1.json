@@ -1,0 +1,153 @@
+{
+  "schema_version": 1,
+  "phase": "2A-warmstart-feasibility",
+  "status": "owner_approval_required_before_implementation_or_training",
+  "protocol_id": "f3c_phase2a_warmstart_c0_c1_v1_proposal",
+  "supersedes_next_action": "200_epoch_scratch_baseline",
+  "scratch_budget_reference": {
+    "recipe_path": "configs/phase2a/baseline_recipe_v1.json",
+    "recipe_sha256_at_measurement": "58f2b3bf8c5a620d371c4c9fc1adb54021ef42423357493dd032487f7794a248",
+    "status": "reference_only_not_current_gate",
+    "accounting": {
+      "tnbc": "30 images * 9 crops * 200 epochs = 54000 optimizer updates",
+      "monuseg": "37 images * 36 crops * 200 epochs = 266400 optimizer updates",
+      "crop_batch_size": 1,
+      "optimizer_update_per_crop_batch": 1
+    },
+    "correction": "The public 200-epoch command is a TNBC generic-SAM2 scratch example. Applying it to MoNuSeg produced a hypothetical scratch reference, not the public MoNuSeg warm-start budget."
+  },
+  "public_training_evidence": {
+    "upstream_repository": "https://github.com/GuoYixuan0130/StainPMS",
+    "upstream_commit": "51c2eac340cb92274d1fef4ff71b27ceae34da5f",
+    "local_import_commit": "e560b47b3e520cc63fa02b272e207b850ceca237",
+    "monuseg_path": {
+      "kind": "CA-SAM2 warm-start fine-tuning",
+      "epochs": 10,
+      "learning_rate": 0.00001,
+      "crop_size": 256,
+      "overlap": 92,
+      "crop_batch_size": 1,
+      "pms_start_epoch": 0,
+      "coverage_refresh_interval_epochs": 20
+    },
+    "scratch_example": {
+      "dataset": "TNBC",
+      "kind": "generic-SAM2 scratch with deferred PMS",
+      "epochs": 200,
+      "learning_rate": 0.0001,
+      "crop_size": 256,
+      "overlap": 32,
+      "crop_batch_size": 1,
+      "pms_start_epoch": 50,
+      "coverage_refresh_interval_epochs": 20
+    }
+  },
+  "shared": {
+    "seed": 3407,
+    "deterministic": true,
+    "crop_size": 256,
+    "crop_batch_size": 1,
+    "optimizer": "AdamW",
+    "learning_rate": 0.00001,
+    "weight_decay": 0.0001,
+    "scheduler": "constant_over_5_or_10_epochs_under_public_milestones",
+    "pms_start_epoch": 0,
+    "coverage_refresh_interval_epochs": 20,
+    "coverage_accumulate": true,
+    "initial_train_only_coverage_refresh_count": 1,
+    "evaluator_mode": "strict",
+    "data_order": "manifest_order_shuffle_false",
+    "augmentation_rng": "identical_seed_and_no_C1_random_draws",
+    "trainable_parameter_set": "identical; C1 adds no module or parameter and only supplies gradients to the existing native candidate tokens/quality head",
+    "optimizer_state": "fresh_and_identical_for_C0_C1_if_no_state_is_embedded; if complete state exists, resume-versus-weight-warm-start requires owner decision",
+    "checkpoint_updates": "end_of_every_epoch_in_both_arms",
+    "screening_primary_comparison": "paired_C1_minus_C0_at_fixed_final_update",
+    "screening_trajectory_role": "supporting_only_not_checkpoint_selection"
+  },
+  "arms": {
+    "C0": {
+      "name": "continued_training_control",
+      "objective": "unchanged StainPMS objective",
+      "candidate_auxiliary_loss": false
+    },
+    "C1": {
+      "name": "candidate_set_coverage_quality_feasibility",
+      "objective": "unchanged StainPMS objective plus proposed candidate-set auxiliary loss",
+      "candidate_auxiliary_loss": true,
+      "loss_spec": "candidate_coverage_quality_v1_proposal",
+      "implementation_status": "not_implemented_pending_owner_approval"
+    }
+  },
+  "candidate_coverage_quality_v1_proposal": {
+    "scope": "within-view candidate-set feasibility; not yet the full counterfactual F3C objective",
+    "candidate_tokens": [0, 1, 2, 3],
+    "eligible_prompts": [
+      "standard GT-assigned positive prompts",
+      "PMS residual positive prompts with assigned GT",
+      "PMS preservation positive prompts with assigned GT"
+    ],
+    "excluded_prompts": [
+      "negative prompts",
+      "unmatched prompts"
+    ],
+    "baseline_loss_preserved": true,
+    "per_candidate_segmentation_loss": "(20 * existing DiceLoss + existing BinaryFocalLoss) / 21",
+    "coverage_reduction": "-tau * log(mean_k(exp(-loss_k / tau)))",
+    "softmin_temperature": 0.1,
+    "coverage_loss_coefficient": 1.0,
+    "quality_target": "stop-gradient binary-mask GT-IoU for every native candidate, using the frozen mask binarization threshold",
+    "quality_loss": "mean squared error over four native quality predictions",
+    "quality_loss_coefficient": 1.0,
+    "inference_path_change": false,
+    "external_ranker": false,
+    "token_index_semantics_across_views_assumed": false,
+    "token_balancing": "disabled; may only be proposed later if utilization audit demonstrates collapse",
+    "counterfactual_restaining": "not included in the first 5-epoch feasibility comparison",
+    "point_stability": false,
+    "assembly_or_NMS_change": false
+  },
+  "datasets": {
+    "tnbc": {
+      "checkpoint_path": "/root/autodl-tmp/projects/CA-SAM2-HRC/deliver_ckpts/tnbc_pms_best_e156.pth",
+      "checkpoint_sha256": "44a3cb3e93051301d789e44f93769588abfa727d7a174b0270f55305ef023781",
+      "checkpoint_evidence_class": "warm_start_exploratory_pending_provenance_audit",
+      "train_protocol_id": "tnbc_stainpms_prepared_continuity_v1_phase1_train",
+      "development_protocol_id": "tnbc_stainpms_prepared_continuity_v1_phase1_development",
+      "sealed_patients": [9, 10, 11],
+      "train_images": 30,
+      "crops_per_image": 9,
+      "optimizer_updates_per_epoch": 270,
+      "screen_epochs": 5,
+      "screen_planned_updates": 1350,
+      "full_epochs": 10,
+      "full_planned_updates": 2700,
+      "overlap": 32,
+      "evaluation": "p7 and p8 strict complete-image metrics reported separately and macro-patient aggregated"
+    },
+    "monuseg": {
+      "checkpoint_path": "/root/autodl-tmp/projects/CA-SAM2-HRC/deliver_ckpts/monuseg_pms_best_pq.pth",
+      "checkpoint_sha256": "6616c24626a162580d79aa7035d0b6c1a4ae6240a6c2f4599960dd4efac95db1",
+      "checkpoint_evidence_class": "warm_start_exploratory_pending_provenance_audit",
+      "train_protocol_id": "monuseg_download37_continuity_v1_phase1_trainonly",
+      "official_test_access": "forbidden",
+      "train_images": 37,
+      "crops_per_image": 36,
+      "optimizer_updates_per_epoch": 1332,
+      "screen_epochs": 5,
+      "screen_planned_updates": 6660,
+      "full_epochs": 10,
+      "full_planned_updates": 13320,
+      "overlap": 92,
+      "evaluation": "train37 mechanism observation only; fixed final update; no performance-based checkpoint selection"
+    }
+  },
+  "timing_gate": {
+    "required_before_formal_run": true,
+    "per_arm": ["C0", "C1"],
+    "warmup_optimizer_updates": 10,
+    "timed_optimizer_updates": 100,
+    "cuda_synchronized": true,
+    "old_200_epoch_gate_reused": false,
+    "C1_time_status": "not_measurable_until_loss_is_approved_and_implemented"
+  }
+}
