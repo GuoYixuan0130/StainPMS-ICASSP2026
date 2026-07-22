@@ -1,0 +1,142 @@
+{
+  "schema_version": 1,
+  "phase": "2A-warmstart-feasibility",
+  "status": "owner_decision_required_before_implementation_or_training",
+  "source_commit": "fec21ee79a3ba5f2f7c8239a925e644614c22fc5",
+  "proposal": {
+    "path": "configs/phase2a/warmstart_feasibility_v1.json",
+    "sha256": "fd3ca0684b34934f5bf5770011d4b7249e1dbce7e9264d177eaed38345eb51a7"
+  },
+  "returned_artifacts": {
+    "checkpoint_audit": {
+      "local_return_name": "warmstart_checkpoint_audit.json",
+      "sha256": "aa26a5275cef5e467309a1d63ccb2c335f449afa593571283dbfa22e449150cb"
+    },
+    "budget_proxy": {
+      "local_return_name": "warmstart_budget_proxy.json",
+      "sha256": "227162e73f77df0fa76e827dd064440cd766f95f4871faf04211720824c16528"
+    },
+    "tests": {
+      "local_return_name": "warmstart_preflight_tests.txt",
+      "sha256": "929adf5302518bf7513338c3ba18642e578e319faee1f6c84913576ee6ebe399",
+      "result": "3_of_3_passed"
+    }
+  },
+  "checkpoint_findings": {
+    "tnbc": {
+      "path": "/root/autodl-tmp/projects/CA-SAM2-HRC/deliver_ckpts/tnbc_pms_best_e156.pth",
+      "size_bytes": 2950715199,
+      "sha256": "44a3cb3e93051301d789e44f93769588abfa727d7a174b0270f55305ef023781",
+      "embedded_epoch_index": 156,
+      "completed_epoch_if_zero_based": 157,
+      "model_tensor_count": 3184,
+      "point_head_tensor_count": 389,
+      "embedded_texture_bank_count": 64,
+      "optimizer_state": false,
+      "scheduler_state": false,
+      "rng_state": false,
+      "manifest_evidence": false,
+      "command_or_config_evidence": false,
+      "initialization_source": "unknown",
+      "selection_history": "unknown_with_elevated_legacy_test_loader_selection_risk",
+      "p9_p11_exposure": "unknown",
+      "evidence_class": "warm_start_exploratory_only"
+    },
+    "monuseg": {
+      "path": "/root/autodl-tmp/projects/CA-SAM2-HRC/deliver_ckpts/monuseg_pms_best_pq.pth",
+      "size_bytes": 2950711364,
+      "sha256": "6616c24626a162580d79aa7035d0b6c1a4ae6240a6c2f4599960dd4efac95db1",
+      "embedded_epoch_index": 4,
+      "completed_epoch_if_zero_based": 5,
+      "model_tensor_count": 3184,
+      "point_head_tensor_count": 389,
+      "embedded_texture_bank_count": 64,
+      "optimizer_state": false,
+      "scheduler_state": false,
+      "rng_state": false,
+      "manifest_evidence": false,
+      "command_or_config_evidence": false,
+      "initialization_source": "unknown_public_path_is_CA_SAM2_warm_start_but_not_checkpoint_proof",
+      "selection_history": "unknown_with_elevated_legacy_test_loader_PQ_selection_risk",
+      "test14_exposure": "unknown",
+      "evidence_class": "warm_start_exploratory_only"
+    }
+  },
+  "historical_recipe_reconciliation": {
+    "public_repository_commit": "51c2eac340cb92274d1fef4ff71b27ceae34da5f",
+    "public_monuseg_recipe": "CA-SAM2 warm-start, 10 epochs, lr=1e-5, batch=1, crop=256, overlap=92, PMS start=0, refresh=20",
+    "public_200_epoch_recipe": "TNBC generic-SAM2 scratch example, lr=1e-4, batch=1, crop=256, overlap=32, PMS start=50, refresh=20",
+    "monuseg_58_2_gpu_hour_interpretation": "hypothetical 200-epoch scratch extrapolation, not the public MoNuSeg warm-start budget",
+    "checkpoint_bound_run_logs_found": false
+  },
+  "weight_warm_start_contract": {
+    "load_checkpoint_fields": ["model", "model1"],
+    "do_not_load_checkpoint_fields": ["texture_memory_bank_list"],
+    "optimizer": "fresh AdamW in both arms",
+    "scheduler": "fresh MultiStepLR in both arms; public milestones 80/140/200 leave lr constant during 5/10 epochs",
+    "coverage_cache": "fresh train-only initial refresh in both arms",
+    "training_texture_bank": "empty at each training epoch as in the existing training path",
+    "rationale": "training state is absent and the embedded texture bank has unknown provenance",
+    "evidence_label": "weight warm-start exploratory, not full-state resume"
+  },
+  "equal_budget": {
+    "shared": {
+      "seed": 3407,
+      "learning_rate": 0.00001,
+      "weight_decay": 0.0001,
+      "crop_batch_size": 1,
+      "data_order": "manifest order, shuffle=false",
+      "candidate_loss_adds_random_draws": false,
+      "coverage_refresh_count_for_5_or_10_epochs": 1,
+      "checkpoint_interval": "end of every epoch",
+      "formal_comparison": "C1 minus C0 at the same fixed final update"
+    },
+    "tnbc": {
+      "updates_per_epoch": 270,
+      "screen_updates": 1350,
+      "full_updates": 2700,
+      "C0_screen_gpu_hours_proxy": 0.33080759576470076,
+      "C0_full_gpu_hours_proxy": 0.6483658912074235,
+      "C1_gpu_hours": null
+    },
+    "monuseg": {
+      "updates_per_epoch": 1332,
+      "screen_updates": 6660,
+      "full_updates": 13320,
+      "C0_screen_gpu_hours_proxy": 1.895852621824998,
+      "C0_full_gpu_hours_proxy": 3.567842035313654,
+      "C1_gpu_hours": null
+    }
+  },
+  "proposed_C1": {
+    "kind": "within-view_native_four-candidate_best-of-K_coverage_and_quality",
+    "new_parameters": false,
+    "coverage": "soft minimum over four normalized existing segmentation losses",
+    "softmin_temperature": 0.1,
+    "coverage_coefficient": 1.0,
+    "prompt_group_reduction": "mean separately within ordinary, PMS residual, and PMS preservation positive groups; an empty group contributes zero",
+    "prompt_group_weights": {
+      "ordinary": 1.0,
+      "PMS_residual": "inherit pms_loss_coef * pms_residual_mask_weight",
+      "PMS_preservation": "inherit pms_preserve_loss_coef"
+    },
+    "quality_target": "stop-gradient GT-IoU of the bilinearly upsampled candidate binarized at the frozen logit threshold 0.0",
+    "quality_loss": "mean squared error over all four native quality predictions",
+    "quality_coefficient": 1.0,
+    "original_stainpms_objective_preserved": true,
+    "inference_or_postprocessing_change": false,
+    "not_included": [
+      "restaining or worst-view aggregation",
+      "point stability",
+      "LoRA",
+      "external ranking",
+      "NMS or assembly changes"
+    ]
+  },
+  "required_owner_decisions": [
+    "approve or revise the proposed C1 loss, tau, coefficients, and eligible positive-prompt scope",
+    "accept both checkpoints as exploratory weight warm-starts despite unresolved selection exposure",
+    "approve discarding embedded texture banks and rebuilding train-only coverage",
+    "after implementation, authorize only per-arm 10-warm-up plus 100-timed-update measurements before the five-epoch runs"
+  ]
+}

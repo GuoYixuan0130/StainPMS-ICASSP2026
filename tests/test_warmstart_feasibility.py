@@ -53,6 +53,33 @@ class WarmStartFeasibilityTests(unittest.TestCase):
         self.assertFalse(proposal["arms"]["C0"]["candidate_auxiliary_loss"])
         self.assertTrue(proposal["arms"]["C1"]["candidate_auxiliary_loss"])
 
+    def test_preflight_result_requires_weight_only_owner_decision(self):
+        result = json.loads(
+            (ROOT / "configs/phase2a/warmstart_preflight_result_v1.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(
+            result["status"],
+            "owner_decision_required_before_implementation_or_training",
+        )
+        self.assertEqual(
+            result["weight_warm_start_contract"]["load_checkpoint_fields"],
+            ["model", "model1"],
+        )
+        self.assertIn(
+            "texture_memory_bank_list",
+            result["weight_warm_start_contract"]["do_not_load_checkpoint_fields"],
+        )
+        self.assertIsNone(result["equal_budget"]["tnbc"]["C1_gpu_hours"])
+        self.assertIsNone(result["equal_budget"]["monuseg"]["C1_gpu_hours"])
+        self.assertFalse(result["proposed_C1"]["new_parameters"])
+        self.assertEqual(result["proposed_C1"]["prompt_group_weights"]["ordinary"], 1.0)
+        self.assertEqual(
+            result["proposed_C1"]["prompt_group_weights"]["PMS_residual"],
+            "inherit pms_loss_coef * pms_residual_mask_weight",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
