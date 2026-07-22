@@ -112,6 +112,8 @@ def evaluate_instance_pair(
     empty_gt = gt_count == 0
     empty_pred = pred_count == 0
     both_empty = empty_gt and empty_pred
+    gt_has_background = bool(np.any(gt_raw == 0))
+    pred_has_background = bool(np.any(pred_raw == 0))
     base: dict[str, Any] = {
         "sample_id": sample_id,
         "mode": mode,
@@ -123,6 +125,9 @@ def evaluate_instance_pair(
         "empty_gt": empty_gt,
         "empty_prediction": empty_pred,
         "both_empty": both_empty,
+        "gt_has_background_id_zero": gt_has_background,
+        "prediction_has_background_id_zero": pred_has_background,
+        "metric_background_padding_applied": False,
     }
 
     if mode == "legacy_skip" and (empty_gt or empty_pred):
@@ -178,8 +183,21 @@ def evaluate_instance_pair(
         )
         return base
 
-    gt = remap_label(gt_raw)
-    pred = remap_label(pred_raw)
+    # The inherited metric helpers require ID 0 to be present and otherwise
+    # either crash or drop the first real instance. A shared zero border adds
+    # no foreground area/intersection/union, so it makes that precondition
+    # explicit without changing any instance metric or the reported image
+    # shape. This can occur when assembled masks cover every image pixel.
+    if not gt_has_background or not pred_has_background:
+        gt_metric = np.pad(gt_raw, 1, mode="constant", constant_values=0)
+        pred_metric = np.pad(pred_raw, 1, mode="constant", constant_values=0)
+        base["metric_background_padding_applied"] = True
+    else:
+        gt_metric = gt_raw
+        pred_metric = pred_raw
+
+    gt = remap_label(gt_metric)
+    pred = remap_label(pred_metric)
     (dq, sq, pq), pair_info = get_fast_pq(gt, pred, match_iou=match_iou)
     paired_true, paired_pred, unpaired_true, unpaired_pred = pair_info
     metrics = {

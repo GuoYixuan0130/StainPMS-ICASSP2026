@@ -7,17 +7,22 @@ phase2a_root=/root/autodl-tmp/f3c_phase2a
 generic_sam2=/root/autodl-tmp/projects/CA-SAM2-HRC/checkpoints/sam2_hiera_large.pt
 monuseg_data=/root/autodl-tmp/projects/AgentSeg-CA-SAM2/data/monuseg
 train_manifest="$phase1_root/manifests/monuseg_train37_phase1.json"
+base_timing="$phase2a_root/reports/monuseg_timing_base.json"
+active_timing="$phase2a_root/reports/monuseg_timing_pms_active.json"
 
 cd "$repo_root"
 mkdir -p "$phase2a_root/reports"
 
-conda run -n agentseg python main.py \
+if [[ -f "$base_timing" ]]; then
+  python -c 'import json,sys; r=json.load(open(sys.argv[1],encoding="utf-8")); assert r.get("status")=="complete" and r.get("profile")=="base" and r.get("data",{}).get("record_count")==37 and r.get("data",{}).get("hashes_verified") is True and r.get("sealed_data_attestation",{}).get("test_loader_constructed") is False, r; print("Reusing validated complete MoNuSeg base timing:",sys.argv[1])' "$base_timing"
+else
+  conda run -n agentseg python main.py \
   --dataset monuseg \
   --data_path "$monuseg_data" \
   --train_manifest "$train_manifest" \
   --verify_manifest_hashes \
   --phase2a_timing_profile base \
-  --phase2a_timing_output "$phase2a_root/reports/monuseg_timing_base.json" \
+  --phase2a_timing_output "$base_timing" \
   --phase2a_warmup_updates 10 \
   --phase2a_timed_updates 100 \
   --sam_ckpt "$generic_sam2" \
@@ -39,6 +44,7 @@ conda run -n agentseg python main.py \
   --context \
   --evaluator_mode strict \
   --exp_name f3c_phase2a_monuseg_timing_base
+fi
 
 conda run -n agentseg python main.py \
   --dataset monuseg \
@@ -46,7 +52,7 @@ conda run -n agentseg python main.py \
   --train_manifest "$train_manifest" \
   --verify_manifest_hashes \
   --phase2a_timing_profile pms_active \
-  --phase2a_timing_output "$phase2a_root/reports/monuseg_timing_pms_active.json" \
+  --phase2a_timing_output "$active_timing" \
   --phase2a_warmup_updates 10 \
   --phase2a_timed_updates 100 \
   --sam_ckpt "$generic_sam2" \
@@ -87,8 +93,8 @@ set +e
 conda run -n agentseg python tools/estimate_phase2a_baseline_budget.py \
   --recipe configs/phase2a/baseline_recipe_v1.json \
   --dataset monuseg \
-  --base-timing "$phase2a_root/reports/monuseg_timing_base.json" \
-  --active-timing "$phase2a_root/reports/monuseg_timing_pms_active.json" \
+  --base-timing "$base_timing" \
+  --active-timing "$active_timing" \
   --output "$phase2a_root/reports/monuseg_budget_gate.json"
 monuseg_status=$?
 

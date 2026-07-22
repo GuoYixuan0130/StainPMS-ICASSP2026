@@ -24,6 +24,19 @@ class StrictEvaluatorTests(unittest.TestCase):
         for name in ("dice1", "dice2", "aji", "aji_p", "dq", "sq", "pq"):
             self.assertAlmostEqual(result["metrics"][name], 1.0, places=5)
 
+    def test_nonempty_maps_without_background_preserve_metrics(self):
+        gt = np.full((8, 8), 5, dtype=np.int32)
+        pred = np.full((8, 8), 17, dtype=np.int32)
+        result = evaluate_instance_pair(gt, pred, mode="strict")
+        self.assertTrue(result["metric_background_padding_applied"])
+        self.assertFalse(result["gt_has_background_id_zero"])
+        self.assertFalse(result["prediction_has_background_id_zero"])
+        self.assertEqual(result["shape"], [8, 8])
+        self.assertEqual(result["gt_instance_count"], 1)
+        self.assertEqual(result["pred_instance_count"], 1)
+        for name in ("dice1", "dice2", "aji", "aji_p", "dq", "sq", "pq"):
+            self.assertAlmostEqual(result["metrics"][name], 1.0, places=5)
+
     def test_empty_prediction_with_nonempty_gt(self):
         result = evaluate_instance_pair(self.one, self.empty, mode="strict")
         self.assertTrue(result["included_in_macro"])

@@ -177,3 +177,7 @@ The script writes `monuseg_timing_base.json`,
 Exit code `2` is an intentional budget stop, not a training failure. In that
 case no formal baseline may be started until the project owner revises the
 budget or recipe.
+
+If the PMS-active timing is interrupted after the base timing completed, the
+same script validates and reuses the completed base JSON. It never overwrites
+that report and reruns only the missing PMS-active profile and gates.
