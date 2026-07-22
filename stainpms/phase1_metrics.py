@@ -12,8 +12,7 @@ from typing import Any, Iterable
 
 import numpy as np
 from scipy import ndimage as ndi
-
-from stainpms.evaluator import evaluate_instance_pair
+from scipy.optimize import linear_sum_assignment
 
 
 ERROR_CLASSES = (
@@ -130,9 +129,96 @@ def final_max_iou_by_gt(overlap: dict[str, Any]) -> dict[int, tuple[float, int |
 
 
 def strict_final_pairing(gt_map: np.ndarray, pred_map: np.ndarray, match_iou: float) -> dict[str, Any]:
-    """Return the existing strict evaluator record plus unambiguous GT matches."""
+    """Compute the strict evaluator's pairing rule without unrelated dense metrics.
 
-    record = evaluate_instance_pair(gt_map, pred_map, mode="strict", match_iou=match_iou)
+    ``evaluate_instance_pair`` also calculates Dice/AJI/AJI+ for every image.
+    Its legacy implementations repeatedly materialise every GT/pred mask and
+    are not tractable for Phase 1's dense MoNuSeg bookkeeping.  Phase 1 needs
+    only the frozen strict matching definition (TP/FP/FN and pair identity),
+    so this is an exact vectorised implementation of ``get_fast_pq`` at the
+    configured matching threshold.  It preserves its special inclusive rule
+    when any IoU is exactly the threshold.
+    """
+
+    if not 0.0 <= float(match_iou) <= 1.0:
+        raise ValueError("match_iou must lie in [0, 1]")
+    overlap = final_instance_overlap_table(gt_map, pred_map)
+    table = np.asarray(overlap["intersections"], dtype=np.float64)
+    gt_ids = np.asarray(overlap["gt_ids"], dtype=np.int64)
+    pred_ids = np.asarray(overlap["pred_ids"], dtype=np.int64)
+    gt_count = int(gt_ids.size)
+    pred_count = int(pred_ids.size)
+    base: dict[str, Any] = {
+        "mode": "strict_pairing_only",
+        "evaluator_policy_id": "strict_empty_handling_v1",
+        "match_iou": float(match_iou),
+        "shape": list(np.asarray(gt_map).shape),
+        "gt_instance_count": gt_count,
+        "pred_instance_count": pred_count,
+        "empty_gt": gt_count == 0,
+        "empty_prediction": pred_count == 0,
+        "both_empty": gt_count == 0 and pred_count == 0,
+        "metrics_computed": ["dq", "sq", "pq"],
+    }
+    if base["both_empty"]:
+        pairing = {"tp": 0, "fp": 0, "fn": 0, "paired_true": [], "paired_pred": [], "unpaired_true": [], "unpaired_pred": []}
+        base.update({"included_in_macro": False, "skip_reason": "strict_both_empty_excluded_from_benchmark_macro", "no_match": True, "metrics": {"dq": None, "sq": None, "pq": None}, "pairing": pairing})
+    elif gt_count == 0 or pred_count == 0:
+        pairing = {
+            "tp": 0,
+            "fp": pred_count,
+            "fn": gt_count,
+            "paired_true": [],
+            "paired_pred": [],
+            "unpaired_true": [int(value) for value in gt_ids],
+            "unpaired_pred": [int(value) for value in pred_ids],
+        }
+        base.update({"included_in_macro": True, "skip_reason": None, "no_match": True, "metrics": {"dq": 0.0, "sq": 0.0, "pq": 0.0}, "pairing": pairing})
+    else:
+        intersections = table[np.ix_(gt_ids, pred_ids)]
+        unions = (
+            np.asarray(overlap["gt_areas"], dtype=np.float64)[gt_ids, None]
+            + np.asarray(overlap["pred_areas"], dtype=np.float64)[None, pred_ids]
+            - intersections
+        )
+        pairwise_iou = np.divide(intersections, unions, out=np.zeros_like(intersections), where=unions > 0)
+        if float(match_iou) >= 0.5:
+            if np.any(pairwise_iou == float(match_iou)):
+                eligible = pairwise_iou >= float(match_iou)
+                cardinality_bonus = float(min(pairwise_iou.shape) + 1)
+                weights = np.where(eligible, cardinality_bonus + pairwise_iou, 0.0)
+                paired_rows, paired_cols = linear_sum_assignment(-weights)
+                keep = eligible[paired_rows, paired_cols]
+                paired_rows, paired_cols = paired_rows[keep], paired_cols[keep]
+            else:
+                paired_rows, paired_cols = np.nonzero(pairwise_iou > float(match_iou))
+        else:
+            paired_rows, paired_cols = linear_sum_assignment(-pairwise_iou)
+            keep = pairwise_iou[paired_rows, paired_cols] > float(match_iou)
+            paired_rows, paired_cols = paired_rows[keep], paired_cols[keep]
+        paired_ious = pairwise_iou[paired_rows, paired_cols]
+        paired_true = [int(value) for value in gt_ids[paired_rows]]
+        paired_pred = [int(value) for value in pred_ids[paired_cols]]
+        paired_true_set = set(paired_true)
+        paired_pred_set = set(paired_pred)
+        unpaired_true = [int(value) for value in gt_ids if int(value) not in paired_true_set]
+        unpaired_pred = [int(value) for value in pred_ids if int(value) not in paired_pred_set]
+        tp = len(paired_true)
+        fp = len(unpaired_pred)
+        fn = len(unpaired_true)
+        dq = float(tp / (tp + 0.5 * fp + 0.5 * fn)) if tp or fp or fn else 0.0
+        sq = float(paired_ious.sum() / (tp + 1.0e-6))
+        pairing = {
+            "tp": tp,
+            "fp": fp,
+            "fn": fn,
+            "paired_true": paired_true,
+            "paired_pred": paired_pred,
+            "unpaired_true": unpaired_true,
+            "unpaired_pred": unpaired_pred,
+        }
+        base.update({"included_in_macro": True, "skip_reason": None, "no_match": tp == 0, "metrics": {"dq": dq, "sq": sq, "pq": dq * sq}, "pairing": pairing})
+    record = base
     pairing = record["pairing"] or {}
     pairs = {
         int(gt_id): int(pred_id)

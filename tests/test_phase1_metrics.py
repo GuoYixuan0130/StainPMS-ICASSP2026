@@ -2,6 +2,7 @@ import unittest
 
 import numpy as np
 
+from stainpms.evaluator import evaluate_instance_pair
 from stainpms.phase1_metrics import (
     attach_gt_error_classes,
     choose_edt_interior_points,
@@ -100,6 +101,25 @@ class Phase1MetricTests(unittest.TestCase):
         )
         for key in ("tp", "fp", "fn", "split_unmatched_gt_count", "merge_unmatched_pred_count", "boundary_localization_unmatched_gt_count"):
             self.assertEqual(cached[key], reference[key])
+
+    def test_vectorized_strict_pairing_matches_frozen_evaluator(self):
+        rng = np.random.default_rng(7)
+        cases = []
+        for _ in range(4):
+            cases.append((rng.integers(0, 4, size=(9, 11), dtype=np.int32), rng.integers(0, 5, size=(9, 11), dtype=np.int32)))
+        # Include an exact 0.5 IoU pair, which activates the evaluator's
+        # inclusive maximum-cardinality branch.
+        exact_gt = np.zeros((4, 6), dtype=np.int32)
+        exact_pred = np.zeros_like(exact_gt)
+        exact_gt[1:3, 1:3] = 1
+        exact_pred[1:3, 1:5] = 1
+        cases.append((exact_gt, exact_pred))
+        for gt, pred in cases:
+            expected = evaluate_instance_pair(gt, pred, mode="strict", match_iou=0.5)
+            observed = strict_final_pairing(gt, pred, 0.5)["evaluator"]
+            self.assertEqual(observed["pairing"], expected["pairing"])
+            for metric in ("dq", "sq", "pq"):
+                self.assertAlmostEqual(observed["metrics"][metric], expected["metrics"][metric], places=12)
 
 
 if __name__ == "__main__":
