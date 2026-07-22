@@ -87,6 +87,10 @@ diagnose_checkpoint() {
   local declaration="$2"
   local output="$3"
   local scope="$4"
+  local load_args=()
+  if [[ "$checkpoint" == "$screen_root/c0/checkpoints/"* || "$checkpoint" == "$screen_root/c1/checkpoints/"* ]]; then
+    load_args+=(--checkpoint-has-training-state)
+  fi
   conda run -n agentseg python tools/run_phase1_candidate_diagnosis.py \
     --dataset tnbc \
     --manifest "$dev_manifest" \
@@ -99,6 +103,7 @@ diagnose_checkpoint() {
     --point-nms-thr 12 --instance-nms-iou 0.5 --prompt-chunk-size 64 \
     --texture --context --discard-checkpoint-texture-bank --include-final-task-metrics \
     --drop-completed-resume-state \
+    "${load_args[@]}" \
     2>&1 | tee "$screen_root/reports/$(basename "$output").log"
 }
 

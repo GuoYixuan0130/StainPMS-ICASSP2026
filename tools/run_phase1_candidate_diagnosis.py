@@ -676,6 +676,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--checkpoint-has-training-state",
+        action="store_true",
+        help=(
+            "Explicitly permit loading a locally produced, declaration-verified "
+            "formal training checkpoint that contains optimizer/RNG state. Ordinary "
+            "checkpoints retain PyTorch's weights-only loading policy."
+        ),
+    )
+    parser.add_argument(
         "--drop-completed-resume-state",
         action="store_true",
         help=(
@@ -729,11 +738,20 @@ def main() -> int:
         torch.cuda.reset_peak_memory_stats(cuda_device_index)
 
     model_config = Config.fromfile(str(Path(args.model_config).resolve()))
-    net = build_sam2(args.sam_config, str(checkpoint), device=device)
+    net = build_sam2(
+        args.sam_config,
+        str(checkpoint),
+        device=device,
+        checkpoint_has_training_state=args.checkpoint_has_training_state,
+    )
     point_net, point_encoder = build_model(model_config)
     point_net.to(device).eval()
     point_encoder.to(device).eval()
-    checkpoint_payload = torch.load(checkpoint, map_location="cpu")
+    checkpoint_payload = torch.load(
+        checkpoint,
+        map_location="cpu",
+        weights_only=not args.checkpoint_has_training_state,
+    )
     if "model1" not in checkpoint_payload:
         raise ValueError("checkpoint has no CA-SAM2/StainPMS point-head state ('model1')")
     missing, unexpected = point_net.load_state_dict(checkpoint_payload["model1"], strict=False)

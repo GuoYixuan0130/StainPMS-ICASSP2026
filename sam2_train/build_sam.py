@@ -19,6 +19,7 @@ def build_sam2(
     mode="eval",
     hydra_overrides_extra=[],
     apply_postprocessing=True,
+    checkpoint_has_training_state=False,
 ):
 
     if apply_postprocessing:
@@ -33,7 +34,11 @@ def build_sam2(
     cfg = compose(config_name=config_file, overrides=hydra_overrides_extra)
     OmegaConf.resolve(cfg)
     model = instantiate(cfg.model, _recursive_=True)
-    _load_checkpoint(model, ckpt_path)
+    _load_checkpoint(
+        model,
+        ckpt_path,
+        checkpoint_has_training_state=checkpoint_has_training_state,
+    )
     model = model.to(device)
     if mode == "eval":
         model.eval()
@@ -76,9 +81,17 @@ def build_sam2_video_predictor(
     return model
 
 
-def _load_checkpoint(model, ckpt_path):
+def _load_checkpoint(model, ckpt_path, checkpoint_has_training_state=False):
     if ckpt_path is not None:
-        sd = torch.load(ckpt_path, map_location="cpu")["model"]
+        # Full formal-screen states contain audited RNG/optimizer metadata in
+        # addition to tensors. Keep PyTorch's safe default for ordinary model
+        # checkpoints; allow the broader loader only through an explicit caller
+        # opt-in for a locally produced, hash-verified formal state.
+        sd = torch.load(
+            ckpt_path,
+            map_location="cpu",
+            weights_only=not checkpoint_has_training_state,
+        )["model"]
         missing_keys, unexpected_keys = model.load_state_dict(sd, strict=False)
         '''
         if missing_keys:
