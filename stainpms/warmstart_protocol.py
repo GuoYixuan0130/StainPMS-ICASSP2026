@@ -255,6 +255,18 @@ def finalize_runtime_audits(runtime_stats: dict[str, Any]) -> dict[str, Any]:
                 if count
                 else None
             )
+    c2_ar = result.get("c2_ar_loss_audit")
+    if isinstance(c2_ar, dict) and int(c2_ar.get("step_count", 0)) > 0:
+        steps = int(c2_ar["step_count"])
+        c2_ar["means"] = {
+            "c1_loss": c2_ar["c1_loss_sum"] / steps,
+            "exclusivity_loss_before_lambda": c2_ar["exclusivity_loss_sum"] / steps,
+            "utility_loss_before_lambda": c2_ar["utility_loss_sum"] / steps,
+            "weighted_exclusivity": c2_ar["weighted_exclusivity_sum"] / steps,
+            "weighted_utility": c2_ar["weighted_utility_sum"] / steps,
+            "total_loss": c2_ar["total_loss_sum"] / steps,
+            "extra_to_total_ratio": c2_ar["extra_to_total_ratio_sum"] / steps,
+        }
     gradient = result.get("gradient_audit")
     if isinstance(gradient, dict) and int(gradient.get("step_count", 0)) > 0:
         steps = int(gradient["step_count"])

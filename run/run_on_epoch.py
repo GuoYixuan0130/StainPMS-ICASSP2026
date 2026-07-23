@@ -13,6 +13,7 @@ from run.utils import vis_inst_image
 from sam2_train.modeling.stats_utils import *
 from sam2_train.modeling.utils import *
 from stainpms.candidate_coverage import aggregate_candidate_prompt_groups
+from stainpms.c2_ar import c2_ar_losses
 from stainpms.evaluator import evaluate_instance_pair, write_evaluation_outputs
 
 
@@ -77,7 +78,13 @@ def _decode_training_candidates(
     # decoder forward. C0 preserves the original objective without creating
     # an auxiliary candidate group; the experimental arms differ only in
     # which approved extra loss term is enabled after this common forward.
-    common_four_candidate_path = arm in {"c0", "c1", "coverage_only", "quality_only"}
+    common_four_candidate_path = arm in {
+        "c0",
+        "c1",
+        "c2_ar",
+        "coverage_only",
+        "quality_only",
+    }
     if common_four_candidate_path:
         all_masks, all_quality, _, object_logits = net.sam_mask_decoder.predict_masks(
             image_embeddings=image_embed,
@@ -257,6 +264,63 @@ def _record_candidate_loss_audit(
             target["effective_candidate_count_prompt_weighted_sum"] += (
                 float(record["effective_candidate_count_mean"]) * count
             )
+
+
+def _record_c2_ar_loss_audit(
+    runtime_stats,
+    *,
+    c1_loss,
+    exclusivity_loss,
+    utility_loss,
+    weighted_exclusivity,
+    weighted_utility,
+    loss_audit,
+):
+    """Record only training-side C2 scale and detached-label statistics."""
+
+    if runtime_stats is None:
+        return
+    total = c1_loss + weighted_exclusivity + weighted_utility
+    extra = weighted_exclusivity + weighted_utility
+    audit = runtime_stats.setdefault(
+        "c2_ar_loss_audit",
+        {
+            "step_count": 0,
+            "c1_loss_sum": 0.0,
+            "exclusivity_loss_sum": 0.0,
+            "utility_loss_sum": 0.0,
+            "weighted_exclusivity_sum": 0.0,
+            "weighted_utility_sum": 0.0,
+            "total_loss_sum": 0.0,
+            "extra_to_total_ratio_sum": 0.0,
+            "foreign_valid_prompt_count": 0,
+            "neighbor_pair_count": 0,
+            "unique_tp_count": 0,
+            "unmatched_fp_count": 0,
+            "duplicate_count": 0,
+            "merge_risk_count": 0,
+        },
+    )
+    audit["step_count"] += 1
+    for name, value in {
+        "c1_loss_sum": c1_loss,
+        "exclusivity_loss_sum": exclusivity_loss,
+        "utility_loss_sum": utility_loss,
+        "weighted_exclusivity_sum": weighted_exclusivity,
+        "weighted_utility_sum": weighted_utility,
+        "total_loss_sum": total,
+    }.items():
+        audit[name] += float(value.detach().float().cpu())
+    ratio = extra.detach().float() / total.detach().float().abs().clamp_min(1e-12)
+    audit["extra_to_total_ratio_sum"] += float(ratio.cpu())
+    exclusivity = loss_audit["exclusivity"]
+    utility = loss_audit["utility"]
+    audit["foreign_valid_prompt_count"] += int(exclusivity["foreign_valid_prompt_count"])
+    audit["neighbor_pair_count"] += int(exclusivity["neighbor_pair_count"])
+    audit["unique_tp_count"] += int(utility["unique_tp_count"])
+    audit["unmatched_fp_count"] += int(utility["unmatched_fp_count"])
+    audit["duplicate_count"] += int(utility["duplicate_count"])
+    audit["merge_risk_count"] += int(utility["merge_risk_count"])
 
 
 def _dump_eval_artifacts(
@@ -736,6 +800,7 @@ def train_on_epoch(
                 candidate_groups = None
                 if str(getattr(cfgs, "warmstart_candidate_arm", "")).lower() in {
                     "c1",
+                    "c2_ar",
                     "coverage_only",
                     "quality_only",
                 }:
@@ -993,6 +1058,44 @@ def train_on_epoch(
                             group_audit=group_audit,
                         )
 
+                    # C2-AR is intentionally restricted to ordinary automatic
+                    # prompts. Those prompts are the only group that enters the
+                    # deployed native assembly path. PMS residual/preservation
+                    # prompts retain their original C1 supervision but are not
+                    # falsely treated as inference-time assembly candidates.
+                    if str(getattr(cfgs, "warmstart_candidate_arm", "")).lower() == "c2_ar":
+                        selected_logits = all_standard_masks[:, 0]
+                        selected_quality = all_standard_quality[:, 0]
+                        raw_exclusivity, raw_utility, c2_audit = c2_ar_losses(
+                            selected_logits,
+                            selected_quality,
+                            gt_inst_masks,
+                            cell_nums.tolist(),
+                            neighbor_radius=int(cfgs.c2_ar_neighbor_radius),
+                            match_iou=float(cfgs.c2_ar_match_iou),
+                            merge_risk_overlap_fraction=float(
+                                cfgs.c2_ar_merge_risk_overlap_fraction
+                            ),
+                        )
+                        weighted_exclusivity = raw_exclusivity * float(
+                            cfgs.c2_ar_exclusivity_coefficient
+                        )
+                        weighted_utility = raw_utility * float(
+                            cfgs.c2_ar_utility_coefficient
+                        )
+                        loss_dict["loss_c2_ar_exclusivity"] = weighted_exclusivity
+                        loss_dict["loss_c2_ar_utility"] = weighted_utility
+                        if collect_candidate_audit:
+                            _record_c2_ar_loss_audit(
+                                runtime_stats,
+                                c1_loss=stainpms_loss + weighted_coverage + weighted_quality,
+                                exclusivity_loss=raw_exclusivity,
+                                utility_loss=raw_utility,
+                                weighted_exclusivity=weighted_exclusivity,
+                                weighted_utility=weighted_utility,
+                                loss_audit=c2_audit,
+                            )
+
                 losses = sum(loss for loss in loss_dict.values())
                 metric_logger.update(lr=optimizer.param_groups[0]["lr"])
 
@@ -1020,7 +1123,7 @@ def train_on_epoch(
 
                 if (
                     str(getattr(cfgs, "warmstart_candidate_arm", "")).lower()
-                    in {"legacy", "c0", "c1", "coverage_only", "quality_only"}
+                    in {"legacy", "c0", "c1", "c2_ar", "coverage_only", "quality_only"}
                     and runtime_stats is not None
                     and runtime_stats.get("capture_gradient_audit", True)
                 ):

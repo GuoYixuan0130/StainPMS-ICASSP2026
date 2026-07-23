@@ -5,8 +5,8 @@ It mirrors the frozen Phase-1 automatic-prompt inference route, exports every
 native candidate token as compact RLE, and stops if native strict metrics do
 not reproduce the fixed-epoch values in the frozen performance summary.
 
-The accepted checkpoint is an audited ``last_complete_state.pth`` from one of
-the three frozen C0/C1 warm-start runs.  It is loaded with explicit
+The accepted checkpoint is an audited epoch-5 full state from an approved
+C0/C1 or C2-AR warm-start run.  It is loaded with explicit
 ``weights_only=False`` only after its declaration SHA256 is verified.
 """
 
@@ -155,12 +155,18 @@ def validate_declaration(declaration_path: Path, checkpoint: Path, *, seed: int,
     if declaration.get("arm") != arm:
         raise ValueError("checkpoint declaration arm does not match command arm")
     protocol = str(declaration.get("protocol", ""))
-    expected_protocol = {
-        2027: "tnbc_c0_c1_second_seed_2027_v1",
-        1337: "tnbc_c0_c1_third_seed_1337_v1",
-    }.get(seed)
+    expected_protocol = (
+        "tnbc_c2_ar_two_seed_v1"
+        if arm == "c2_ar"
+        else {
+            2027: "tnbc_c0_c1_second_seed_2027_v1",
+            1337: "tnbc_c0_c1_third_seed_1337_v1",
+        }.get(seed)
+    )
     if seed not in DIAGNOSIS_SEEDS or protocol != expected_protocol:
         raise ValueError(f"unexpected seed-{seed} protocol: {protocol}")
+    if int(declaration.get("epoch", -1)) != 5:
+        raise ValueError("zero-training diagnosis accepts only the fixed epoch-5 state")
     return {**declaration, "checkpoint_path": str(checkpoint.resolve()), "checkpoint_sha256": observed_sha}
 
 
@@ -739,11 +745,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--checkpoint-declaration", required=True)
-    parser.add_argument("--reference-performance-summary", "--reference-three-seed-summary", dest="reference_performance_summary", required=True)
+    parser.add_argument("--reference-performance-summary", "--reference-three-seed-summary", dest="reference_performance_summary", default="")
     parser.add_argument("--data-path", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--seed", required=True, type=int, choices=DIAGNOSIS_SEEDS)
-    parser.add_argument("--arm", required=True, choices=["c0", "c1"])
+    parser.add_argument("--arm", required=True, choices=["c0", "c1", "c2_ar"])
     parser.add_argument("--model-config", default="args.py")
     parser.add_argument("--sam-config", default="sam2_hiera_l")
     parser.add_argument("--crop-size", type=int, default=256)
@@ -777,8 +783,17 @@ def main() -> int:
     validate_scope(manifest, records)
     checkpoint = Path(args.checkpoint).resolve()
     declaration = validate_declaration(Path(args.checkpoint_declaration).resolve(), checkpoint, seed=args.seed, arm=args.arm)
-    reference = read_json(Path(args.reference_performance_summary).resolve(), "frozen performance reference summary")
-    targets = reference_metrics(reference, seed=args.seed, arm=args.arm)
+    if args.arm in {"c0", "c1"} and not args.reference_performance_summary:
+        raise ValueError("C0/C1 diagnosis requires the frozen performance reference summary")
+    if args.arm == "c2_ar" and args.reference_performance_summary:
+        raise ValueError("C2-AR is a new epoch-5 checkpoint and must not be forced to reproduce a C0/C1 reference")
+    targets = None
+    reference_sha = None
+    if args.reference_performance_summary:
+        reference_path = Path(args.reference_performance_summary).resolve()
+        reference = read_json(reference_path, "frozen performance reference summary")
+        targets = reference_metrics(reference, seed=args.seed, arm=args.arm)
+        reference_sha = sha256_file(reference_path)
     set_determinism(args.seed)
 
     if not torch.cuda.is_available():
@@ -822,7 +837,7 @@ def main() -> int:
         "arm": args.arm,
         "manifest_sha256": manifest["manifest_sha256"],
         "checkpoint_sha256": declaration["checkpoint_sha256"],
-        "reference_performance_summary_sha256": sha256_file(Path(args.reference_performance_summary).resolve()),
+        "reference_performance_summary_sha256": reference_sha,
         "frozen_inference": {"crop_size": args.crop_size, "out_size": args.out_size, "overlap": args.overlap, "load": args.load, "point_nms": args.point_nms_thr, "instance_nms": args.instance_nms_iou, "prompt_chunk": args.prompt_chunk_size, "texture": True, "context": True},
     }
     fingerprint_sha = json_sha256(fingerprint)
@@ -875,8 +890,19 @@ def main() -> int:
         print(f"[zero-oracle] seed={args.seed} arm={args.arm} {index + 1}/{len(dataset)} {sample_id} wall_s={image_record['wall_seconds']:.2f}", flush=True)
 
     aggregate = _aggregate_image_records(image_records)
-    reproduction = _reproduction_check(aggregate, targets, args.reproduction_tolerance)
-    if reproduction["status"] != "pass":
+    reproduction = (
+        _reproduction_check(aggregate, targets, args.reproduction_tolerance)
+        if targets is not None
+        else {
+            "status": "not_applicable_new_c2_checkpoint",
+            "reason": "C2-AR epoch-5 is a new checkpoint; its metrics are not expected to reproduce a C0/C1 frozen report.",
+            "observed": {
+                str(patient): aggregate["patients"][str(patient)]["stages"]["native_final"]["task_metrics_image_macro"]
+                for patient in (7, 8)
+            },
+        }
+    )
+    if reproduction["status"] == "fail":
         write_json_atomic(output_dir / "reproduction_failure.json", reproduction)
         raise RuntimeError("native final metrics do not reproduce the frozen fixed-epoch report; oracle attribution is stopped")
     _write_csv(output_dir / "per_image.csv", image_records)

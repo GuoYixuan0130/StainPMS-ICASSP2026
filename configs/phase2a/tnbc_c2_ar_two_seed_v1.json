@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "phase": "2A",
+  "protocol_id": "tnbc_c2_ar_two_seed_v1",
+  "purpose": "C2-AR minimum two-seed development validation; no sealed-test access",
+  "data": {
+    "dataset": "tnbc",
+    "train_protocol": "tnbc_stainpms_prepared_continuity_v1_phase1_train",
+    "train_patients": [1, 2, 3, 4, 5, 6],
+    "development_patients": [7, 8],
+    "sealed_patients": [9, 10, 11],
+    "development_access": "post-training read-only diagnosis only"
+  },
+  "initialization": {
+    "checkpoint_sha256": "44a3cb3e93051301d789e44f93769588abfa727d7a174b0270f55305ef023781",
+    "checkpoint_policy": "same historical StainPMS weight warm-start as C0/C1; model/model1 only; no optimizer, scheduler, RNG, or texture-bank resume"
+  },
+  "optimization": {
+    "seeds": [2027, 1337],
+    "epochs": 5,
+    "attempted_crop_batches_per_epoch": 270,
+    "planned_attempted_crop_batches": 1350,
+    "epoch_checkpoint_retention": "all_full_states",
+    "no_prompt_policy": "legacy skip without replacement crop",
+    "fixed_epoch_for_primary_result": 5
+  },
+  "arms": {
+    "c2_ar": {
+      "coverage_coefficient": 1.0,
+      "quality_coefficient": 1.0,
+      "coverage_tau": 0.1,
+      "c2_ar": {
+        "exclusivity_coefficient": 0.25,
+        "utility_coefficient": 0.25,
+        "neighbor_radius": 2,
+        "match_iou": 0.5,
+        "merge_risk_overlap_fraction": 0.1,
+        "selected_mask_scope": "ordinary automatic prompts only",
+        "score_scope": "existing iou_prediction_head score used by native assembly before its fixed edge penalty"
+      }
+    }
+  },
+  "storage": {
+    "minimum_free_gib": 40.0,
+    "rationale": "five approximately 6 GiB full states plus atomic-save headroom; do not compact or delete epoch states during this protocol"
+  },
+  "inference": {
+    "modified": false,
+    "nms_threshold": 12,
+    "instance_nms_iou": 0.5,
+    "assembly": "native unchanged"
+  }
+}

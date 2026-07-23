@@ -157,6 +157,7 @@ def parse_args():
             "formal_tnbc_pqbest_ablation_5epoch",
             "formal_tnbc_pqbest_repro_5epoch",
             "formal_tnbc_pqbest_third_seed_5epoch",
+            "formal_tnbc_c2_ar_5epoch",
         ],
         help=(
             "Exploratory train-only C0/C1 stage. formal_tnbc_5epoch is the "
@@ -166,7 +167,7 @@ def parse_args():
     parser.add_argument(
         "--warmstart_candidate_arm",
         default="",
-        choices=["", "legacy", "c0", "c1", "coverage_only", "quality_only"],
+        choices=["", "legacy", "c0", "c1", "c2_ar", "coverage_only", "quality_only"],
         help=(
             "legacy is an equivalence reference only; c0/c1 share the explicit "
             "four-native-candidate decoder call."
@@ -194,12 +195,25 @@ def parse_args():
         "--warmstart_screen_config",
         default="",
         type=str,
-        help="Hash-recorded frozen config required only by formal_tnbc_5epoch.",
+        help="Hash-recorded frozen config required by each formal TNBC warm-start run.",
+    )
+    parser.add_argument(
+        "--warmstart_required_free_gib",
+        default=0.0,
+        type=float,
+        help="Frozen C2-only minimum free storage before retaining all five full states.",
     )
     parser.add_argument("--warmstart_smoke_updates", default=0, type=int)
     parser.add_argument("--candidate_coverage_tau", default=0.1, type=float)
     parser.add_argument("--candidate_coverage_coefficient", default=1.0, type=float)
     parser.add_argument("--candidate_quality_coefficient", default=1.0, type=float)
+    parser.add_argument("--c2_ar_exclusivity_coefficient", default=0.0, type=float)
+    parser.add_argument("--c2_ar_utility_coefficient", default=0.0, type=float)
+    parser.add_argument("--c2_ar_neighbor_radius", default=2, type=int)
+    parser.add_argument("--c2_ar_match_iou", default=0.5, type=float)
+    parser.add_argument(
+        "--c2_ar_merge_risk_overlap_fraction", default=0.1, type=float
+    )
 
     parser.add_argument("--use_pms", action="store_true")
     parser.add_argument("--pms_loss_coef", default=-1.0, type=float)
