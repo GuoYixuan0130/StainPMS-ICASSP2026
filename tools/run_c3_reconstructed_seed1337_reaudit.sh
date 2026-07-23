@@ -18,7 +18,8 @@ old_c2_mechanism_2027=$7
 output_root=$8
 nms_iou=$9
 
-[[ -d "$repo_root/.git" ]] || { echo "invalid repository: $repo_root" >&2; exit 2; }
+git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+  || { echo "invalid repository worktree: $repo_root" >&2; exit 2; }
 [[ -f "$dev_manifest" ]] || { echo "missing p7/p8 manifest" >&2; exit 2; }
 [[ -d "$old_c1_2027/completed_images" ]] || { echo "missing retained seed-2027 C1 compact artifacts" >&2; exit 2; }
 [[ -f "$old_c3" ]] || { echo "missing accepted historical seed-2027 C3 audit" >&2; exit 2; }

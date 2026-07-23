@@ -17,7 +17,8 @@ init_checkpoint=$6
 tnbc_data=$7
 required_free_gib=$8
 
-[[ -d "$repo_root/.git" ]] || { echo "invalid repository: $repo_root" >&2; exit 2; }
+git -C "$repo_root" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+  || { echo "invalid repository worktree: $repo_root" >&2; exit 2; }
 [[ -f "$original_root/c1/training_summary.json" ]] || { echo "missing original seed-1337 C1 training summary" >&2; exit 2; }
 [[ -f "$coverage_manifest" ]] || { echo "missing frozen train-only coverage manifest" >&2; exit 2; }
 [[ -f "$train_manifest" ]] || { echo "missing p1-p6 train manifest" >&2; exit 2; }
