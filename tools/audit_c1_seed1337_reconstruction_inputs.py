@@ -77,6 +77,12 @@ def main() -> int:
     coverage = read_json(coverage_path)
     config = summary.get("training_configuration", {})
     objective = config.get("objective", {})
+    # The accepted original C1 summaries predate C2-AR and therefore omit the
+    # `c2_ar` object entirely.  Absence is an auditable zero here: C2 did not
+    # exist in that code path, rather than being an unknown nonzero setting.
+    source_c2 = objective.get("c2_ar", {})
+    if not isinstance(source_c2, dict):
+        source_c2 = {}
     optimizer = config.get("optimizer", {})
     scheduler = config.get("scheduler", {})
     determinism = summary.get("determinism", {})
@@ -129,8 +135,8 @@ def main() -> int:
             float(objective.get("candidate_coverage_tau", float("nan"))) == 0.1
             and float(objective.get("candidate_coverage_coefficient", float("nan"))) == 1.0
             and float(objective.get("candidate_quality_coefficient", float("nan"))) == 1.0
-            and float(objective.get("c2_ar", {}).get("selected_mask_exclusivity_coefficient", float("nan"))) == 0.0
-            and float(objective.get("c2_ar", {}).get("unique_tp_utility_coefficient", float("nan"))) == 0.0
+            and float(source_c2.get("selected_mask_exclusivity_coefficient", 0.0)) == 0.0
+            and float(source_c2.get("unique_tp_utility_coefficient", 0.0)) == 0.0
         ),
         "source_command_preserves_original_core_recipe": (
             all(command_value(command, flag) == value for flag, value in expected_values.items())
@@ -162,6 +168,11 @@ def main() -> int:
         "train_manifest": {"path": str(train_path), "sha256": sha256_file(train_path)},
         "coverage_manifest": {"path": str(coverage_path), "sha256": sha256_file(coverage_path)},
         "initialization": {"path": str(init_path), "sha256": sha256_file(init_path)},
+        "source_c2_compatibility": {
+            "c2_object_present_in_original_c1_summary": bool(source_c2),
+            "missing_c2_fields_interpreted_as": 0.0,
+            "reason": "the original C1 run predates the C2-AR implementation",
+        },
     }
     payload["input_fingerprint_sha256"] = json_sha256(payload)
     output.parent.mkdir(parents=True, exist_ok=True)
