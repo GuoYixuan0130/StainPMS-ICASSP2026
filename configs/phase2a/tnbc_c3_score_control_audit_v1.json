@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "protocol_id": "tnbc_c3_score_control_feasibility_audit_v1",
+  "phase": "2A",
+  "kind": "zero_training_gt_only_upper_bound",
+  "frozen_c2_closure_commit": "8dbe0fcf0a11a546d1bc1d08a72f34fed093074d",
+  "scope": {
+    "dataset": "tnbc",
+    "allowed_patients": [7, 8],
+    "forbidden_patients": [9, 10, 11],
+    "allowed_seeds": [2027, 1337],
+    "source_arm": "c1",
+    "source_epoch": 5,
+    "source_masks": "fixed native-selected masks",
+    "source_scores": "fixed native assembly scores",
+    "no_training": true,
+    "no_model_loading": true,
+    "no_dataset_loading": true
+  },
+  "fixed_native_assembly": {
+    "implementation": "run.run_on_epoch._assemble_instance_map",
+    "instance_nms_iou": 0.5,
+    "score_keep_reject_threshold": null,
+    "score_semantics": ["same_prompt_group_prefilter", "cross-category_nms_order", "paint_order"]
+  },
+  "gt_only_interventions": {
+    "fp_demotion_oracle": "demote unmatched-FP scores below all non-FP scores; no native threshold exists, so this is not literal filtering",
+    "duplicate_order_oracle": "within a real conflict component, permute score values to place unique TP ahead of a duplicate that competes for the same GT; preserve final instance count",
+    "conflict_order_oracle": "inside real non-singleton conflict components, permute native score multiset by oracle utility; preserve final instance count",
+    "merge_risk_demotion_oracle": "demote only detached leave-one-out TP-harming merge-risk predictions",
+    "full_score_oracle": "replace score with detached unique-TP utility times unchanged edge penalty"
+  },
+  "gate": {
+    "same_primary_intervention_for_both_seeds": true,
+    "single_intervention_recovers_at_least_fraction_of_full_oracle": 0.3,
+    "single_intervention_absolute_pq_gain_at_least": 0.003,
+    "no_mask_or_candidate_change": true,
+    "on_failure": "close_assembly_scoring_route"
+  }
+}
