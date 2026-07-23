@@ -805,6 +805,8 @@ def train_on_epoch(
                 if str(getattr(cfgs, "warmstart_candidate_arm", "")).lower() in {
                     "c1",
                     "c2_ar",
+                    "c2_e",
+                    "c2_u",
                     "coverage_only",
                     "quality_only",
                 }:
