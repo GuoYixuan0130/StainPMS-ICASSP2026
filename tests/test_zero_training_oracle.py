@@ -11,6 +11,7 @@ from stainpms.zero_training_oracle import (
     error_partition,
     maximum_cardinality_max_iou_matching,
     native_final_stage,
+    normalize_point_xy,
     oracle_pool_stage,
 )
 
@@ -29,6 +30,10 @@ class ZeroTrainingOracleTests(unittest.TestCase):
     def test_rle_round_trip_preserves_fortran_order(self):
         mask = np.array([[0, 1, 0], [1, 1, 0], [0, 0, 1]], dtype=bool)
         self.assertTrue(np.array_equal(mask, decode_binary_rle(encode_binary_rle(mask))))
+
+    def test_point_serialization_accepts_mask_process_nested_coordinate(self):
+        self.assertEqual(normalize_point_xy([[12.5, 8.0]]), [12.5, 8.0])
+        self.assertEqual(normalize_point_xy(np.array([3.0, 4.0])), [3.0, 4.0])
 
     def test_matching_prioritises_cardinality_before_iou_sum(self):
         # Group 1 could take GT 1 at .99, but then group 2 has no eligible

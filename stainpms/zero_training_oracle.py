@@ -24,6 +24,15 @@ ORACLE_MATCH_IOU = 0.5
 ERROR_SENSITIVITY_FRACTIONS = (0.0, 0.1)
 
 
+def normalize_point_xy(value: Any) -> list[float]:
+    """Serialize either ``[x, y]`` or ``[[x, y]]`` as a stable point pair."""
+
+    numeric = np.asarray(value, dtype=np.float64).reshape(-1)
+    if numeric.size != 2:
+        raise ValueError(f"point coordinate must contain exactly two values, got shape {np.asarray(value).shape}")
+    return [float(numeric[0]), float(numeric[1])]
+
+
 def encode_binary_rle(mask: np.ndarray) -> dict[str, Any]:
     """Encode a 2-D binary mask as deterministic uncompressed COCO-style RLE."""
 

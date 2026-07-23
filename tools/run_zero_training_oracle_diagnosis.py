@@ -57,6 +57,7 @@ from stainpms.zero_training_oracle import (
     error_partition,
     final_pool_oracle_stage,
     native_final_stage,
+    normalize_point_xy,
     oracle_pool_stage,
     pool_gt_maxima,
 )
@@ -244,7 +245,7 @@ def _record_from_mask_data(
         "prompt_group_id": prompt_group,
         "token": int(token),
         "crop_index": int(crop_index),
-        "point_xy": [float(value) for value in mask_data["point"]],
+        "point_xy": normalize_point_xy(mask_data["point"]),
         "bbox_xyxy": [float(value) for value in mask_data["bbox"]],
         "quality": quality,
         "assembly_score": quality * (0.3 if edge_penalized else 1.0),
