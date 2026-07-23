@@ -58,7 +58,10 @@ class C2ARTests(unittest.TestCase):
             leaked.requires_grad_(), gt, [2], neighbor_radius=2
         )
         self.assertGreater(leaked_loss.item(), clean_loss.item())
-        self.assertGreater(audit["foreign_leakage"], 0.5)
+        # One of the two selected masks entirely occupies the other nucleus,
+        # while the other mask has no foreign leakage.  The group mean is
+        # therefore exactly 0.5 rather than strictly larger.
+        self.assertGreaterEqual(audit["foreign_leakage"], 0.5)
         self.assertGreater(audit["conflict"], 0.1)
 
     def test_utility_labels_count_unique_tp_duplicate_and_fp(self):
@@ -86,7 +89,10 @@ class C2ARTests(unittest.TestCase):
         gt = self.two_instances(nearby=True)
         logits = torch.full_like(gt, -12.0)
         logits[0, 3:6, 2:5] = 12.0
-        logits[0, 3:6, 6:9] = 12.0  # GT 0 prediction leaks fully into GT 1
+        # A partial foreign leak keeps the IoU with GT 0 strictly above the
+        # evaluator's >0.5 match threshold, so it is a unique TP with a
+        # reduced utility target rather than an unmatched merge.
+        logits[0, 3:5, 6:8] = 12.0
         logits[1, 3:6, 6:9] = 12.0
         quality = torch.zeros(2, requires_grad=True)
         _, audit = self.unique_tp_utility_loss(
