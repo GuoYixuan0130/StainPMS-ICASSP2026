@@ -51,7 +51,13 @@ def build_plan(run_roots: list[Path]) -> dict[str, Any]:
         summary = read_json(summary_path)
         if summary.get("status") != "complete" or summary.get("stage") != "formal_tnbc_c2_ar_5epoch":
             raise ValueError(f"not a completed formal C2-EU run: {root}")
-        if summary.get("checkpoint_retention") != "all_full_states":
+        # The completed C2-EU runs predate the explicit
+        # ``checkpoint_retention`` field.  A missing value is therefore a
+        # legacy-schema case, not evidence that the run used a different
+        # retention policy.  Infer all-state retention only after the stricter
+        # checks below confirm five contiguous, hash-verified full states.
+        declared_retention = summary.get("checkpoint_retention")
+        if declared_retention not in (None, "all_full_states"):
             raise ValueError(f"C2-EU source does not declare all-full-state retention: {root}")
         records = summary.get("epochs", [])
         if not isinstance(records, list) or len(records) != 5:
@@ -81,7 +87,18 @@ def build_plan(run_roots: list[Path]) -> dict[str, Any]:
             else:
                 remove.append(payload)
         assert retained is not None
-        plans.append({"run_root": str(root), "retained_epoch5": retained, "remove_epoch1_to4": remove})
+        plans.append(
+            {
+                "run_root": str(root),
+                "source_checkpoint_retention": (
+                    declared_retention
+                    if declared_retention is not None
+                    else "legacy_inferred_from_five_complete_states"
+                ),
+                "retained_epoch5": retained,
+                "remove_epoch1_to4": remove,
+            }
+        )
     reclaim = sum(item["checkpoint_bytes"] + item["declaration_bytes"] for plan in plans for item in plan["remove_epoch1_to4"])
     return {"schema_version": 1, "protocol": "c2_eu_epoch5_retention_compaction_v1", "status": "planned_read_only", "runs": plans, "projected_reclaimable_bytes": reclaim, "projected_reclaimable_gib": reclaim / (1024 ** 3), "deletion_scope": "only validated C2-EU epoch-1--4 .pth and matching declaration JSON; fixed epoch-5 state and all summaries/logs/manifests are retained"}
 
