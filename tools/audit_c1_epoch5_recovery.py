@@ -63,7 +63,10 @@ def canonical_tensor_hash(state: dict[str, Any], torch_module) -> tuple[str, dic
             tensor = values[name]
             if not torch_module.is_tensor(tensor):
                 raise ValueError(f"{section}.{name} is not a tensor")
-            raw = tensor.detach().cpu().contiguous().view(torch_module.uint8).numpy().tobytes()
+            # State dicts can contain scalar counters (0-D tensors).  Flatten
+            # first so the byte reinterpretation has a concrete dimension on
+            # every PyTorch version.
+            raw = tensor.detach().cpu().contiguous().reshape(-1).view(torch_module.uint8).numpy().tobytes()
             header = json.dumps({"section": section, "name": str(name), "dtype": str(tensor.dtype), "shape": list(tensor.shape)}, sort_keys=True, separators=(",", ":")).encode("utf-8")
             digest.update(len(header).to_bytes(8, "little")); digest.update(header)
             digest.update(len(raw).to_bytes(8, "little")); digest.update(raw)
