@@ -3,7 +3,7 @@
 This runner intentionally creates no optimizer and never calls ``backward``.
 It mirrors the frozen Phase-1 automatic-prompt inference route, exports every
 native candidate token as compact RLE, and stops if native strict metrics do
-not reproduce the fixed-epoch values in ``three_seed_summary.json``.
+not reproduce the fixed-epoch values in the frozen performance summary.
 
 The accepted checkpoint is an audited ``last_complete_state.pth`` from one of
 the three frozen C0/C1 warm-start runs.  It is loaded with explicit
@@ -63,6 +63,7 @@ from stainpms.zero_training_oracle import (
 
 
 TASK_NAMES = ("dice1", "dice2", "aji", "dq", "sq", "pq")
+DIAGNOSIS_SEEDS = (2027, 1337)
 
 
 def sha256_file(path: Path) -> str:
@@ -154,15 +155,10 @@ def validate_declaration(declaration_path: Path, checkpoint: Path, *, seed: int,
         raise ValueError("checkpoint declaration arm does not match command arm")
     protocol = str(declaration.get("protocol", ""))
     expected_protocol = {
-        3407: "tnbc_c0_c1_pqbest_retention_compaction_v1",
         2027: "tnbc_c0_c1_second_seed_2027_v1",
         1337: "tnbc_c0_c1_third_seed_1337_v1",
     }.get(seed)
-    # The first run was compacted after its initial five-epoch experiment and
-    # retains a different checkpoint declaration protocol.  It remains valid
-    # only as the frozen fixed-epoch record represented by the supplied
-    # three-seed summary.
-    if seed in {2027, 1337} and protocol != expected_protocol:
+    if seed not in DIAGNOSIS_SEEDS or protocol != expected_protocol:
         raise ValueError(f"unexpected seed-{seed} protocol: {protocol}")
     return {**declaration, "checkpoint_path": str(checkpoint.resolve()), "checkpoint_sha256": observed_sha}
 
@@ -177,10 +173,10 @@ def reference_metrics(reference: dict[str, Any], *, seed: int, arm: str) -> dict
         for patient in (7, 8):
             metrics = patients.get(str(patient), {}).get("task_metrics_image_macro")
             if not isinstance(metrics, dict):
-                raise ValueError(f"three-seed reference lacks seed={seed} arm={arm} patient={patient}")
+                raise ValueError(f"frozen reference lacks seed={seed} arm={arm} patient={patient}")
             output[patient] = {name: float(metrics[name]) for name in TASK_NAMES}
         return output
-    raise ValueError(f"three-seed reference lacks seed {seed}")
+    raise ValueError(f"frozen reference lacks seed {seed}")
 
 
 def runtime_cfg(args: argparse.Namespace) -> SimpleNamespace:
@@ -742,10 +738,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--checkpoint-declaration", required=True)
-    parser.add_argument("--reference-three-seed-summary", required=True)
+    parser.add_argument("--reference-performance-summary", "--reference-three-seed-summary", dest="reference_performance_summary", required=True)
     parser.add_argument("--data-path", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--seed", required=True, type=int, choices=[3407, 2027, 1337])
+    parser.add_argument("--seed", required=True, type=int, choices=DIAGNOSIS_SEEDS)
     parser.add_argument("--arm", required=True, choices=["c0", "c1"])
     parser.add_argument("--model-config", default="args.py")
     parser.add_argument("--sam-config", default="sam2_hiera_l")
@@ -780,7 +776,7 @@ def main() -> int:
     validate_scope(manifest, records)
     checkpoint = Path(args.checkpoint).resolve()
     declaration = validate_declaration(Path(args.checkpoint_declaration).resolve(), checkpoint, seed=args.seed, arm=args.arm)
-    reference = read_json(Path(args.reference_three_seed_summary).resolve(), "three-seed reference summary")
+    reference = read_json(Path(args.reference_performance_summary).resolve(), "frozen performance reference summary")
     targets = reference_metrics(reference, seed=args.seed, arm=args.arm)
     set_determinism(args.seed)
 
@@ -820,12 +816,12 @@ def main() -> int:
     progress_path = output_dir / "progress.json"
     texture_state_path = output_dir / "texture_memory_bank.pt"
     fingerprint = {
-        "protocol": "tnbc_zero_training_oracle_diagnosis_v1",
+        "protocol": "tnbc_zero_training_oracle_diagnosis_two_seed_v1",
         "seed": args.seed,
         "arm": args.arm,
         "manifest_sha256": manifest["manifest_sha256"],
         "checkpoint_sha256": declaration["checkpoint_sha256"],
-        "reference_three_seed_summary_sha256": sha256_file(Path(args.reference_three_seed_summary).resolve()),
+        "reference_performance_summary_sha256": sha256_file(Path(args.reference_performance_summary).resolve()),
         "frozen_inference": {"crop_size": args.crop_size, "out_size": args.out_size, "overlap": args.overlap, "load": args.load, "point_nms": args.point_nms_thr, "instance_nms": args.instance_nms_iou, "prompt_chunk": args.prompt_chunk_size, "texture": True, "context": True},
     }
     fingerprint_sha = json_sha256(fingerprint)
@@ -881,7 +877,7 @@ def main() -> int:
     reproduction = _reproduction_check(aggregate, targets, args.reproduction_tolerance)
     if reproduction["status"] != "pass":
         write_json_atomic(output_dir / "reproduction_failure.json", reproduction)
-        raise RuntimeError("native final metrics do not reproduce the frozen three-seed report; oracle attribution is stopped")
+        raise RuntimeError("native final metrics do not reproduce the frozen fixed-epoch report; oracle attribution is stopped")
     _write_csv(output_dir / "per_image.csv", image_records)
     torch.cuda.synchronize(device_index)
     report = {

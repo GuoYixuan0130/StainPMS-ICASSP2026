@@ -12,6 +12,11 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
+DIAGNOSIS_SEEDS = (2027, 1337)
+EXCLUDED_SEED_3407 = {
+    "seed": 3407,
+    "reason": "C0 fixed epoch-5 complete checkpoint was deleted during prior retention compaction and cannot be recovered; no substitute checkpoint is permitted.",
+}
 
 
 def sha256_file(path: Path) -> str:
@@ -42,8 +47,8 @@ def parse_root(value: str) -> tuple[int, Path]:
         seed = int(raw_seed)
     except ValueError as exc:
         raise argparse.ArgumentTypeError("--seed-root must be SEED=/absolute/root") from exc
-    if seed not in {3407, 2027, 1337}:
-        raise argparse.ArgumentTypeError("only seeds 3407, 2027, 1337 are permitted")
+    if seed not in DIAGNOSIS_SEEDS:
+        raise argparse.ArgumentTypeError("only paired epoch-5 diagnostic seeds 2027 and 1337 are permitted")
     return seed, Path(raw_path).resolve()
 
 
@@ -85,7 +90,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed-root", action="append", required=True, type=parse_root)
     parser.add_argument("--development-manifest", required=True)
-    parser.add_argument("--reference-three-seed-summary", required=True)
+    parser.add_argument("--reference-performance-summary", "--reference-three-seed-summary", dest="reference_performance_summary", required=True)
     parser.add_argument("--output", required=True)
     return parser.parse_args()
 
@@ -93,25 +98,26 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     roots = dict(args.seed_root)
-    if set(roots) != {3407, 2027, 1337}:
-        raise ValueError("all three frozen seed roots are required")
+    if set(roots) != set(DIAGNOSIS_SEEDS):
+        raise ValueError("both paired epoch-5 diagnostic seed roots (2027 and 1337) are required")
     manifest_path = Path(args.development_manifest).resolve()
-    reference_path = Path(args.reference_three_seed_summary).resolve()
+    reference_path = Path(args.reference_performance_summary).resolve()
     manifest = read_json(manifest_path)
     reference = read_json(reference_path)
     allowed = {int(value) for value in manifest.get("allowed_patients", [])}
     records = manifest.get("records", [])
     record_patients = {int(row.get("patient", -1)) for row in records}
-    arms = [inspect_arm(seed, arm, roots[seed]) for seed in (3407, 2027, 1337) for arm in ("c0", "c1")]
+    arms = [inspect_arm(seed, arm, roots[seed]) for seed in DIAGNOSIS_SEEDS for arm in ("c0", "c1")]
     failures = [row for row in arms if row["status"] != "complete"]
     report = {
         "schema_version": 1,
-        "protocol": "tnbc_zero_training_oracle_diagnosis_v1",
+        "protocol": "tnbc_zero_training_oracle_diagnosis_two_seed_v1",
         "status": "complete" if not failures and allowed == {7, 8} and record_patients == {7, 8} else "issues_found",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "repository": {"branch": git_value("branch", "--show-current"), "commit": git_value("rev-parse", "HEAD"), "dirty_files": (git_value("status", "--short") or "").splitlines()},
         "development_manifest": {"path": str(manifest_path), "sha256": sha256_file(manifest_path), "protocol_id": manifest.get("protocol_id"), "allowed_patients": sorted(allowed), "record_patients": sorted(record_patients), "record_count": len(records), "sealed_patients_absent": not bool(({9, 10, 11} & record_patients))},
-        "reference_three_seed_summary": {"path": str(reference_path), "sha256": sha256_file(reference_path), "protocol": reference.get("protocol"), "seeds": reference.get("seeds")},
+        "reference_fixed_epoch_performance_summary": {"path": str(reference_path), "sha256": sha256_file(reference_path), "protocol": reference.get("protocol"), "seeds": reference.get("seeds")},
+        "excluded_seed": EXCLUDED_SEED_3407,
         "epoch5_artifacts": arms,
         "export_capability": {
             "runner": str((ROOT / "tools" / "run_zero_training_oracle_diagnosis.py").resolve()),

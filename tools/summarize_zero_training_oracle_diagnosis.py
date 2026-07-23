@@ -20,8 +20,12 @@ if str(ROOT) not in sys.path:
 from stainpms.zero_training_oracle import summarize_numeric
 
 
-SEEDS = (3407, 2027, 1337)
+SEEDS = (2027, 1337)
 ARMS = ("c0", "c1")
+EXCLUDED_SEED_3407 = {
+    "seed": 3407,
+    "reason": "C0 fixed epoch-5 complete checkpoint was deleted during prior retention compaction and cannot be recovered; no substitute checkpoint is permitted.",
+}
 SCOPES = (("p7", "7"), ("p8", "8"), ("patient_macro", "patient_macro"))
 STAGES = ("native_final", "final_pool_oracle", "native_selected_pool_oracle", "all_candidate_pool_oracle")
 STAGE_FIELDS = (
@@ -77,7 +81,7 @@ def parse_assignment(value: str) -> tuple[int, str, Path]:
     except ValueError as exc:
         raise argparse.ArgumentTypeError("--input must be SEED:ARM=/absolute/path/to/summary.json") from exc
     if seed not in SEEDS or arm not in ARMS:
-        raise argparse.ArgumentTypeError("only seeds 3407, 2027, 1337 and arms c0, c1 are permitted")
+        raise argparse.ArgumentTypeError("only paired epoch-5 diagnostic seeds 2027/1337 and arms c0/c1 are permitted")
     return seed, arm, Path(raw_path).resolve()
 
 
@@ -153,12 +157,13 @@ def format_stat(value: float | None, *, signed: bool = False) -> str:
 
 
 def markdown(payload: dict[str, Any]) -> str:
-    aggregate = payload["three_seed_patient_macro"]
+    aggregate = payload["two_seed_patient_macro"]
     lines = [
-        "# TNBC zero-training four-level oracle diagnosis",
+        "# TNBC two-seed zero-training four-level oracle diagnosis",
         "",
-        "- Scope: fixed epoch-5 C0/C1, seeds 3407/2027/1337, TNBC development p7/p8 only.",
-        "- Native-final reproduction gate: passed for all six runs before oracle attribution.",
+        "- Scope: fixed epoch-5 C0/C1, paired seeds 2027/1337, TNBC development p7/p8 only.",
+        "- Excluded seed 3407: its C0 fixed epoch-5 complete checkpoint was deleted and cannot be recovered; no surrogate is used.",
+        "- Native-final reproduction gate: passed for all four runs before oracle attribution.",
         "- Oracle pools remove unmatched predictions and are ideal upper bounds, not deployable performance.",
         "",
         "## Paired C1-full minus C0 at native final",
@@ -169,7 +174,7 @@ def markdown(payload: dict[str, Any]) -> str:
     for field in ("aji", "pq", "dq", "sq", "dice1"):
         values = aggregate["c1_minus_c0"]["stages"]["native_final"][field]
         lines.append(f"| {field} | {format_stat(values['mean'], signed=True)} | {format_stat(values['std_sample'])} | {values['positive_count']}/{values['count']} |")
-    lines.extend(["", "## Oracle PQ gaps within each arm", "", "Values are pooled-stage upper-bound differences, patient-macro then three-seed mean.", "", "| arm | gap | PQ mean | sample std |", "|---|---|---:|---:|"])
+    lines.extend(["", "## Oracle PQ gaps within each arm", "", "Values are pooled-stage upper-bound differences, patient-macro then two-seed mean.", "", "| arm | gap | PQ mean | sample std |", "|---|---|---:|---:|"])
     for arm in ARMS:
         for name, values in aggregate["within_arm_gaps"][arm].items():
             pq = values["pq"]
@@ -214,7 +219,7 @@ def write_csv(path: Path, payload: dict[str, Any]) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", action="append", required=True, type=parse_assignment, help="SEED:ARM=/path/to/summary.json; provide all six")
+    parser.add_argument("--input", action="append", required=True, type=parse_assignment, help="SEED:ARM=/path/to/summary.json; provide all four paired runs")
     parser.add_argument("--output-dir", required=True)
     return parser.parse_args()
 
@@ -228,7 +233,7 @@ def main() -> int:
         inputs[(seed, arm)] = path
     expected = {(seed, arm) for seed in SEEDS for arm in ARMS}
     if set(inputs) != expected:
-        raise ValueError("all six fixed seed/arm summaries are required")
+        raise ValueError("all four paired epoch-5 seed/arm summaries are required")
     summaries: dict[tuple[int, str], dict[str, Any]] = {}
     for key, path in inputs.items():
         summary = read_json(path)
@@ -274,11 +279,12 @@ def main() -> int:
     }
     payload = {
         "schema_version": 1,
-        "protocol": "tnbc_zero_training_oracle_diagnosis_v1",
+        "protocol": "tnbc_zero_training_oracle_diagnosis_two_seed_v1",
         "status": "complete",
-        "scope": "TNBC p7/p8 only; three fixed seeds and fixed epoch 5; no training",
+        "scope": "TNBC p7/p8 only; paired seeds 2027/1337 at fixed epoch 5; no training",
+        "excluded_seed": EXCLUDED_SEED_3407,
         "per_seed": per_seed,
-        "three_seed_patient_macro": {"within_arm_gaps": within_arm_gaps, "c1_minus_c0": aggregate_c1_c0},
+        "two_seed_patient_macro": {"within_arm_gaps": within_arm_gaps, "c1_minus_c0": aggregate_c1_c0},
     }
     output_dir = Path(args.output_dir).resolve()
     write_json_atomic(output_dir / "zero_training_diagnosis.json", payload)

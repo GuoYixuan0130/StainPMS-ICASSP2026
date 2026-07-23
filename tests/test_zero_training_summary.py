@@ -63,12 +63,12 @@ class ZeroTrainingSummaryTests(unittest.TestCase):
         self.assertAlmostEqual(values["mechanism"]["all_candidate_best_iou_mean"], 0.02)
         self.assertAlmostEqual(values["errors"]["generation_miss"], -0.02)
 
-    def test_six_input_cli_writes_utf8_machine_and_human_outputs(self):
+    def test_four_input_cli_writes_utf8_machine_and_human_outputs(self):
         workspace = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(dir=workspace, prefix=".tmp_zero_training_summary_") as raw_directory:
             directory = Path(raw_directory)
             assignments = []
-            for seed in (3407, 2027, 1337):
+            for seed in (2027, 1337):
                 for arm, offset in (("c0", 0.0), ("c1", 0.01)):
                     source = directory / f"{seed}_{arm}.json"
                     source.write_text(
@@ -93,8 +93,9 @@ class ZeroTrainingSummaryTests(unittest.TestCase):
                 sys.argv = original_argv
             payload = json.loads((output / "zero_training_diagnosis.json").read_text(encoding="utf-8"))
             self.assertEqual(payload["status"], "complete")
-            self.assertIn("all_candidate_best_iou_mean", payload["three_seed_patient_macro"]["c1_minus_c0"]["mechanism"])
-            self.assertIsNotNone(payload["three_seed_patient_macro"]["c1_minus_c0"]["stages"]["native_final"]["aji"]["mean"])
+            self.assertEqual(payload["excluded_seed"]["seed"], 3407)
+            self.assertIn("all_candidate_best_iou_mean", payload["two_seed_patient_macro"]["c1_minus_c0"]["mechanism"])
+            self.assertIsNotNone(payload["two_seed_patient_macro"]["c1_minus_c0"]["stages"]["native_final"]["aji"]["mean"])
             self.assertTrue((output / "zero_training_diagnosis.csv").is_file())
             self.assertTrue((output / "zero_training_diagnosis.md").is_file())
 

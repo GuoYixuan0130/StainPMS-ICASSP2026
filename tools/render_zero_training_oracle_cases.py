@@ -17,6 +17,7 @@ import numpy as np
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
+DIAGNOSIS_SEEDS = (2027, 1337)
 import sys
 
 if str(ROOT) not in sys.path:
@@ -32,7 +33,7 @@ def parse_assignment(value: str) -> tuple[int, str, Path]:
         seed = int(seed_raw)
     except ValueError as exc:
         raise argparse.ArgumentTypeError("--input must be SEED:ARM=/completed/run/directory") from exc
-    if seed not in {3407, 2027, 1337} or arm not in {"c0", "c1"}:
+    if seed not in DIAGNOSIS_SEEDS or arm not in {"c0", "c1"}:
         raise argparse.ArgumentTypeError("invalid fixed seed/arm")
     return seed, arm, Path(raw_path).resolve()
 
@@ -61,7 +62,7 @@ def native_pq(payload: dict[str, Any]) -> float:
 def find_cases(arms: dict[tuple[int, str], dict[str, dict[str, Any]]]) -> dict[str, dict[str, Any] | None]:
     candidate_improvement: list[tuple[float, dict[str, Any]]] = []
     final_improvement: list[tuple[float, dict[str, Any]]] = []
-    for seed in (3407, 2027, 1337):
+    for seed in DIAGNOSIS_SEEDS:
         for sample_id, c0 in arms[(seed, "c0")].items():
             c1 = arms[(seed, "c1")][sample_id]
             c0_record = c0["image_record"]
@@ -139,9 +140,9 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     assignments = {(seed, arm): path for seed, arm, path in args.input}
-    expected = {(seed, arm) for seed in (3407, 2027, 1337) for arm in ("c0", "c1")}
+    expected = {(seed, arm) for seed in DIAGNOSIS_SEEDS for arm in ("c0", "c1")}
     if set(assignments) != expected:
-        raise ValueError("all six seed/arm oracle directories are required")
+        raise ValueError("all four paired seed/arm oracle directories are required")
     arms = {key: read_artifacts(path) for key, path in assignments.items()}
     for key, records in arms.items():
         for payload in records.values():
