@@ -231,16 +231,19 @@ def validate_source(root: Path, seed: int) -> list[dict[str, Any]]:
     artifacts = [payload["artifact"] for payload in payloads]
     if len(artifacts) != 7 or {int(row["patient"]) for row in artifacts} != {7, 8}:
         raise ValueError(f"C3 source must contain exactly seven p7/p8 artifacts: {root}")
-    return artifacts
+    # Keep the outer payload as well: its image_record is the frozen native
+    # reference that must be reproduced before any GT-only attribution runs.
+    return payloads
 
 
 def audit_seed(root: Path, seed: int, *, nms_iou: float) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
-    for artifact in validate_source(root, seed):
+    for payload in validate_source(root, seed):
+        artifact = payload["artifact"]
         gt_map = deserialize_gt(artifact)
         selected = deserialize_selected(artifact)
         result = audit_image(selected, gt_map, nms_iou=nms_iou)
-        expected = artifact["image_record"]["stages"]["native_final"]
+        expected = payload["image_record"]["stages"]["native_final"]
         actual = result["stages"]["native"]
         mismatch = {
             field: {"expected": expected.get(field), "actual": actual.get(field)}
