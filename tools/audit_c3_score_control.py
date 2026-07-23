@@ -359,7 +359,7 @@ def markdown(payload: dict[str, Any]) -> str:
         "",
         "## Independent score-oracle gain decomposition",
         "",
-        "| seed | native PQ | FP demotion Δ | duplicate order Δ | conflict order Δ | merge-risk demotion Δ | full score oracle Δ |",
+        "| seed | native PQ | FP demotion delta | duplicate order delta | conflict order delta | merge-risk demotion delta | full score oracle delta |",
         "|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for record in payload["per_seed"]:
@@ -374,7 +374,7 @@ def markdown(payload: dict[str, Any]) -> str:
         "",
         "## Patient-wise score-control results",
         "",
-        "| seed | patient | native TP/FP/FN | native DQ | native SQ | native PQ | FP demotion ΔPQ | duplicate order ΔPQ | conflict order ΔPQ | merge-risk demotion ΔPQ | full oracle ΔPQ |",
+        "| seed | patient | native TP/FP/FN | native DQ | native SQ | native PQ | FP demotion delta PQ | duplicate order delta PQ | conflict order delta PQ | merge-risk demotion delta PQ | full oracle delta PQ |",
         "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for record in payload["per_seed"]:
