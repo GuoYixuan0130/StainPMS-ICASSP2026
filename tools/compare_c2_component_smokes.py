@@ -27,6 +27,16 @@ def write(path: Path, payload: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
+def _finite_number(value: Any) -> bool:
+    return isinstance(value, (float, int)) and math.isfinite(float(value))
+
+
+def _inactive_zero_or_absent(value: Any) -> bool:
+    """A disabled loss is serialized as either 0.0 or null by old runners."""
+
+    return value is None or (_finite_number(value) and abs(float(value)) <= 1.0e-8)
+
+
 def verify_arm(payload: dict[str, Any], arm: str, *, exclusivity: float, utility: float) -> dict[str, Any]:
     configuration = payload.get("training_configuration", {})
     losses = payload.get("losses", {})
@@ -34,15 +44,29 @@ def verify_arm(payload: dict[str, Any], arm: str, *, exclusivity: float, utility
         "exclusivity": losses.get("loss_c2_ar_exclusivity"),
         "utility": losses.get("loss_c2_ar_utility"),
     }
-    finite = all(isinstance(value, (float, int)) and math.isfinite(float(value)) for value in weighted.values())
+    active_values = {
+        name: value
+        for name, value, coefficient in (
+            ("exclusivity", weighted["exclusivity"], exclusivity),
+            ("utility", weighted["utility"], utility),
+        )
+        if coefficient > 0.0
+    }
+    finite = all(_finite_number(value) for value in active_values.values())
     inactive = (
-        abs(float(weighted["exclusivity"])) <= 1.0e-8 if exclusivity == 0.0 else True
-    ) and (abs(float(weighted["utility"])) <= 1.0e-8 if utility == 0.0 else True)
+        _inactive_zero_or_absent(weighted["exclusivity"])
+        if exclusivity == 0.0
+        else True
+    ) and (
+        _inactive_zero_or_absent(weighted["utility"])
+        if utility == 0.0
+        else True
+    )
     active = (
         float(weighted["exclusivity"]) > 0.0 if exclusivity > 0.0 else True
     ) and (float(weighted["utility"]) > 0.0 if utility > 0.0 else True)
     valid = payload.get("status") == "complete" and configuration.get("arm") == arm and finite and inactive and active
-    return {"status": "pass" if valid else "fail", "arm": configuration.get("arm"), "weighted_losses": weighted, "finite": finite, "inactive_term_zero": inactive, "active_term_nonzero": active}
+    return {"status": "pass" if valid else "fail", "arm": configuration.get("arm"), "weighted_losses": weighted, "finite_active_term": finite, "inactive_term_zero_or_absent": inactive, "active_term_nonzero": active}
 
 
 def main() -> int:

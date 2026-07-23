@@ -7,7 +7,7 @@ run_root="${3:-/root/autodl-tmp/f3c_c2_component_preflight_$(git -C "$repo_root"
 if [[ -e "$run_root" || ! -f "$coverage_manifest" ]]; then echo "Output exists or coverage manifest missing." >&2; exit 2; fi
 mkdir -p "$run_root/reports" "$run_root/smokes"; cd "$repo_root"
 
-for test in test_c2_ar.py test_c2_component_audit.py test_c2_component_config.py test_candidate_coverage.py test_warmstart_protocol.py; do
+for test in test_c2_ar.py test_c2_component_audit.py test_c2_component_config.py test_c2_component_smokes.py test_candidate_coverage.py test_warmstart_protocol.py; do
   conda run -n agentseg python -m unittest discover -s tests -p "$test" -v 2>&1 | tee "$run_root/reports/$test.txt"
 done
 
