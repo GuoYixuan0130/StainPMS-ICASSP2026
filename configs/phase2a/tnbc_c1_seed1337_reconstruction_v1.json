@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "phase": "2A",
+  "protocol_id": "tnbc_c1_seed1337_reconstructed_epoch5_v1",
+  "purpose": "Clean fixed-epoch reconstruction of the non-recoverable seed-1337 C1 lineage. No p7/p8 result may be read before the epoch-5 checkpoint is frozen.",
+  "source_lineage": {
+    "original_protocol": "tnbc_c0_c1_third_seed_1337_v1",
+    "recovery_audit_protocol": "tnbc_c1_epoch5_recovery_audit_v1",
+    "classification": "reconstructed C1 seed-1337 lineage",
+    "historical_weight_identity_claim": "forbidden"
+  },
+  "data": {
+    "dataset": "tnbc",
+    "train_protocol": "tnbc_stainpms_prepared_continuity_v1_phase1_train",
+    "train_patients": [1, 2, 3, 4, 5, 6],
+    "development_patients": [7, 8],
+    "sealed_patients": [9, 10, 11],
+    "development_access": "prohibited until the separately verified immutable epoch-5 checkpoint exists"
+  },
+  "initialization": {
+    "checkpoint_sha256": "44a3cb3e93051301d789e44f93769588abfa727d7a174b0270f55305ef023781",
+    "weight_loading": ["model", "model1"],
+    "optimizer_scheduler_rng": "fresh per reconstructed lineage",
+    "texture_memory_bank": "discarded"
+  },
+  "determinism": {
+    "seed": 1337,
+    "cudnn_deterministic": true,
+    "cudnn_benchmark": false,
+    "data_order": "shuffle false; legacy crop order and no-prompt skip behavior"
+  },
+  "optimization": {
+    "optimizer": "AdamW",
+    "learning_rate": 1e-05,
+    "weight_decay": 0.0001,
+    "scheduler": "MultiStepLR",
+    "milestones": [80, 140, 200],
+    "gradient_clip_norm": 0.1,
+    "epochs": 5,
+    "attempted_crop_batches_per_epoch": 270,
+    "planned_attempted_crop_batches": 1350,
+    "crop_batch_size": 1,
+    "crop_size": 256,
+    "out_size": 256,
+    "overlap": 32,
+    "epoch_checkpoint_retention": "epoch5_full_state_only",
+    "no_prompt_policy": "legacy skip without replacement crop"
+  },
+  "c1_objective": {
+    "candidate_coverage_tau": 0.1,
+    "coverage_coefficient": 1.0,
+    "quality_coefficient": 1.0,
+    "c2_exclusivity_coefficient": 0.0,
+    "c2_utility_coefficient": 0.0
+  },
+  "pms": {
+    "start_epoch": 0,
+    "coverage_refresh_interval_epochs": 20,
+    "loss_coefficient": 0.5,
+    "object_weight": 1.0,
+    "residual_mask_weight": 0.3,
+    "preserve_loss_coefficient": 1.0,
+    "gt_match_radius": 8,
+    "preserve_max_prompts": 20,
+    "stain_min_distance": 12,
+    "stain_top_k": 20
+  },
+  "inference": {
+    "point_nms_threshold": 12,
+    "instance_nms_iou": 0.5,
+    "assembly": "native unchanged; not invoked in the optimizer process"
+  },
+  "storage": {
+    "minimum_free_gib": 14.0,
+    "rationale": "one retained epoch-5 complete state plus atomic-save headroom; epoch 1--4 state remains only in metrics/logs"
+  }
+}

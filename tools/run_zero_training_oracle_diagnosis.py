@@ -150,12 +150,19 @@ def validate_declaration(declaration_path: Path, checkpoint: Path, *, seed: int,
     observed_sha = sha256_file(checkpoint)
     if declaration.get("checkpoint_sha256") != observed_sha:
         raise ValueError("checkpoint SHA256 does not match its declaration")
-    if declaration.get("dataset") != "tnbc" or declaration.get("classification") != "historical_exploratory":
-        raise ValueError("only declared TNBC historical-exploratory warm-start states are permitted")
-    if declaration.get("arm") != arm:
+    is_reconstructed_c1 = arm == "c1_reconstructed"
+    allowed_classification = (
+        "historical_exploratory_reconstructed" if is_reconstructed_c1 else "historical_exploratory"
+    )
+    if declaration.get("dataset") != "tnbc" or declaration.get("classification") != allowed_classification:
+        raise ValueError("checkpoint classification is not approved for this zero-training diagnosis")
+    expected_arm = "c1" if is_reconstructed_c1 else arm
+    if declaration.get("arm") != expected_arm:
         raise ValueError("checkpoint declaration arm does not match command arm")
     protocol = str(declaration.get("protocol", ""))
-    if arm == "c2_ar":
+    if is_reconstructed_c1:
+        expected_protocol = "tnbc_c1_seed1337_reconstructed_epoch5_v1"
+    elif arm == "c2_ar":
         expected_protocol = "tnbc_c2_ar_two_seed_v1"
     elif arm in {"c2_e", "c2_u"}:
         expected_protocol = "tnbc_c2_component_ablation_v1"
@@ -164,7 +171,7 @@ def validate_declaration(declaration_path: Path, checkpoint: Path, *, seed: int,
             2027: "tnbc_c0_c1_second_seed_2027_v1",
             1337: "tnbc_c0_c1_third_seed_1337_v1",
         }.get(seed)
-    if seed not in DIAGNOSIS_SEEDS or protocol != expected_protocol:
+    if seed not in DIAGNOSIS_SEEDS or protocol != expected_protocol or (is_reconstructed_c1 and seed != 1337):
         raise ValueError(f"unexpected seed-{seed} protocol: {protocol}")
     if int(declaration.get("epoch", -1)) != 5:
         raise ValueError("zero-training diagnosis accepts only the fixed epoch-5 state")
@@ -809,10 +816,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--checkpoint-declaration", required=True)
     parser.add_argument("--reference-performance-summary", "--reference-three-seed-summary", dest="reference_performance_summary", default="")
+    parser.add_argument("--frozen-epoch5-manifest", default="")
     parser.add_argument("--data-path", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--seed", required=True, type=int, choices=DIAGNOSIS_SEEDS)
-    parser.add_argument("--arm", required=True, choices=["c0", "c1", "c2_ar", "c2_e", "c2_u"])
+    parser.add_argument("--arm", required=True, choices=["c0", "c1", "c1_reconstructed", "c2_ar", "c2_e", "c2_u"])
     parser.add_argument("--model-config", default="args.py")
     parser.add_argument("--sam-config", default="sam2_hiera_l")
     parser.add_argument("--crop-size", type=int, default=256)
@@ -846,10 +854,28 @@ def main() -> int:
     validate_scope(manifest, records)
     checkpoint = Path(args.checkpoint).resolve()
     declaration = validate_declaration(Path(args.checkpoint_declaration).resolve(), checkpoint, seed=args.seed, arm=args.arm)
+    frozen_epoch5_manifest = None
+    frozen_epoch5_manifest_sha = None
+    if args.arm == "c1_reconstructed":
+        if not args.frozen_epoch5_manifest:
+            raise ValueError("reconstructed C1 diagnosis requires the epoch-5 frozen manifest")
+        frozen_path = Path(args.frozen_epoch5_manifest).resolve()
+        frozen_epoch5_manifest = read_json(frozen_path, "reconstructed epoch-5 frozen manifest")
+        frozen_epoch5_manifest_sha = sha256_file(frozen_path)
+        expected_state_sha = frozen_epoch5_manifest.get("complete_state", {}).get("sha256")
+        if (
+            frozen_epoch5_manifest.get("status") != "frozen_before_development_access"
+            or frozen_epoch5_manifest.get("lineage") != "reconstructed C1 seed-1337 lineage"
+            or expected_state_sha != declaration["checkpoint_sha256"]
+            or not frozen_epoch5_manifest.get("weights_only", {}).get("canonical_model_model1_tensor_sha256")
+        ):
+            raise ValueError("reconstructed C1 epoch-5 frozen manifest does not attest this checkpoint")
+    elif args.frozen_epoch5_manifest:
+        raise ValueError("only reconstructed C1 accepts an epoch-5 frozen manifest")
     if args.arm in {"c0", "c1"} and not args.reference_performance_summary:
         raise ValueError("C0/C1 diagnosis requires the frozen performance reference summary")
-    if args.arm in {"c2_ar", "c2_e", "c2_u"} and args.reference_performance_summary:
-        raise ValueError("C2 checkpoints are new epoch-5 states and must not be forced to reproduce a C0/C1 reference")
+    if args.arm in {"c1_reconstructed", "c2_ar", "c2_e", "c2_u"} and args.reference_performance_summary:
+        raise ValueError("new reconstructed/C2 epoch-5 states must not be forced to reproduce a historical reference")
     targets = None
     reference_sha = None
     if args.reference_performance_summary:
@@ -901,6 +927,7 @@ def main() -> int:
         "manifest_sha256": manifest["manifest_sha256"],
         "checkpoint_sha256": declaration["checkpoint_sha256"],
         "reference_performance_summary_sha256": reference_sha,
+        "frozen_epoch5_manifest_sha256": frozen_epoch5_manifest_sha,
         "frozen_inference": {"crop_size": args.crop_size, "out_size": args.out_size, "overlap": args.overlap, "load": args.load, "point_nms": args.point_nms_thr, "instance_nms": args.instance_nms_iou, "prompt_chunk": args.prompt_chunk_size, "texture": True, "context": True},
     }
     fingerprint_sha = json_sha256(fingerprint)
@@ -957,8 +984,17 @@ def main() -> int:
         _reproduction_check(aggregate, targets, args.reproduction_tolerance)
         if targets is not None
         else {
-            "status": "not_applicable_new_c2_checkpoint",
-            "reason": "C2-AR epoch-5 is a new checkpoint; its metrics are not expected to reproduce a C0/C1 frozen report.",
+            "status": (
+                "reconstructed_lineage_no_historical_metric_reproduction"
+                if args.arm == "c1_reconstructed"
+                else "not_applicable_new_c2_checkpoint"
+            ),
+            "reason": (
+                "This is the approved reconstructed C1 seed-1337 lineage. It is not claimed to "
+                "equal the non-recoverable historical weight; strict p7/p8 results are diagnostic only."
+                if args.arm == "c1_reconstructed"
+                else "C2-AR epoch-5 is a new checkpoint; its metrics are not expected to reproduce a C0/C1 frozen report."
+            ),
             "observed": {
                 str(patient): aggregate["patients"][str(patient)]["stages"]["native_final"]["task_metrics_image_macro"]
                 for patient in (7, 8)
@@ -980,6 +1016,17 @@ def main() -> int:
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "manifest": {"path": str(manifest_path), "sha256": manifest["manifest_sha256"], "protocol_id": manifest.get("protocol_id"), "record_count": len(records), "patients": [7, 8]},
         "checkpoint": declaration,
+        "frozen_epoch5_manifest": (
+            {
+                "path": str(Path(args.frozen_epoch5_manifest).resolve()),
+                "sha256": frozen_epoch5_manifest_sha,
+                "status": frozen_epoch5_manifest.get("status"),
+                "lineage": frozen_epoch5_manifest.get("lineage"),
+                "canonical_model_model1_tensor_sha256": frozen_epoch5_manifest.get("weights_only", {}).get("canonical_model_model1_tensor_sha256"),
+            }
+            if frozen_epoch5_manifest is not None
+            else None
+        ),
         "reference_reproduction": reproduction,
         "frozen_inference": fingerprint["frozen_inference"],
         "export": {"all_four_candidate_masks": "RLE in completed_images/*.json.gz", "native_selected_masks_preassembly": "RLE in completed_images/*.json.gz", "native_final_instances": "RLE in completed_images/*.json.gz", "prompt_group_id": "stored on every candidate record", "quality_score": "stored as quality on every candidate record"},

@@ -224,24 +224,47 @@ def close(a: float, b: float, *, atol: float = 1.0e-7) -> bool:
     return math.isclose(float(a), float(b), rel_tol=0.0, abs_tol=atol)
 
 
-def validate_source(root: Path, seed: int) -> list[dict[str, Any]]:
+def validate_source(root: Path, seed: int, *, reconstructed_seed: int | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     summary = read_json(root / "summary.json")
-    if summary.get("status") != "complete" or int(summary.get("seed", -1)) != seed or summary.get("arm") != "c1":
+    is_reconstructed = seed == reconstructed_seed
+    expected_arm = "c1_reconstructed" if is_reconstructed else "c1"
+    if summary.get("status") != "complete" or int(summary.get("seed", -1)) != seed or summary.get("arm") != expected_arm:
         raise ValueError(f"C3 requires a completed C1 source for seed {seed}: {root}")
-    if summary.get("reference_reproduction", {}).get("status") != "pass":
+    allowed_reproduction_status = (
+        "reconstructed_lineage_no_historical_metric_reproduction" if is_reconstructed else "pass"
+    )
+    if summary.get("reference_reproduction", {}).get("status") != allowed_reproduction_status:
         raise ValueError(f"C1 source reproduction did not pass: {root}")
+    checkpoint = summary.get("checkpoint", {})
+    if is_reconstructed:
+        frozen_manifest = summary.get("frozen_epoch5_manifest", {})
+        if (
+            checkpoint.get("protocol") != "tnbc_c1_seed1337_reconstructed_epoch5_v1"
+            or checkpoint.get("classification") != "historical_exploratory_reconstructed"
+            or int(checkpoint.get("epoch", -1)) != 5
+            or frozen_manifest.get("status") != "frozen_before_development_access"
+            or frozen_manifest.get("lineage") != "reconstructed C1 seed-1337 lineage"
+            or frozen_manifest.get("canonical_model_model1_tensor_sha256") is None
+        ):
+            raise ValueError(f"reconstructed C1 source lacks frozen epoch-5 provenance: {root}")
     payloads = [read_gzip_json(path) for path in sorted((root / "completed_images").glob("*.json.gz"))]
     artifacts = [payload["artifact"] for payload in payloads]
     if len(artifacts) != 7 or {int(row["patient"]) for row in artifacts} != {7, 8}:
         raise ValueError(f"C3 source must contain exactly seven p7/p8 artifacts: {root}")
     # Keep the outer payload as well: its image_record is the frozen native
     # reference that must be reproduced before any GT-only attribution runs.
-    return payloads
+    return payloads, {
+        "lineage": "reconstructed C1 seed-1337 lineage" if is_reconstructed else "historical verified C1 epoch-5 lineage",
+        "reference_reproduction_status": allowed_reproduction_status,
+        "checkpoint_sha256": checkpoint.get("checkpoint_sha256"),
+        "frozen_epoch5_manifest_sha256": summary.get("frozen_epoch5_manifest", {}).get("sha256") if is_reconstructed else None,
+    }
 
 
-def audit_seed(root: Path, seed: int, *, nms_iou: float) -> dict[str, Any]:
+def audit_seed(root: Path, seed: int, *, nms_iou: float, reconstructed_seed: int | None = None) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
-    for payload in validate_source(root, seed):
+    payloads, source_identity = validate_source(root, seed, reconstructed_seed=reconstructed_seed)
+    for payload in payloads:
         artifact = payload["artifact"]
         gt_map = deserialize_gt(artifact)
         selected = deserialize_selected(artifact)
@@ -275,6 +298,7 @@ def audit_seed(root: Path, seed: int, *, nms_iou: float) -> dict[str, Any]:
     return {
         "seed": seed,
         "source_c1_oracle_directory": str(root),
+        "source_identity": source_identity,
         "per_image": rows,
         "patients": by_patient,
         "patient_macro": patient_macro(by_patient, rows),
@@ -286,6 +310,22 @@ def reference_full_oracle(path: Path, seed: int) -> float:
     if payload.get("status") != "complete" or int(payload.get("seed", -1)) != seed or payload.get("arm") != "c1":
         raise ValueError(f"invalid C1 full-oracle reference: {path}")
     return float(payload["patient_macro"]["image_macro"]["oracle_score_intervention"]["pq"])
+
+
+def historical_seed_record(path: Path, seed: int) -> dict[str, Any]:
+    """Reuse an accepted historical C3 per-seed record without replaying it."""
+
+    payload = read_json(path)
+    if payload.get("status") != "complete" or payload.get("protocol") != "tnbc_c3_score_control_feasibility_audit_v1":
+        raise ValueError(f"invalid historical C3 audit: {path}")
+    record = next((row for row in payload.get("per_seed", []) if int(row.get("seed", -1)) == seed), None)
+    if not isinstance(record, dict):
+        raise ValueError(f"historical C3 audit has no seed {seed}: {path}")
+    copied = dict(record)
+    copied["historical_c3_reused_without_rerun"] = {
+        "path": str(path.resolve()), "sha256": sha256_file(path.resolve()),
+    }
+    return copied
 
 
 def c3_gate(per_seed: list[dict[str, Any]]) -> dict[str, Any]:
@@ -467,8 +507,10 @@ def write_csv(path: Path, payload: dict[str, Any]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", action="append", required=True, type=parse_assignment, help="SEED=C1_ORACLE_DIR")
-    parser.add_argument("--reference-full-oracle", action="append", required=True, type=parse_assignment, help="SEED=C1_COMPONENT_MECHANISMS_JSON")
+    parser.add_argument("--input", action="append", default=[], type=parse_assignment, help="SEED=C1_ORACLE_DIR")
+    parser.add_argument("--historical-seed-audit", action="append", default=[], type=parse_assignment, help="SEED=ACCEPTED_C3_AUDIT_JSON; reuse without replaying that seed")
+    parser.add_argument("--reference-full-oracle", action="append", default=[], type=parse_assignment, help="SEED=C1_COMPONENT_MECHANISMS_JSON")
+    parser.add_argument("--reconstructed-seed", type=int, choices=SEEDS, default=None, help="allow only this reconstructed C1 lineage to omit historical full-oracle reproduction")
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--instance-nms-iou", type=float, default=0.5)
@@ -476,9 +518,15 @@ def main() -> int:
     if not 0.0 < float(args.instance_nms_iou) < 1.0:
         raise ValueError("instance NMS IoU must be in (0, 1)")
     inputs = dict(args.input)
+    historical = dict(args.historical_seed_audit)
     references = dict(args.reference_full_oracle)
-    if set(inputs) != set(SEEDS) or set(references) != set(SEEDS):
-        raise ValueError("requires exactly seeds 2027 and 1337 for inputs and references")
+    if set(inputs) & set(historical) or set(inputs) | set(historical) != set(SEEDS):
+        raise ValueError("each of seeds 2027 and 1337 must appear exactly once as input or historical audit")
+    if args.reconstructed_seed is not None and args.reconstructed_seed != 1337:
+        raise ValueError("only seed 1337 has an approved reconstructed C1 lineage")
+    expected_reference_seeds = set(inputs) - ({args.reconstructed_seed} if args.reconstructed_seed is not None else set())
+    if set(references) != expected_reference_seeds:
+        raise ValueError(f"references must be supplied exactly for historical seeds: {sorted(expected_reference_seeds)}")
     output = args.output_dir.resolve()
     if output.exists():
         raise ValueError(f"refusing to overwrite output directory: {output}")
@@ -486,20 +534,50 @@ def main() -> int:
     config = read_json(config_path)
     if config.get("protocol_id") != "tnbc_c3_score_control_feasibility_audit_v1":
         raise ValueError(f"unexpected C3 configuration: {config_path}")
-    per_seed = [audit_seed(inputs[seed], seed, nms_iou=float(args.instance_nms_iou)) for seed in SEEDS]
+    per_seed = [
+        (
+            audit_seed(inputs[seed], seed, nms_iou=float(args.instance_nms_iou), reconstructed_seed=args.reconstructed_seed)
+            if seed in inputs
+            else historical_seed_record(historical[seed], seed)
+        )
+        for seed in SEEDS
+    ]
     reference_validation: dict[str, Any] = {}
     for record in per_seed:
         seed = int(record["seed"])
+        if seed in historical:
+            reference_validation[str(seed)] = {
+                "status": "reused_historical_c3_without_rerun",
+                "historical_c3_audit": str(historical[seed].resolve()),
+                "historical_c3_audit_sha256": sha256_file(historical[seed].resolve()),
+            }
+            continue
         actual = float(record["patient_macro"]["stages_patient_macro"]["full_score_oracle"]["pq"])
-        expected = reference_full_oracle(references[seed], seed)
-        if not close(actual, expected):
-            raise RuntimeError(f"full score oracle failed to reproduce prior C1 result for seed {seed}: {actual} != {expected}")
-        reference_validation[str(seed)] = {"status": "pass", "expected_full_oracle_pq": expected, "reproduced_full_oracle_pq": actual}
+        if seed == args.reconstructed_seed:
+            reference_validation[str(seed)] = {
+                "status": "not_applicable_reconstructed_lineage",
+                "reason": "new reconstructed C1 epoch-5 lineage is intentionally not compared to non-recoverable historical C3 outputs",
+                "recomputed_full_oracle_pq": actual,
+            }
+        else:
+            expected = reference_full_oracle(references[seed], seed)
+            if not close(actual, expected):
+                raise RuntimeError(f"full score oracle failed to reproduce prior C1 result for seed {seed}: {actual} != {expected}")
+            reference_validation[str(seed)] = {"status": "pass", "expected_full_oracle_pq": expected, "reproduced_full_oracle_pq": actual}
     payload = {
         "schema_version": 1,
         "protocol": "tnbc_c3_score_control_feasibility_audit_v1",
         "status": "complete",
         "scope": "TNBC p7/p8 only; C1 epoch-5 selected masks and native scores; seeds 2027/1337; no model/checkpoint/data-loader access",
+        "lineage": {
+            "seed2027": "historical verified C1 epoch-5 lineage",
+            "seed1337": "reconstructed C1 seed-1337 lineage" if args.reconstructed_seed == 1337 else "historical verified C1 epoch-5 lineage",
+            "cross_lineage_metric_comparison": "not used for model selection",
+        },
+        "historical_seed_reuse": {
+            str(seed): {"path": str(path.resolve()), "sha256": sha256_file(path.resolve())}
+            for seed, path in historical.items()
+        },
         "config": {"path": str(config_path), "sha256": sha256_file(config_path)},
         "frozen_c2_closure": {
             "commit": "8dbe0fcf0a11a546d1bc1d08a72f34fed093074d",
