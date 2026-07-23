@@ -1400,6 +1400,10 @@ def run_warmstart_formal_tnbc_5epoch(
                 "schema_version": 1,
                 "dataset": "tnbc",
                 "classification": "historical_exploratory",
+                "phase": formal_phase,
+                "protocol": formal_protocol,
+                "arm": str(cfgs.warmstart_candidate_arm),
+                "epoch": int(epoch + 1),
                 "checkpoint_path": str(checkpoint_path),
                 "checkpoint_sha256": checkpoint_sha,
                 "selection_history": (
