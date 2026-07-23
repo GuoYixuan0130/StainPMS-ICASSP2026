@@ -157,6 +157,7 @@ def parse_args():
             "formal_tnbc_pqbest_ablation_5epoch",
             "formal_tnbc_pqbest_repro_5epoch",
             "formal_tnbc_pqbest_third_seed_5epoch",
+            "formal_tnbc_c1_seed1337_reconstruction_5epoch",
             "formal_tnbc_c2_ar_5epoch",
             "formal_tnbc_c2_component_5epoch",
         ],
