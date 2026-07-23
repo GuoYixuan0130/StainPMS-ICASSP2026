@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "phase": "2A",
+  "protocol_id": "tnbc_c2_component_ablation_v1",
+  "purpose": "Pre-registered C2-AR exclusivity versus utility component attribution; TNBC development only after train-only optimization",
+  "data": {
+    "dataset": "tnbc",
+    "train_protocol": "tnbc_stainpms_prepared_continuity_v1_phase1_train",
+    "train_patients": [1, 2, 3, 4, 5, 6],
+    "development_patients": [7, 8],
+    "sealed_patients": [9, 10, 11],
+    "development_access": "post-training read-only epoch-5 diagnosis only"
+  },
+  "initialization": {
+    "checkpoint_sha256": "44a3cb3e93051301d789e44f93769588abfa727d7a174b0270f55305ef023781",
+    "checkpoint_policy": "same historical StainPMS model/model1 weight warm-start as C0/C1/C2-EU; fresh optimizer, scheduler, RNG, and no texture-bank resume"
+  },
+  "optimization": {
+    "seeds": [2027, 1337],
+    "epochs": 5,
+    "attempted_crop_batches_per_epoch": 270,
+    "planned_attempted_crop_batches": 1350,
+    "epoch_checkpoint_retention": "epoch5_full_state_only",
+    "no_prompt_policy": "legacy skip without replacement crop",
+    "fixed_epoch_for_primary_result": 5
+  },
+  "arms": {
+    "c2_e": {
+      "coverage_coefficient": 1.0,
+      "quality_coefficient": 1.0,
+      "coverage_tau": 0.1,
+      "c2_ar": {
+        "exclusivity_coefficient": 0.25,
+        "utility_coefficient": 0.0,
+        "neighbor_radius": 2,
+        "match_iou": 0.5,
+        "merge_risk_overlap_fraction": 0.1
+      }
+    },
+    "c2_u": {
+      "coverage_coefficient": 1.0,
+      "quality_coefficient": 1.0,
+      "coverage_tau": 0.1,
+      "c2_ar": {
+        "exclusivity_coefficient": 0.0,
+        "utility_coefficient": 0.25,
+        "neighbor_radius": 2,
+        "match_iou": 0.5,
+        "merge_risk_overlap_fraction": 0.1
+      }
+    }
+  },
+  "storage": {
+    "minimum_free_gib": 14.0,
+    "rationale": "one retained epoch-5 approximately 6 GiB full state plus atomic-save headroom; epoch 1--4 metrics are retained in JSON/logs but not full states"
+  },
+  "inference": {
+    "modified": false,
+    "nms_threshold": 12,
+    "instance_nms_iou": 0.5,
+    "assembly": "native unchanged"
+  }
+}

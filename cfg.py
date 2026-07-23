@@ -158,6 +158,7 @@ def parse_args():
             "formal_tnbc_pqbest_repro_5epoch",
             "formal_tnbc_pqbest_third_seed_5epoch",
             "formal_tnbc_c2_ar_5epoch",
+            "formal_tnbc_c2_component_5epoch",
         ],
         help=(
             "Exploratory train-only C0/C1 stage. formal_tnbc_5epoch is the "
@@ -167,7 +168,7 @@ def parse_args():
     parser.add_argument(
         "--warmstart_candidate_arm",
         default="",
-        choices=["", "legacy", "c0", "c1", "c2_ar", "coverage_only", "quality_only"],
+        choices=["", "legacy", "c0", "c1", "c2_ar", "c2_e", "c2_u", "coverage_only", "quality_only"],
         help=(
             "legacy is an equivalence reference only; c0/c1 share the explicit "
             "four-native-candidate decoder call."

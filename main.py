@@ -877,7 +877,7 @@ def run_warmstart_smoke(
         and int(runtime_stats.get("native_candidate_decoder_calls", 0)) > 0
     )
     candidate_ok = arm in {"legacy", "c0"} or "candidate_loss_audit" in runtime_stats
-    c2_audit_ok = arm != "c2_ar" or int(
+    c2_audit_ok = arm not in {"c2_ar", "c2_e", "c2_u"} or int(
         runtime_stats.get("c2_ar_loss_audit", {}).get("step_count", 0)
     ) > 0
     complete = (
@@ -1097,9 +1097,19 @@ def run_warmstart_formal_tnbc_5epoch(
     """
     stage = str(cfgs.warmstart_stage)
     is_c2_ar = stage == "formal_tnbc_c2_ar_5epoch"
-    formal_phase = "2A-warmstart-c2-ar" if is_c2_ar else "2A-warmstart-formal-screen"
+    is_c2_component = stage == "formal_tnbc_c2_component_5epoch"
+    is_c2_family = is_c2_ar or is_c2_component
+    formal_phase = (
+        "2A-warmstart-c2-ar"
+        if is_c2_ar
+        else ("2A-warmstart-c2-component" if is_c2_component else "2A-warmstart-formal-screen")
+    )
     formal_protocol = str(cfgs.warmstart_screen_config_identity["protocol_id"])
-    formal_label = "formal TNBC C2-AR" if is_c2_ar else "formal TNBC screen"
+    formal_label = (
+        "formal TNBC C2-AR"
+        if is_c2_ar
+        else ("formal TNBC C2 component" if is_c2_component else "formal TNBC screen")
+    )
 
     output = Path(cfgs.warmstart_output).resolve()
     output_dir = output.parent
@@ -1113,6 +1123,8 @@ def run_warmstart_formal_tnbc_5epoch(
     resume_checkpoint_arg = str(getattr(cfgs, "warmstart_resume_checkpoint", "") or "")
     recovery = None
     if resume_checkpoint_arg:
+        if is_c2_component:
+            raise RuntimeError("formal C2 component ablations do not retain recovery states")
         resume_path = Path(resume_checkpoint_arg).resolve()
         if resume_path.parent != checkpoints_dir:
             raise RuntimeError("formal TNBC recovery checkpoint is outside this arm's checkpoint directory")
@@ -1253,21 +1265,20 @@ def run_warmstart_formal_tnbc_5epoch(
     else:
         if checkpoints_dir.exists() and any(checkpoints_dir.iterdir()):
             raise FileExistsError(f"formal TNBC output already has checkpoints: {checkpoints_dir}")
-        if is_c2_ar:
+        if is_c2_family:
             required_free_gib = float(cfgs.warmstart_required_free_gib)
             available_free_gib = shutil.disk_usage(output_dir.parent).free / (1024**3)
             if available_free_gib < required_free_gib:
                 raise RuntimeError(
-                    "formal C2-AR refuses to start without enough storage for all five "
-                    "full epoch states plus atomic-save headroom: "
+                    f"{formal_label} refuses to start without required storage headroom: "
                     f"available={available_free_gib:.2f} GiB, required={required_free_gib:.2f} GiB"
                 )
         checkpoints_dir.mkdir(parents=True, exist_ok=True)
         declarations_dir.mkdir(parents=True, exist_ok=True)
         runtime_stats = new_timing_runtime_stats()
-        # C2-AR needs a persisted train-only loss/label-scale audit.  It does
+        # C2-family runs need a persisted train-only loss/label-scale audit. It does
         # not alter the forward path, masks, scores, or optimizer trajectory.
-        if is_c2_ar:
+        if is_c2_family:
             runtime_stats["collect_candidate_audit"] = True
         runtime_stats["record_no_prompt_batches"] = True
         epoch_records = []
@@ -1341,8 +1352,8 @@ def run_warmstart_formal_tnbc_5epoch(
             )
         if int(runtime_stats.get("native_mask_token_count", 0)) != 4:
             raise RuntimeError("formal TNBC screen did not use four native mask tokens")
-        if is_c2_ar and int(runtime_stats.get("c2_ar_loss_audit", {}).get("step_count", 0)) <= 0:
-            raise RuntimeError("formal C2-AR epoch did not record either selected-mask loss")
+        if is_c2_family and int(runtime_stats.get("c2_ar_loss_audit", {}).get("step_count", 0)) <= 0:
+            raise RuntimeError("formal C2 epoch did not record selected-mask loss auditing")
         scheduler.step()
         epoch_peak_allocated = (
             torch.cuda.max_memory_allocated(cuda_index) / (1024**2)
@@ -1356,6 +1367,7 @@ def run_warmstart_formal_tnbc_5epoch(
         )
         peak_allocated_mib = max(peak_allocated_mib, epoch_peak_allocated)
         peak_reserved_mib = max(peak_reserved_mib, epoch_peak_reserved)
+        retain_full_state = not is_c2_component or epoch == 4
         checkpoint_path = checkpoints_dir / f"epoch_{epoch + 1:04d}_update_{actual_updates:06d}.pth"
         checkpoint_payload = {
             "schema_version": 1,
@@ -1391,12 +1403,15 @@ def run_warmstart_formal_tnbc_5epoch(
             "repository": _repository_identity(),
             "command": list(sys.argv),
         }
-        _torch_save_atomic(checkpoint_path, checkpoint_payload)
-        checkpoint_sha = sha256_file(checkpoint_path)
-        declaration_path = declarations_dir / f"{checkpoint_path.stem}.json"
-        _json_write_atomic(
-            declaration_path,
-            {
+        checkpoint_sha = None
+        declaration_path = None
+        if retain_full_state:
+            _torch_save_atomic(checkpoint_path, checkpoint_payload)
+            checkpoint_sha = sha256_file(checkpoint_path)
+            declaration_path = declarations_dir / f"{checkpoint_path.stem}.json"
+            _json_write_atomic(
+                declaration_path,
+                {
                 "schema_version": 1,
                 "dataset": "tnbc",
                 "classification": "historical_exploratory",
@@ -1420,8 +1435,8 @@ def run_warmstart_formal_tnbc_5epoch(
                     "baseline, model-selection, or final-performance checkpoint"
                 ),
                 "source_note": "model/model1 warm-start only; fresh optimizer, scheduler, and RNG; texture bank discarded",
-            },
-        )
+                },
+            )
         epoch_records.append(
             {
                 "epoch": epoch + 1,
@@ -1431,9 +1446,10 @@ def run_warmstart_formal_tnbc_5epoch(
                 "no_prompt_batch_count": no_prompt_count,
                 "no_prompt_batch_indices": no_prompt_positions,
                 "no_prompt_batch_indices_sha256": no_prompt_positions_sha256,
-                "checkpoint_path": str(checkpoint_path),
+                "full_checkpoint_retained": retain_full_state,
+                "checkpoint_path": str(checkpoint_path) if retain_full_state else None,
                 "checkpoint_sha256": checkpoint_sha,
-                "checkpoint_declaration": str(declaration_path),
+                "checkpoint_declaration": str(declaration_path) if declaration_path else None,
                 "losses": {key: float(value) for key, value in losses.items()},
                 "runtime": checkpoint_payload["epoch_runtime"],
                 "learning_rate_after_scheduler_step": float(optimizer.param_groups[0]["lr"]),
@@ -1444,7 +1460,7 @@ def run_warmstart_formal_tnbc_5epoch(
             f"[{formal_label.lower().replace(' ', '-')}] arm={cfgs.warmstart_candidate_arm} "
             f"epoch={epoch + 1}/5 attempted={attempted_crop_batches}/"
             f"{attempted_crop_batches_per_epoch} effective_updates={effective_optimizer_updates} "
-            f"cumulative_updates={actual_updates} no_prompt={no_prompt_count}"
+            f"cumulative_updates={actual_updates} no_prompt={no_prompt_count} retained_state={retain_full_state}"
         )
 
     if torch.cuda.is_available():
@@ -1464,6 +1480,9 @@ def run_warmstart_formal_tnbc_5epoch(
             "stage": stage,
             "protocol": formal_protocol,
             "planned_epochs": 5,
+            "checkpoint_retention": "all_full_states" if is_c2_ar else (
+                "epoch5_full_state_only" if is_c2_component else "all_full_states"
+            ),
             "attempted_crop_batches_per_epoch": attempted_crop_batches_per_epoch,
             "planned_attempted_crop_batches": planned_attempted_crop_batches,
             "actual_attempted_crop_batches": int(runtime_stats.get("crop_batches_seen", 0)),
@@ -1491,12 +1510,20 @@ def run_warmstart_formal_tnbc_5epoch(
                 "MoNuSeg_test14_accessed": False,
             },
             "evaluation_plan": {
-                "epoch_0": "shared p7-p8 diagnosis before either arm trains",
-                "epochs_1_to_5": "strict p7-p8 diagnosis from each immutable epoch checkpoint",
+                "epoch_0": "not constructed in this train-only run",
+                "epochs_1_to_5": (
+                    "strict p7-p8 diagnosis only from the retained fixed epoch-5 state"
+                    if is_c2_component
+                    else "strict p7-p8 diagnosis from each immutable epoch checkpoint"
+                ),
                 "primary_comparison": (
                     "fixed epoch 5 C2-AR versus existing C0/C1 patient-macro deltas"
                     if is_c2_ar
-                    else "fixed epoch 5 C1-C0 patient-macro delta"
+                    else (
+                        "fixed epoch 5 C2 component versus paired C0/C1/C2-EU development results"
+                        if is_c2_component
+                        else "fixed epoch 5 C1-C0 patient-macro delta"
+                    )
                 ),
             },
         }
@@ -2702,7 +2729,9 @@ def _validate_warmstart_preflight(cfgs, args):
         },
     }
     c2_stage = "formal_tnbc_c2_ar_5epoch"
-    full_epoch_stages = {"formal_tnbc_5epoch", c2_stage, *pqbest_stage_specs}
+    c2_component_stage = "formal_tnbc_c2_component_5epoch"
+    c2_family_stages = {c2_stage, c2_component_stage}
+    full_epoch_stages = {"formal_tnbc_5epoch", *c2_family_stages, *pqbest_stage_specs}
 
     incompatible = {
         "eval": bool(cfgs.eval),
@@ -2778,9 +2807,9 @@ def _validate_warmstart_preflight(cfgs, args):
 
     approved_epochs = 5 if stage in full_epoch_stages else 10
     arm = str(cfgs.warmstart_candidate_arm or "")
-    if stage == c2_stage:
+    if stage in c2_family_stages:
         if int(cfgs.seed) not in {2027, 1337}:
-            raise ValueError("formal C2-AR is approved only for seeds 2027 and 1337")
+            raise ValueError("formal C2 ablations are approved only for seeds 2027 and 1337")
         expected_auxiliary_coefficients = (1.0, 1.0)
     elif stage in {"formal_tnbc_pqbest_repro_5epoch", "formal_tnbc_pqbest_third_seed_5epoch"}:
         expected_auxiliary_coefficients = {"c0": (0.0, 0.0), "c1": (1.0, 1.0)}.get(
@@ -2793,7 +2822,7 @@ def _validate_warmstart_preflight(cfgs, args):
         }.get(arm, (1.0, 1.0))
     expected_seed = (
         int(cfgs.seed)
-        if stage == c2_stage
+        if stage in c2_family_stages
         else pqbest_stage_specs.get(stage, {}).get("seed", 3407)
     )
     exact_values = {
@@ -2899,12 +2928,12 @@ def _validate_warmstart_preflight(cfgs, args):
         coverage_identity = None
     else:
         allowed_arms = (
-            {"legacy", "c0", "c1", "c2_ar", "coverage_only", "quality_only"}
+            {"legacy", "c0", "c1", "c2_ar", "c2_e", "c2_u", "coverage_only", "quality_only"}
             if stage == "smoke"
             else (
                 {"c2_ar"}
                 if stage == c2_stage
-                else {"c0", "c1", "coverage_only", "quality_only"}
+                else ({"c2_e", "c2_u"} if stage == c2_component_stage else {"c0", "c1", "coverage_only", "quality_only"})
             )
         )
         if arm not in allowed_arms:
@@ -3006,6 +3035,62 @@ def _validate_warmstart_preflight(cfgs, args):
             raise ValueError("formal C2-AR cannot set warmstart smoke updates")
         if int(cfgs.phase2a_warmup_updates) != 10 or int(cfgs.phase2a_timed_updates) != 100:
             raise ValueError("formal C2-AR requires the approved 10/100 timing provenance")
+    if stage == c2_component_stage:
+        if str(cfgs.dataset) != "tnbc":
+            raise ValueError("formal C2 component ablation rejects all non-TNBC datasets")
+        if cfgs.warmstart_dev_manifest:
+            raise ValueError("formal C2 component ablation cannot construct a development loader")
+        screen_config_path = Path(cfgs.warmstart_screen_config).resolve()
+        screen_config = json.loads(screen_config_path.read_text(encoding="utf-8"))
+        if screen_config.get("protocol_id") != "tnbc_c2_component_ablation_v1":
+            raise ValueError("formal C2 component screen config protocol mismatch")
+        optimization = screen_config.get("optimization", {})
+        if int(optimization.get("planned_attempted_crop_batches", -1)) != 1350:
+            raise ValueError("formal C2 component ablation must freeze 1350 attempted crop batches")
+        if optimization.get("epoch_checkpoint_retention") != "epoch5_full_state_only":
+            raise ValueError("formal C2 component ablation must retain only the fixed epoch-5 full state")
+        arm_config = screen_config.get("arms", {}).get(arm, {})
+        c2_config = arm_config.get("c2_ar", {})
+        expected_c2 = {
+            "exclusivity_coefficient": float(cfgs.c2_ar_exclusivity_coefficient),
+            "utility_coefficient": float(cfgs.c2_ar_utility_coefficient),
+            "neighbor_radius": int(cfgs.c2_ar_neighbor_radius),
+            "match_iou": float(cfgs.c2_ar_match_iou),
+            "merge_risk_overlap_fraction": float(cfgs.c2_ar_merge_risk_overlap_fraction),
+        }
+        frozen_c2 = {
+            "exclusivity_coefficient": float(c2_config.get("exclusivity_coefficient", float("nan"))),
+            "utility_coefficient": float(c2_config.get("utility_coefficient", float("nan"))),
+            "neighbor_radius": int(c2_config.get("neighbor_radius", -1)),
+            "match_iou": float(c2_config.get("match_iou", float("nan"))),
+            "merge_risk_overlap_fraction": float(c2_config.get("merge_risk_overlap_fraction", float("nan"))),
+        }
+        if frozen_c2 != expected_c2:
+            raise ValueError("formal C2 component command differs from frozen C2 settings")
+        if arm not in {"c2_e", "c2_u"} or {
+            float(c2_config.get("exclusivity_coefficient", -1.0)),
+            float(c2_config.get("utility_coefficient", -1.0)),
+        } not in ({0.25, 0.0}, {0.0, 0.25}):
+            raise ValueError("formal C2 component arm must be exactly exclusivity-only or utility-only")
+        if (
+            float(arm_config.get("coverage_coefficient", float("nan"))) != 1.0
+            or float(arm_config.get("quality_coefficient", float("nan"))) != 1.0
+        ):
+            raise ValueError("formal C2 component ablation must retain the full C1 coverage/quality objective")
+        required_free_gib = float(screen_config.get("storage", {}).get("minimum_free_gib", float("nan")))
+        if not math.isfinite(required_free_gib) or required_free_gib < 14.0:
+            raise ValueError("formal C2 component frozen storage gate must be at least 14 GiB")
+        if not math.isclose(float(cfgs.warmstart_required_free_gib), required_free_gib, rel_tol=0.0, abs_tol=1e-12):
+            raise ValueError("formal C2 component command storage gate differs from frozen config")
+        cfgs.warmstart_screen_config_identity = {
+            "path": str(screen_config_path),
+            "sha256": sha256_file(screen_config_path),
+            "protocol_id": screen_config["protocol_id"],
+        }
+        if int(cfgs.warmstart_smoke_updates) != 0:
+            raise ValueError("formal C2 component ablation cannot set warmstart smoke updates")
+        if int(cfgs.phase2a_warmup_updates) != 10 or int(cfgs.phase2a_timed_updates) != 100:
+            raise ValueError("formal C2 component ablation requires the approved 10/100 timing provenance")
     if stage in pqbest_stage_specs:
         stage_spec = pqbest_stage_specs[stage]
         if str(cfgs.dataset) != "tnbc":
@@ -3299,7 +3384,11 @@ def main():
         )
         return
 
-    if cfgs.warmstart_stage in {"formal_tnbc_5epoch", "formal_tnbc_c2_ar_5epoch"}:
+    if cfgs.warmstart_stage in {
+        "formal_tnbc_5epoch",
+        "formal_tnbc_c2_ar_5epoch",
+        "formal_tnbc_c2_component_5epoch",
+    }:
         run_warmstart_formal_tnbc_5epoch(
             cfgs,
             args,

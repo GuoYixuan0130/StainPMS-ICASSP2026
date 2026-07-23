@@ -155,14 +155,15 @@ def validate_declaration(declaration_path: Path, checkpoint: Path, *, seed: int,
     if declaration.get("arm") != arm:
         raise ValueError("checkpoint declaration arm does not match command arm")
     protocol = str(declaration.get("protocol", ""))
-    expected_protocol = (
-        "tnbc_c2_ar_two_seed_v1"
-        if arm == "c2_ar"
-        else {
+    if arm == "c2_ar":
+        expected_protocol = "tnbc_c2_ar_two_seed_v1"
+    elif arm in {"c2_e", "c2_u"}:
+        expected_protocol = "tnbc_c2_component_ablation_v1"
+    else:
+        expected_protocol = {
             2027: "tnbc_c0_c1_second_seed_2027_v1",
             1337: "tnbc_c0_c1_third_seed_1337_v1",
         }.get(seed)
-    )
     if seed not in DIAGNOSIS_SEEDS or protocol != expected_protocol:
         raise ValueError(f"unexpected seed-{seed} protocol: {protocol}")
     if int(declaration.get("epoch", -1)) != 5:
@@ -243,10 +244,11 @@ def _record_from_mask_data(
     token: int,
     crop_index: int,
     edge_penalized: bool,
+    soft_metrics: dict[str, float | None] | None = None,
 ) -> dict[str, Any]:
     prompt_group = int(mask_data["inds"])
     quality = float(mask_data["predicted_iou"])
-    return {
+    output = {
         "record_index": int(record_index),
         "prompt_group_id": prompt_group,
         "token": int(token),
@@ -258,6 +260,10 @@ def _record_from_mask_data(
         "edge_penalized": bool(edge_penalized),
         "mask": np.asarray(mask_data["segmentation"], dtype=bool),
     }
+    if soft_metrics:
+        output["soft_foreign_gt_probability"] = soft_metrics.get("soft_foreign_gt_probability")
+        output["soft_selected_overlap"] = soft_metrics.get("soft_selected_overlap")
+    return output
 
 
 def _serialize_mask_record(record: dict[str, Any]) -> dict[str, Any]:
@@ -272,6 +278,56 @@ def _serialize_final_map(pred_map: np.ndarray) -> list[dict[str, Any]]:
         {"final_instance_id": int(pred_id), "mask_rle": encode_binary_rle(pred_map == pred_id)}
         for pred_id in instance_ids(pred_map)
     ]
+
+
+def _selected_soft_exclusivity_metrics(
+    selected_logits: torch.Tensor,
+    local_points: np.ndarray,
+    prompt_groups: np.ndarray,
+    local_gt: np.ndarray,
+) -> dict[int, dict[str, float | None]]:
+    """Export compact, non-gradient selected-mask exclusivity statistics.
+
+    The zero-training artifact must support the C2 component attribution without
+    retaining logits.  For each selected native mask we therefore record its
+    mean sigmoid probability on *foreign* GT pixels and its mean pairwise soft
+    intersection-over-union with other selected masks belonging to a distinct
+    non-background GT.  These are read-only scalars; native masks, scores and
+    assembly are unchanged.
+    """
+
+    logits = selected_logits.detach().float()
+    if logits.ndim != 3 or logits.shape[0] != len(prompt_groups):
+        raise ValueError("selected logits/prompt groups must have compatible [N,H,W] shapes")
+    labels = torch.as_tensor(local_gt, dtype=torch.long, device=logits.device)
+    probabilities = torch.sigmoid(logits)
+    own_ids: list[int] = []
+    for point in np.asarray(local_points, dtype=np.float64):
+        x = min(max(int(point[0]), 0), int(labels.shape[1]) - 1)
+        y = min(max(int(point[1]), 0), int(labels.shape[0]) - 1)
+        own_ids.append(int(labels[y, x].item()))
+    output: dict[int, dict[str, float | None]] = {}
+    for index, group in enumerate(np.asarray(prompt_groups, dtype=np.int64).tolist()):
+        own = own_ids[index]
+        foreign = (labels > 0) & (labels != own) if own > 0 else labels > 0
+        foreign_mean = (
+            float(probabilities[index][foreign].mean().cpu()) if bool(foreign.any()) else None
+        )
+        overlap_values: list[torch.Tensor] = []
+        for other in range(len(own_ids)):
+            if other == index or own <= 0 or own_ids[other] <= 0 or own_ids[other] == own:
+                continue
+            first, second = probabilities[index], probabilities[other]
+            intersection = (first * second).sum()
+            union = (first + second - first * second).sum().clamp_min(1.0e-7)
+            overlap_values.append(intersection / union)
+        output[int(group)] = {
+            "soft_foreign_gt_probability": foreign_mean,
+            "soft_selected_overlap": (
+                float(torch.stack(overlap_values).mean().cpu()) if overlap_values else None
+            ),
+        }
+    return output
 
 
 def _save_display_image(image: torch.Tensor, path: Path) -> None:
@@ -425,6 +481,12 @@ def diagnose_image(
             int(group): int(standard_tokens[local_index].item())
             for local_index, group in enumerate(auto_inds)
         }
+        soft_metrics_by_group = _selected_soft_exclusivity_metrics(
+            standard_logits,
+            local_auto,
+            auto_inds,
+            inst_map[y1:y2, x1:x2],
+        )
         for mask_data in selected_masks:
             edge = _edge_penalized(mask_data, crop_box, full_h, full_w)
             row = _record_from_mask_data(
@@ -433,6 +495,7 @@ def diagnose_image(
                 token=standard_token_by_group[int(mask_data["inds"])],
                 crop_index=crop_index,
                 edge_penalized=edge,
+                soft_metrics=soft_metrics_by_group.get(int(mask_data["inds"])),
             )
             selected_records.append(row)
             assembly_masks.append(row["mask"])
@@ -749,7 +812,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-path", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--seed", required=True, type=int, choices=DIAGNOSIS_SEEDS)
-    parser.add_argument("--arm", required=True, choices=["c0", "c1", "c2_ar"])
+    parser.add_argument("--arm", required=True, choices=["c0", "c1", "c2_ar", "c2_e", "c2_u"])
     parser.add_argument("--model-config", default="args.py")
     parser.add_argument("--sam-config", default="sam2_hiera_l")
     parser.add_argument("--crop-size", type=int, default=256)
@@ -785,8 +848,8 @@ def main() -> int:
     declaration = validate_declaration(Path(args.checkpoint_declaration).resolve(), checkpoint, seed=args.seed, arm=args.arm)
     if args.arm in {"c0", "c1"} and not args.reference_performance_summary:
         raise ValueError("C0/C1 diagnosis requires the frozen performance reference summary")
-    if args.arm == "c2_ar" and args.reference_performance_summary:
-        raise ValueError("C2-AR is a new epoch-5 checkpoint and must not be forced to reproduce a C0/C1 reference")
+    if args.arm in {"c2_ar", "c2_e", "c2_u"} and args.reference_performance_summary:
+        raise ValueError("C2 checkpoints are new epoch-5 states and must not be forced to reproduce a C0/C1 reference")
     targets = None
     reference_sha = None
     if args.reference_performance_summary:

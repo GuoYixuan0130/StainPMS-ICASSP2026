@@ -82,6 +82,8 @@ def _decode_training_candidates(
         "c0",
         "c1",
         "c2_ar",
+        "c2_e",
+        "c2_u",
         "coverage_only",
         "quality_only",
     }
@@ -295,6 +297,7 @@ def _record_c2_ar_loss_audit(
             "extra_to_total_ratio_sum": 0.0,
             "foreign_valid_prompt_count": 0,
             "neighbor_pair_count": 0,
+            "valid_prompt_count": 0,
             "unique_tp_count": 0,
             "unmatched_fp_count": 0,
             "duplicate_count": 0,
@@ -317,6 +320,7 @@ def _record_c2_ar_loss_audit(
     utility = loss_audit["utility"]
     audit["foreign_valid_prompt_count"] += int(exclusivity["foreign_valid_prompt_count"])
     audit["neighbor_pair_count"] += int(exclusivity["neighbor_pair_count"])
+    audit["valid_prompt_count"] += int(utility["valid_prompt_count"])
     audit["unique_tp_count"] += int(utility["unique_tp_count"])
     audit["unmatched_fp_count"] += int(utility["unmatched_fp_count"])
     audit["duplicate_count"] += int(utility["duplicate_count"])
@@ -1063,7 +1067,11 @@ def train_on_epoch(
                     # deployed native assembly path. PMS residual/preservation
                     # prompts retain their original C1 supervision but are not
                     # falsely treated as inference-time assembly candidates.
-                    if str(getattr(cfgs, "warmstart_candidate_arm", "")).lower() == "c2_ar":
+                    if str(getattr(cfgs, "warmstart_candidate_arm", "")).lower() in {
+                        "c2_ar",
+                        "c2_e",
+                        "c2_u",
+                    }:
                         selected_logits = all_standard_masks[:, 0]
                         selected_quality = all_standard_quality[:, 0]
                         raw_exclusivity, raw_utility, c2_audit = c2_ar_losses(
@@ -1123,7 +1131,7 @@ def train_on_epoch(
 
                 if (
                     str(getattr(cfgs, "warmstart_candidate_arm", "")).lower()
-                    in {"legacy", "c0", "c1", "c2_ar", "coverage_only", "quality_only"}
+                    in {"legacy", "c0", "c1", "c2_ar", "c2_e", "c2_u", "coverage_only", "quality_only"}
                     and runtime_stats is not None
                     and runtime_stats.get("capture_gradient_audit", True)
                 ):
