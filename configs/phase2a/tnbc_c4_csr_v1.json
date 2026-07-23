@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "protocol_id": "tnbc_c4_conflict_set_structured_ranking_v1",
+  "phase": "2A",
+  "purpose": "C4-CSR ranker-only development evidence after the C3 GT-only feasibility audit",
+  "c3_basis": {
+    "commit": "f298210ad4bdcc532605d4ac0b45ea18c967c2d1",
+    "supported_operator": "conflict_order_oracle",
+    "interpretation": "GT-only feasibility evidence, not deployable performance"
+  },
+  "scope": {
+    "dataset": "tnbc",
+    "train_patients": [1, 2, 3, 4, 5, 6],
+    "development_patients": [7, 8],
+    "sealed_patients": [9, 10, 11],
+    "seeds": [2027, 1337],
+    "source_arm": "c1",
+    "source_epoch": 5,
+    "fixed_development_epoch": 20,
+    "no_third_seed": true,
+    "no_monuseg": true
+  },
+  "frozen_c1": {
+    "candidate_generation": true,
+    "token_selection": true,
+    "selected_masks": true,
+    "native_score": true,
+    "threshold_and_nms": true,
+    "native_assembly": true,
+    "c1_gradient": false
+  },
+  "ranker": {
+    "kind": "component_conditioned_residual_ranker",
+    "width": 64,
+    "node_mlp_layers": 2,
+    "relation_aggregation": "one directed mean/max relation aggregation",
+    "output": "one residual scalar rank key per node",
+    "output_layer_zero_initialized": true,
+    "maximum_parameter_count": 100000,
+    "singleton_policy": "native score/order unchanged",
+    "cross_component_policy": "native score multiset and cross-component ordering unchanged",
+    "component_policy": "permute only the native score multiset using stable residual rank keys; reject a permutation that changes predicted final-instance count"
+  },
+  "training": {
+    "epochs": 20,
+    "optimizer": "AdamW",
+    "learning_rate": 0.001,
+    "weight_decay": 0.0001,
+    "scheduler": "none",
+    "early_stopping": false,
+    "loss": "component-balanced pairwise softplus(-(rank_key_positive-rank_key_negative))",
+    "positive_labels": ["unique_tp"],
+    "negative_labels": ["conflicting_unmatched_fp", "duplicate"],
+    "excluded_pairs": ["singleton_fp", "merge_risk", "positive_positive", "negative_negative"],
+    "normalization_fit_scope": "p1-p6 only"
+  },
+  "inference": {
+    "uses_gt": false,
+    "uses_evaluator_matching": false,
+    "modifies_mask_or_candidate_pool": false,
+    "modifies_keep_threshold": false,
+    "stable_tie_breaker": "native score then original record index"
+  },
+  "promotion_gate": {
+    "all_four_seed_patient_c4_minus_c1_pq_positive": true,
+    "both_seed_patient_macro_c4_minus_c0_pq_positive": true,
+    "both_seed_c4_minus_c1_dq_positive": true,
+    "mean_c4_minus_c0_aji_positive": true,
+    "both_seed_top1_and_pairwise_accuracy_improve_at_least": 0.05,
+    "mean_oracle_recovery_ratio_at_least": 0.25,
+    "selected_masks_candidate_pool_and_selected_oracle_identical": true
+  },
+  "storage": {
+    "retained": ["ranker_epoch20_weights", "ranker_final_training_state", "frozen_train_output_manifest", "configuration", "feature_schema", "logs"],
+    "not_retained": ["epoch_1_to_19_ranker_checkpoints", "duplicate_c1_full_checkpoint_copies"]
+  }
+}

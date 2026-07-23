@@ -108,6 +108,10 @@ def conflict_components(records: list[dict[str, Any]], *, nms_iou: float) -> dic
     return {
         "components": components,
         "component_for_index": component_for_index,
+        "edges": [
+            {"left": int(left), "right": int(right), "reasons": sorted(values)}
+            for (left, right), values in sorted(reasons.items())
+        ],
         "edge_reason_counts": reason_counts,
         "edge_count": len(reasons),
     }
