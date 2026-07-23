@@ -177,7 +177,7 @@ def aggregate_patient(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def patient_macro(patients: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def patient_macro(patients: dict[str, dict[str, Any]], image_rows: list[dict[str, Any]]) -> dict[str, Any]:
     stages = {
         operation: {
             field: float(np.mean([float(patients[str(patient)]["stages_image_macro"][operation][field]) for patient in (7, 8)]))
@@ -185,7 +185,10 @@ def patient_macro(patients: dict[str, dict[str, Any]]) -> dict[str, Any]:
         }
         for operation in OPERATIONS
     }
-    conflict_rows = [patients[str(patient)]["conflicts"] for patient in (7, 8)]
+    # Aggregate the original per-image conflict records.  Patient summaries
+    # already collapse distributions, so feeding those back into this helper
+    # would lose the component-size and score-margin samples.
+    conflict_rows = [row["conflicts"] for row in image_rows]
     # Conflict counts are reported as sums over both patients; scalar rates are
     # also preserved in the constituent per-patient records.
     return {
@@ -274,7 +277,7 @@ def audit_seed(root: Path, seed: int, *, nms_iou: float) -> dict[str, Any]:
         "source_c1_oracle_directory": str(root),
         "per_image": rows,
         "patients": by_patient,
-        "patient_macro": patient_macro(by_patient),
+        "patient_macro": patient_macro(by_patient, rows),
     }
 
 
