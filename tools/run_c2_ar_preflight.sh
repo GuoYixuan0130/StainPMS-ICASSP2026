@@ -18,8 +18,16 @@ fi
 mkdir -p "$run_root/reports" "$run_root/smokes"
 cd "$repo_root"
 
-conda run -n agentseg python -m unittest -v \
-  tests.test_c2_ar tests.test_candidate_coverage tests.test_warmstart_protocol \
+conda run -n agentseg python -m unittest discover -s tests \
+  -p 'test_c2_ar.py' -v \
+  2>&1 | tee "$run_root/reports/test_c2_ar.txt"
+
+conda run -n agentseg python -m unittest discover -s tests \
+  -p 'test_candidate_coverage.py' -v \
+  2>&1 | tee "$run_root/reports/test_candidate_coverage.txt"
+
+conda run -n agentseg python -m unittest discover -s tests \
+  -p 'test_warmstart_protocol.py' -v \
   2>&1 | tee "$run_root/reports/c2_ar_unit_tests.txt"
 
 common=(
