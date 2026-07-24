@@ -3,21 +3,21 @@
 # seed-2027 recovery audit and seed-1337 reconstructed freeze manifest.
 set -euo pipefail
 
-if [[ $# -ne 7 ]]; then
-  echo "usage: $0 REPO_ROOT RECOVERY_2027_MANIFEST RECONSTRUCTED_1337_FREEZE_MANIFEST DEV_2027_ROOT RECONSTRUCTED_C3_ROOT C0_1337_DEV_DIR OUTPUT_ROOT" >&2
+if [[ $# -ne 8 ]]; then
+  echo "usage: $0 REPO_ROOT EXPECTED_COMMIT RECOVERY_2027_MANIFEST RECONSTRUCTED_1337_FREEZE_MANIFEST DEV_2027_ROOT RECONSTRUCTED_C3_ROOT C0_1337_DEV_DIR OUTPUT_ROOT" >&2
   exit 2
 fi
 
 repo_root=$1
-recovery_2027=$2
-freeze_1337=$3
-dev_2027_root=$4
-reconstructed_c3_root=$5
-c0_1337_dev=$6
-output_root=$7
+expected_commit=$2
+recovery_2027=$3
+freeze_1337=$4
+dev_2027_root=$5
+reconstructed_c3_root=$6
+c0_1337_dev=$7
+output_root=$8
 
 expected_branch=research/f3c-stainpms
-expected_commit=26e6c33aa414d2754c4a90588c12e3df86045be0
 [[ "$(git -C "$repo_root" branch --show-current)" == "$expected_branch" ]] || { echo "unexpected branch" >&2; exit 2; }
 [[ "$(git -C "$repo_root" rev-parse HEAD)" == "$expected_commit" ]] || { echo "unexpected commit" >&2; exit 2; }
 [[ -z "$(git -C "$repo_root" status --porcelain)" ]] || { echo "worktree must be clean before C4" >&2; exit 2; }
