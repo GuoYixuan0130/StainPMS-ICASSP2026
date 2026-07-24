@@ -67,7 +67,7 @@ cd "$repo"
 if [[ "$mode" == "prepare" ]]; then
   test_log="$(mktemp /tmp/phase3a_oeoa_tests.XXXXXX.log)"
   trap 'rm -f "$test_log"' EXIT
-  if ! conda run -n agentseg python -m unittest -v tests.test_oeoa tests.test_oeoa_config >"$test_log" 2>&1; then
+  if ! conda run -n agentseg python -m unittest discover -s tests -p 'test_oeoa*.py' -v >"$test_log" 2>&1; then
     tail -n 120 "$test_log" >&2
     exit 1
   fi
