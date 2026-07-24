@@ -50,6 +50,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--checkpoint-declaration", required=True)
+    parser.add_argument("--lineage-contract", required=True)
     parser.add_argument("--data-path", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--seed", type=int, required=True, choices=SEEDS)
@@ -81,24 +82,74 @@ def validate_train_scope(manifest: dict, records: list[dict]) -> None:
         raise ValueError("C4 frozen output exporter rejects all development and sealed TNBC patients before dataset construction")
 
 
-def validate_checkpoint(declaration_path: Path, checkpoint: Path, seed: int) -> dict:
+def require_sha256(value: object, label: str) -> str:
+    if not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+        raise ValueError(f"{label} must be a complete lowercase SHA256")
+    return value
+
+
+def validate_checkpoint(declaration_path: Path, checkpoint: Path, lineage_contract_path: Path, seed: int) -> dict:
     declaration = read_json(declaration_path, "C1 epoch-5 checkpoint declaration")
     observed_sha = sha256_file(checkpoint)
     if declaration.get("checkpoint_sha256") != observed_sha:
         raise ValueError("C1 checkpoint SHA256 does not match its declaration")
-    expected_protocol = {
-        2027: "tnbc_c0_c1_second_seed_2027_v1",
-        1337: "tnbc_c0_c1_third_seed_1337_v1",
-    }[seed]
-    if (
-        declaration.get("dataset") != "tnbc"
-        or declaration.get("classification") != "historical_exploratory"
-        or declaration.get("arm") != "c1"
-        or declaration.get("protocol") != expected_protocol
-        or int(declaration.get("epoch", -1)) != 5
-    ):
-        raise ValueError("C4 requires the strictly paired historical-exploratory C1 epoch-5 full state")
-    return {**declaration, "checkpoint_path": str(checkpoint), "checkpoint_sha256": observed_sha}
+    contract = read_json(lineage_contract_path, "C4 C1 lineage contract")
+    contract_sha = sha256_file(lineage_contract_path)
+    if declaration.get("dataset") != "tnbc" or declaration.get("arm") != "c1" or int(declaration.get("epoch", -1)) != 5:
+        raise ValueError("C4 requires a TNBC C1 epoch-5 declaration")
+    if seed == 2027:
+        recovered = contract.get("best_pq")
+        if (
+            contract.get("protocol") != "tnbc_c1_epoch5_recovery_audit_v1"
+            or int(contract.get("seed", -1)) != 2027
+            or contract.get("status") != "recovered_epoch5_weights_only"
+            or not isinstance(recovered, dict)
+            or Path(str(recovered.get("path", ""))).resolve() != checkpoint
+            or require_sha256(recovered.get("sha256"), "seed-2027 recovered weights SHA256") != observed_sha
+            or recovered.get("load_mode") != "weights_only"
+            or declaration.get("classification") != "historical_exploratory"
+            or declaration.get("protocol") != "tnbc_c0_c1_second_seed_2027_v1"
+            or contract.get("c3_consistency_evidence", {}).get("status") != "pass"
+            or not all(bool(value) for value in contract.get("configuration_identity_conditions", {}).values())
+        ):
+            raise ValueError("seed-2027 C4 source must be the recovery-audited original epoch-5 weights-only lineage")
+        canonical = require_sha256(recovered.get("canonical_model_model1_tensor_sha256"), "seed-2027 canonical model/model1 tensor SHA256")
+        source = {
+            "kind": "recovery_audited_epoch5_weights_only",
+            "recovery_audit_path": str(lineage_contract_path),
+            "recovery_audit_sha256": contract_sha,
+            "weights_only_sha256": observed_sha,
+            "canonical_model_model1_tensor_sha256": canonical,
+            "source_last_state_sha256": require_sha256(recovered.get("embedded_provenance", {}).get("source_last_state_sha256"), "seed-2027 source last-state SHA256"),
+        }
+    else:
+        complete = contract.get("complete_state")
+        weights = contract.get("weights_only")
+        if (
+            contract.get("protocol") != "tnbc_c1_seed1337_reconstructed_epoch5_freeze_v1"
+            or contract.get("status") != "frozen_before_development_access"
+            or contract.get("lineage") != "reconstructed C1 seed-1337 lineage"
+            or not isinstance(complete, dict)
+            or not isinstance(weights, dict)
+            or Path(str(complete.get("path", ""))).resolve() != checkpoint
+            or require_sha256(complete.get("sha256"), "seed-1337 reconstructed complete-state SHA256") != observed_sha
+            or declaration.get("classification") != "historical_exploratory_reconstructed"
+            or declaration.get("protocol") != "tnbc_c1_seed1337_reconstructed_epoch5_v1"
+        ):
+            raise ValueError("seed-1337 C4 source must be the frozen reconstructed epoch-5 full-state lineage")
+        weights_path = Path(str(weights.get("path", ""))).resolve()
+        if not weights_path.is_file() or sha256_file(weights_path) != require_sha256(weights.get("sha256"), "seed-1337 reconstructed weights-only SHA256"):
+            raise ValueError("seed-1337 reconstructed weights-only artifact fails the frozen-manifest SHA256")
+        source = {
+            "kind": "reconstructed_epoch5_full_state",
+            "frozen_epoch5_manifest_path": str(lineage_contract_path),
+            "frozen_epoch5_manifest_sha256": contract_sha,
+            "complete_state_sha256": observed_sha,
+            "weights_only_path": str(weights_path),
+            "weights_only_sha256": require_sha256(weights.get("sha256"), "seed-1337 reconstructed weights-only SHA256"),
+            "canonical_model_model1_tensor_sha256": require_sha256(weights.get("canonical_model_model1_tensor_sha256"), "seed-1337 canonical model/model1 tensor SHA256"),
+        }
+    return {**declaration, "checkpoint_path": str(checkpoint), "checkpoint_sha256": observed_sha, "lineage_contract": source}
 
 
 def compact_artifact(artifact: dict) -> dict:
@@ -130,7 +181,7 @@ def main() -> int:
     manifest, records = load_dataset_manifest(manifest_path, expected_dataset="tnbc", require_labels=True, verify_hashes=True)
     validate_train_scope(manifest, records)
     checkpoint = Path(args.checkpoint).resolve()
-    declaration = validate_checkpoint(Path(args.checkpoint_declaration).resolve(), checkpoint, args.seed)
+    declaration = validate_checkpoint(Path(args.checkpoint_declaration).resolve(), checkpoint, Path(args.lineage_contract).resolve(), args.seed)
     output = Path(args.output_dir).resolve()
     completed_dir = output / "completed_images"
     progress_path = output / "progress.json"
@@ -141,6 +192,7 @@ def main() -> int:
         "arm": "c1",
         "manifest_sha256": manifest["manifest_sha256"],
         "checkpoint_sha256": declaration["checkpoint_sha256"],
+        "lineage_contract": declaration["lineage_contract"],
         "frozen_inference": {
             "crop_size": args.crop_size, "out_size": args.out_size, "overlap": args.overlap,
             "load": args.load, "point_nms_thr": args.point_nms_thr,
@@ -170,11 +222,11 @@ def main() -> int:
     torch.cuda.set_device(args.gpu_device)
     device = torch.device("cuda", int(torch.cuda.current_device()))
     model_config = Config.fromfile(str(Path(args.model_config).resolve()))
-    net = build_sam2(args.sam_config, str(checkpoint), device=device, checkpoint_has_training_state=True)
+    net = build_sam2(args.sam_config, str(checkpoint), device=device, checkpoint_has_training_state=declaration["lineage_contract"]["kind"] == "reconstructed_epoch5_full_state")
     point_net, point_encoder = build_model(model_config)
     point_net.to(device).eval()
     point_encoder.to(device).eval()
-    state = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    state = torch.load(checkpoint, map_location="cpu", weights_only=declaration["lineage_contract"]["kind"] == "recovery_audited_epoch5_weights_only")
     if list(state.get("texture_memory_bank_list", []) or []):
         raise ValueError("C4 requires the approved empty embedded C1 texture bank")
     missing, unexpected = point_net.load_state_dict(state["model1"], strict=False)

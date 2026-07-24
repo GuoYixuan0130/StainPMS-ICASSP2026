@@ -124,13 +124,46 @@ def compact_sources(root: Path, *, expected_count: int, patients: set[int], seed
     summary = read_json(root / "summary.json")
     if summary.get("status") != "complete" or int(summary.get("seed", -1)) != seed:
         raise ValueError(f"invalid {kind} source summary for seed {seed}: {root}")
-    if summary.get("arm") != "c1":
+    expected_arm = "c1_reconstructed" if seed == 1337 and expected_count == 7 else "c1"
+    if summary.get("arm") != expected_arm:
         raise ValueError(f"C4 {kind} source must be frozen C1, not {summary.get('arm')}: {root}")
     artifacts = [read_gzip_json(path) for path in sorted((root / "completed_images").glob("*.json.gz"))]
     observed = {int(item["artifact"]["patient"]) for item in artifacts}
     if len(artifacts) != expected_count or observed != patients:
         raise ValueError(f"C4 {kind} source scope mismatch at {root}: count={len(artifacts)} patients={sorted(observed)}")
     return artifacts
+
+
+def validate_development_c1_lineage(root: Path, *, seed: int, prepared_config: dict[str, Any], c3_reference: dict[str, Any]) -> None:
+    """Fail closed on the approved C1/C3 source pair for development replay."""
+
+    summary = read_json(root / "summary.json")
+    source_root = Path(str(c3_reference["source_c1_oracle_directory"])).resolve()
+    if root != source_root:
+        raise ValueError(f"seed-{seed} C4 development source is not the exact C1 source used by the frozen C3 audit")
+    expected = prepared_config["frozen_c1_train_sources"][str(seed)]["lineage_contract"]
+    checkpoint = summary.get("checkpoint", {})
+    if seed == 2027:
+        if (
+            expected.get("kind") != "recovery_audited_epoch5_weights_only"
+            or summary.get("arm") != "c1"
+            or checkpoint.get("checkpoint_sha256") != expected.get("source_last_state_sha256")
+        ):
+            raise ValueError("seed-2027 C4 development C1 must link the recovery-audited weights-only source to its historical C3 state")
+    else:
+        frozen = summary.get("frozen_epoch5_manifest", {})
+        source_identity = c3_reference["source_identity"]
+        if (
+            expected.get("kind") != "reconstructed_epoch5_full_state"
+            or summary.get("arm") != "c1_reconstructed"
+            or checkpoint.get("checkpoint_sha256") != expected.get("complete_state_sha256")
+            or checkpoint.get("checkpoint_sha256") != source_identity.get("checkpoint_sha256")
+            or frozen.get("status") != "frozen_before_development_access"
+            or frozen.get("lineage") != "reconstructed C1 seed-1337 lineage"
+            or frozen.get("sha256") != expected.get("frozen_epoch5_manifest_sha256")
+            or frozen.get("sha256") != source_identity.get("frozen_epoch5_manifest_sha256")
+        ):
+            raise ValueError("seed-1337 C4 development C1 must use only the frozen reconstructed lineage paired with reconstructed C3")
 
 
 def c0_sources(root: Path, *, seed: int) -> list[dict[str, Any]]:
@@ -222,6 +255,8 @@ def prepare(args: argparse.Namespace) -> int:
     config = read_json(config_path)
     if config.get("protocol_id") != "tnbc_c4_conflict_set_structured_ranking_v1":
         raise ValueError("unexpected C4 pre-registered configuration")
+    c3_audit = Path(args.c3_audit).resolve()
+    c3_reference = load_c3_reference(c3_audit)
     output = Path(args.output_dir).resolve()
     if output.exists():
         raise FileExistsError(f"refusing to overwrite C4 preparation directory: {output}")
@@ -251,12 +286,14 @@ def prepare(args: argparse.Namespace) -> int:
         frozen_sources[str(seed)] = {
             "directory": str(sources[seed]), "summary_sha256": sha256_file(sources[seed] / "summary.json"),
             "manifest_sha256": summary["manifest"]["sha256"], "checkpoint_sha256": summary["checkpoint"]["checkpoint_sha256"],
+            "lineage_contract": summary["checkpoint"]["lineage_contract"],
         }
     preregistered = {
         "schema_version": 1, "status": "frozen_before_development_read", "static_config_path": str(config_path),
         "static_config_sha256": sha256_file(config_path), "protocol": config["protocol_id"],
         "seeds": list(SEEDS), "train_scope": "TNBC p1-p6 only", "development_scope": "not read during preparation",
         "frozen_c1_train_sources": frozen_sources,
+        "frozen_c3_reference": {"path": str(c3_audit), "sha256": sha256_file(c3_audit), "per_seed": c3_reference},
         "ranker": config["ranker"], "training": config["training"], "inference": config["inference"],
         "instance_nms_iou": float(args.instance_nms_iou), "oracle_match_iou": ORACLE_MATCH_IOU,
     }
@@ -564,16 +601,44 @@ def patient_summary(rows: list[dict[str, Any]], arm: str) -> dict[str, Any]:
     return {"patients": patients, "patient_macro": {"c4": macro_stages["c4"], "c1": macro_stages["c1"], "c0": macro_stages["c0"], "c4_minus_c1": delta_stage(macro_stages["c4"], macro_stages["c1"]), "c4_minus_c0": delta_stage(macro_stages["c4"], macro_stages["c0"]), "ranking": aggregate_ranking(rows), "accounting": accounting, "errors": errors}}
 
 
-def load_c3_conflict_gains(path: Path) -> dict[int, float]:
+def load_c3_reference(path: Path) -> dict[str, dict[str, Any]]:
     payload = read_json(path)
-    if payload.get("c3_gate", {}).get("single_supported_operation") != "conflict_order_oracle":
-        raise ValueError("C4 requires the frozen C3 conflict-order-supported audit")
-    gains = {}
+    if (
+        payload.get("status") != "complete"
+        or payload.get("c3_gate", {}).get("single_supported_operation") != "conflict_order_oracle"
+        or payload.get("lineage", {}).get("seed2027") != "historical verified C1 epoch-5 lineage"
+        or payload.get("lineage", {}).get("seed1337") != "reconstructed C1 seed-1337 lineage"
+    ):
+        raise ValueError("C4 requires the reconstructed joint C3 conflict-order-supported audit")
+    references: dict[str, dict[str, Any]] = {}
     for row in payload["per_seed"]:
-        gains[int(row["seed"])] = float(row["patient_macro"]["deltas_vs_native_patient_macro"]["conflict_order_oracle"]["pq"])
-    if set(gains) != set(SEEDS):
+        seed = int(row["seed"])
+        conflict = row["patient_macro"]["conflicts_both_patients"]
+        reference = {
+            "conflict_order_oracle_delta_pq": float(row["patient_macro"]["deltas_vs_native_patient_macro"]["conflict_order_oracle"]["pq"]),
+            "native_top1_accuracy": float(conflict["unique_tp_native_top1"]["accuracy"]),
+            "native_pairwise_accuracy": float(conflict["pairwise_ordering"]["all_negative"]["accuracy"]),
+            "source_c1_oracle_directory": str(row["source_c1_oracle_directory"]),
+            "source_identity": row.get("source_identity"),
+        }
+        if seed == 2027:
+            reused = row.get("historical_c3_reused_without_rerun")
+            if (
+                not isinstance(reused, dict)
+                or not isinstance(reused.get("path"), str)
+                or not isinstance(reused.get("sha256"), str)
+                or len(reused["sha256"]) != 64
+                or payload.get("historical_seed_reuse", {}).get("2027") != reused
+            ):
+                raise ValueError("seed-2027 C4 requires the historical C3 record to be reused without rerun")
+        if seed == 1337:
+            identity = reference["source_identity"]
+            if not isinstance(identity, dict) or identity.get("lineage") != "reconstructed C1 seed-1337 lineage":
+                raise ValueError("seed-1337 C4 requires reconstructed C3 source identity")
+        references[str(seed)] = reference
+    if {int(seed) for seed in references} != set(SEEDS):
         raise ValueError("C3 audit lacks one of the fixed seeds")
-    return gains
+    return references
 
 
 def evaluate(args: argparse.Namespace) -> int:
@@ -586,12 +651,17 @@ def evaluate(args: argparse.Namespace) -> int:
     output = Path(args.output_dir).resolve()
     if output.exists():
         raise FileExistsError(f"refusing to overwrite C4 evaluation output: {output}")
-    c3_gains = load_c3_conflict_gains(Path(args.c3_audit).resolve())
+    c3_audit = Path(args.c3_audit).resolve()
+    c3_reference = load_c3_reference(c3_audit)
     output.mkdir(parents=True, exist_ok=False)
     all_seed = []
     device = torch.device("cuda", int(args.gpu_device)); torch.cuda.set_device(device)
     for seed in SEEDS:
         config, schema = read_prepared(prepared, seed)
+        frozen_c3 = config.get("frozen_c3_reference", {})
+        if frozen_c3.get("sha256") != sha256_file(c3_audit) or frozen_c3.get("per_seed") != c3_reference:
+            raise ValueError("C4 evaluation C3 reference differs from the reference frozen before development access")
+        validate_development_c1_lineage(c1[seed], seed=seed, prepared_config=config, c3_reference=c3_reference[str(seed)])
         dev_c1 = compact_sources(c1[seed], expected_count=7, patients={7, 8}, seed=seed, kind="p7-p8 development")
         dev_c0 = c0_sources(c0[seed], seed=seed)
         c0_by_sample = {str(payload["artifact"]["sample_id"]): payload for payload in dev_c0}
@@ -629,11 +699,11 @@ def evaluate(args: argparse.Namespace) -> int:
         result = {
             "schema_version": 1, "status": "complete", "seed": seed, "mode": "zero_residual_preflight" if args.zero_residual else "trained_epoch20", "parameter_count": parameter_count,
             "source": {"c1": str(c1[seed]), "c0": str(c0[seed]), "ranker_weights": (None if args.zero_residual else str(weights[seed])), "ranker_weights_sha256": (None if args.zero_residual else sha256_file(weights[seed]))},
-            "per_image": rows, **patient_summary(rows, "c4"), "c3_conflict_order_oracle_delta_pq": c3_gains[seed],
+            "per_image": rows, **patient_summary(rows, "c4"), "c3_conflict_order_oracle_delta_pq": c3_reference[str(seed)]["conflict_order_oracle_delta_pq"],
         }
         write_json_atomic(output / f"seed{seed}_evaluation.json", result)
         all_seed.append(result)
-    aggregate = summarize_evaluations(all_seed, c3_gains, zero_residual=bool(args.zero_residual))
+    aggregate = summarize_evaluations(all_seed, c3_reference, zero_residual=bool(args.zero_residual))
     write_json_atomic(output / ("c4_csr_zero_residual_gate.json" if args.zero_residual else "c4_csr_results.json"), aggregate)
     if not args.zero_residual:
         write_csv(output / "c4_csr_results.csv", aggregate)
@@ -642,7 +712,7 @@ def evaluate(args: argparse.Namespace) -> int:
     return 0
 
 
-def summarize_evaluations(per_seed: list[dict[str, Any]], c3_gains: dict[int, float], *, zero_residual: bool) -> dict[str, Any]:
+def summarize_evaluations(per_seed: list[dict[str, Any]], c3_reference: dict[str, dict[str, Any]], *, zero_residual: bool) -> dict[str, Any]:
     gate_conditions: dict[str, bool] = {}
     if zero_residual:
         pass_all = all(not row["native_reproduction"]["metric_mismatch"] and row["native_reproduction"]["final_map_identical"] and all(bool(value) for value in row["invariance"].values()) for seed in per_seed for row in seed["per_image"])
@@ -651,7 +721,8 @@ def summarize_evaluations(per_seed: list[dict[str, Any]], c3_gains: dict[int, fl
     for row in per_seed:
         seed = int(row["seed"])
         delta = float(row["patient_macro"]["c4_minus_c1"]["pq"])
-        recovery[str(seed)] = float(delta / c3_gains[seed]) if c3_gains[seed] else None
+        denominator = float(c3_reference[str(seed)]["conflict_order_oracle_delta_pq"])
+        recovery[str(seed)] = float(delta / denominator) if denominator else None
     gate_conditions["all_four_seed_patient_c4_minus_c1_pq_positive"] = all(float(row["patients"][str(patient)]["c4_minus_c1"]["pq"]) > 0.0 for row in per_seed for patient in (7, 8))
     gate_conditions["both_seed_patient_macro_c4_minus_c0_pq_positive"] = all(float(row["patient_macro"]["c4_minus_c0"]["pq"]) > 0.0 for row in per_seed)
     gate_conditions["both_seed_c4_minus_c1_dq_positive"] = all(float(row["patient_macro"]["c4_minus_c1"]["dq"]) > 0.0 for row in per_seed)
@@ -659,8 +730,8 @@ def summarize_evaluations(per_seed: list[dict[str, Any]], c3_gains: dict[int, fl
     ordering_improvements = []
     for row in per_seed:
         ranking = row["patient_macro"]["ranking"]
-        c3_top = {2027: 0.4530791788856305, 1337: 0.4256259204712813}[int(row["seed"])]
-        c3_pair = {2027: 0.5900652282990466, 1337: 0.5840037860861335}[int(row["seed"])]
+        c3_top = float(c3_reference[str(row["seed"])]["native_top1_accuracy"])
+        c3_pair = float(c3_reference[str(row["seed"])]["native_pairwise_accuracy"])
         ordering_improvements.append({"seed": row["seed"], "top1_delta": float(ranking["unique_tp_top1"]["accuracy"] - c3_top), "pairwise_delta": float(ranking["pairwise_ordering"]["all_negative"]["accuracy"] - c3_pair)})
     gate_conditions["both_seed_top1_and_pairwise_accuracy_improve_at_least_0_05"] = all(item["top1_delta"] >= 0.05 and item["pairwise_delta"] >= 0.05 for item in ordering_improvements)
     gate_conditions["mean_oracle_recovery_ratio_at_least_0_25"] = float(np.mean([value for value in recovery.values() if value is not None])) >= 0.25
@@ -709,7 +780,7 @@ def parse_args() -> argparse.Namespace:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--instance-nms-iou", type=float, default=0.5)
     prep = sub.add_parser("prepare", parents=(common,))
-    prep.add_argument("--config", required=True); prep.add_argument("--train-source", action="append", required=True, type=parse_assignment); prep.add_argument("--output-dir", required=True)
+    prep.add_argument("--config", required=True); prep.add_argument("--train-source", action="append", required=True, type=parse_assignment); prep.add_argument("--c3-audit", required=True); prep.add_argument("--output-dir", required=True)
     train_p = sub.add_parser("train")
     train_p.add_argument("--prepared-dir", required=True); train_p.add_argument("--train-source", required=True); train_p.add_argument("--seed", type=int, required=True, choices=SEEDS); train_p.add_argument("--output-dir", required=True); train_p.add_argument("--gpu-device", type=int, default=0)
     eval_p = sub.add_parser("evaluate")
