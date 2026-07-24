@@ -1,0 +1,106 @@
+{
+  "schema_version": 1,
+  "protocol_id": "tnbc_phase3a_orthogonal_error_oracle_audit_v1",
+  "phase": "3A",
+  "purpose": "GT-only decomposition of residual C1 final-instance error; diagnostic upper bounds only, never deployable performance",
+  "scope": {
+    "dataset": "tnbc",
+    "development_patients": [7, 8],
+    "sealed_patients": [9, 10, 11],
+    "seeds": [2027, 1337],
+    "c1_source": "fixed epoch-5 C1 compact artifacts",
+    "baseline": "strictly paired C0 compact artifacts",
+    "forbidden": [
+      "model training",
+      "new model module",
+      "C4 adjustment",
+      "C1 modification",
+      "third seed",
+      "p1-p6 training",
+      "p9-p11 access",
+      "MoNuSeg access"
+    ]
+  },
+  "lineage": {
+    "seed2027": "recovery-audited original C1 epoch-5 weights-only lineage and historical C3 only",
+    "seed1337": "reconstructed C1 seed-1337 epoch-5 lineage and reconstructed C3 only",
+    "disallowed_seed1337": "historical unrecoverable C1/C3 artifacts and their metrics"
+  },
+  "evaluator": {
+    "implementation": "stainpms.evaluator.evaluate_instance_pair",
+    "mode": "strict",
+    "match_iou": 0.5,
+    "standard_pq_rule": "repository strict evaluator; historical exact-0.5 compatibility follows its pairing implementation",
+    "reported_metrics": ["dice1", "dice2", "aji", "dq", "sq", "pq"],
+    "aggregation": "mean images within each patient, then equal mean of patients 7 and 8; two-seed macro is equal mean of seed patient-macros"
+  },
+  "overlap_graph": {
+    "nodes": ["native_final_prediction_instance", "ground_truth_instance"],
+    "edge": "at least one intersecting pixel",
+    "isolated_nodes": "each remains a connected component",
+    "component_categories": {
+      "tp_boundary": "P=1,G=1 and the pair is a standard-PQ TP; replace prediction with GT",
+      "subthreshold_1to1": "P=1,G=1 and not a standard-PQ TP; replace prediction with GT",
+      "merge": "P=1,G>=2; delete prediction and insert all component GT",
+      "split_or_duplicate": "P>=2,G=1; delete all predictions and insert component GT",
+      "complex_topology": "P>=2,G>=2; delete all predictions and insert all component GT",
+      "pure_fn": "P=0,G>=1; insert all component GT",
+      "pure_fp": "P>=1,G=0; delete all component predictions"
+    }
+  },
+  "atomic_actions": [
+    "tp_boundary",
+    "subthreshold_1to1",
+    "merge",
+    "split_or_duplicate",
+    "complex_topology",
+    "pure_fn",
+    "pure_fp"
+  ],
+  "routes": {
+    "mask_boundary": ["tp_boundary"],
+    "local_mask_rescue": ["subthreshold_1to1"],
+    "topology": ["merge", "split_or_duplicate", "complex_topology"],
+    "coverage": ["pure_fn"],
+    "precision": ["pure_fp"],
+    "mask_quality_total": ["tp_boundary", "subthreshold_1to1"],
+    "detection_total": ["pure_fn", "pure_fp"]
+  },
+  "combinatorics": {
+    "all_atomic_subsets": 128,
+    "interaction": "for each unordered pair A,B: Delta(A+B)-Delta(A)-Delta(B), with every Delta measured from C1",
+    "shapley": "exact seven-action Shapley values across all 128 subsets for AJI and PQ",
+    "minimal_subsets": [
+      "two-seed macro C0-relative AJI or PQ >= +0.020",
+      "each seed's equal-patient macro C0-relative AJI or PQ >= +0.020"
+    ]
+  },
+  "candidate_pool_localization": {
+    "fn_definition": "native-final standard-PQ FN GT only",
+    "classification_priority": [
+      "assembly_or_keep_miss: selected-pool maximum IoU > 0.5",
+      "selection_miss: all-candidate maximum IoU > 0.5 and selected-pool maximum IoU <= 0.5",
+      "candidate_mask_near_miss: all-candidate maximum IoU in (0,0.5]",
+      "generation_miss: all-candidate maximum IoU = 0"
+    ],
+    "near_miss_bins": ["(0,0.1)", "[0.1,0.3)", "[0.3,0.5]"],
+    "pool_matching": "native prompt-group-constrained, maximum number of IoU>0.5 matches then maximum total IoU; reported PQ is a theoretical candidate-set ceiling"
+  },
+  "target": {
+    "c0_relative_gain": 0.02,
+    "required_recovery": "(0.020-(C1-C0))/(oracle-C1)",
+    "nonpositive_oracle_gain": "impossible",
+    "required_recovery_above_one": "oracle_cannot_reach_target"
+  },
+  "quality_controls": [
+    "zero action exactly reproduces C1 map and formal strict metrics",
+    "all seven actions produce the GT map exactly",
+    "all outputs are non-overlapping instance label maps",
+    "relabeling leaves formal metrics unchanged",
+    "all 128 subsets are invariant to action order",
+    "Shapley contributions sum to all-oracle minus C1",
+    "C0/C1 case ID and GT maps match per seed",
+    "seed1337 source is reconstructed lineage only",
+    "audit has no model, trainer, optimiser, or weight-update operation"
+  ]
+}
