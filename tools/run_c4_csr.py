@@ -60,6 +60,14 @@ SEEDS = (2027, 1337)
 TASK_FIELDS = ("dice1", "dice2", "aji", "dq", "sq", "pq")
 STAGE_FIELDS = ("tp", "fp", "fn", "dq", "sq", "pq")
 SIZE_BINS = (("2", 2, 2), ("3_4", 3, 4), ("5_8", 5, 8), ("9_plus", 9, None))
+INVARIANCE_TRUE_FIELDS = (
+    "selected_oracle_identical",
+    "singleton_scores_unchanged",
+    "candidate_pool_unchanged",
+    "mask_unchanged",
+    "keep_threshold_unchanged",
+)
+INVARIANCE_FALSE_FIELDS = ("inference_uses_gt", "inference_uses_evaluator_matching")
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -223,6 +231,14 @@ def compact_stage(stage: dict[str, Any]) -> dict[str, Any]:
         "final_instance_count": int(stage.get("final_instance_count", 0)),
         "strict_metrics": {name: stage.get("strict_metrics", {}).get(name) for name in TASK_FIELDS},
     }
+
+
+def invariance_passes(invariance: dict[str, Any]) -> bool:
+    """Check C4's affirmative invariants and its required negative-use claims."""
+
+    return all(invariance.get(field) is True for field in INVARIANCE_TRUE_FIELDS) and all(
+        invariance.get(field) is False for field in INVARIANCE_FALSE_FIELDS
+    )
 
 
 def average_stage(rows: Iterable[dict[str, Any]]) -> dict[str, Any]:
@@ -692,7 +708,7 @@ def evaluate(args: argparse.Namespace) -> int:
                 "selected_pool_oracle_pq": float(c0_selected_oracle["pq"]),
             }
             rows.append(result)
-        failures = [row["sample_id"] for row in rows if row["native_reproduction"]["metric_mismatch"] or not row["native_reproduction"]["final_map_identical"] or not all(bool(value) for value in row["invariance"].values())]
+        failures = [row["sample_id"] for row in rows if row["native_reproduction"]["metric_mismatch"] or not row["native_reproduction"]["final_map_identical"] or not invariance_passes(row["invariance"])]
         if failures:
             write_json_atomic(output / f"seed{seed}_failure.json", {"seed": seed, "failure_samples": failures, "rows": rows})
             raise RuntimeError(f"C4 invariance/reproduction gate failed for seed {seed}: {failures}")
@@ -715,7 +731,7 @@ def evaluate(args: argparse.Namespace) -> int:
 def summarize_evaluations(per_seed: list[dict[str, Any]], c3_reference: dict[str, dict[str, Any]], *, zero_residual: bool) -> dict[str, Any]:
     gate_conditions: dict[str, bool] = {}
     if zero_residual:
-        pass_all = all(not row["native_reproduction"]["metric_mismatch"] and row["native_reproduction"]["final_map_identical"] and all(bool(value) for value in row["invariance"].values()) for seed in per_seed for row in seed["per_image"])
+        pass_all = all(not row["native_reproduction"]["metric_mismatch"] and row["native_reproduction"]["final_map_identical"] and invariance_passes(row["invariance"]) for seed in per_seed for row in seed["per_image"])
         return {"schema_version": 1, "protocol": "tnbc_c4_csr_v1", "status": "complete", "mode": "zero_residual_preflight", "per_seed": per_seed, "promotion_gate": {"status": "pass" if pass_all else "fail", "all_zero_residual_and_c1_invariance_checks": pass_all}}
     recovery = {}
     for row in per_seed:

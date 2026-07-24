@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tools.run_c4_csr import load_c3_reference
+from tools.run_c4_csr import invariance_passes, load_c3_reference
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +57,20 @@ class C4CSRConfigTests(unittest.TestCase):
         self.assertAlmostEqual(reference["1337"]["conflict_order_oracle_delta_pq"], 0.012228712451025858)
         self.assertAlmostEqual(reference["1337"]["native_top1_accuracy"], 0.4424778761061947)
         self.assertAlmostEqual(reference["1337"]["native_pairwise_accuracy"], 0.5916206261510129)
+
+    def test_invariance_gate_requires_false_for_gt_and_evaluator_use(self):
+        invariance = {
+            "selected_oracle_identical": True,
+            "singleton_scores_unchanged": True,
+            "candidate_pool_unchanged": True,
+            "mask_unchanged": True,
+            "keep_threshold_unchanged": True,
+            "inference_uses_gt": False,
+            "inference_uses_evaluator_matching": False,
+        }
+        self.assertTrue(invariance_passes(invariance))
+        self.assertFalse(invariance_passes({**invariance, "inference_uses_gt": True}))
+        self.assertFalse(invariance_passes({**invariance, "selected_oracle_identical": False}))
 
 
 if __name__ == "__main__":
